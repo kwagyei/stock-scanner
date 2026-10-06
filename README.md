@@ -82,11 +82,35 @@ The PC must be on at those times.
 
 1. **Verify the tickers.** Search each one on finance.yahoo.com. Any symbol that returns
    no data is listed in red at the top of the digest.
-2. **Extend the watchlist.** Add the small caps you care about. 30–60 stocks is a good size.
-   Use a distinctive `query` for names that cause news noise (e.g. "Elon Group", not "Elon").
+2. **Extend the watchlist.** Either add rows by hand (`source` = `manual`), or rebuild it
+   from the exchange lists (see below). Use a distinctive `query` for names that cause
+   news noise (e.g. "Elon Group", not "Elon").
 3. **Leave the rules alone for 2–3 months.** Don't tune thresholds after every run, or you'll
    fit the noise. After about 30 closed paper trades, compare the average return with the
    index column. If the signals don't beat the index on paper, they won't with real money.
+
+## Rebuilding the watchlist
+
+```
+python build_watchlist.py --dry-run   # see what would change
+python build_watchlist.py             # write watchlist.csv and data/watchlist_review.csv
+```
+
+It takes every share on Nasdaq Stockholm Small Cap and First North Stockholm
+(about 440), keeps those with a median daily turnover of at least 1 M SEK over the last
+60 days (one share class per company), and finds each company's MFN feed by ISIN.
+Rows with `source` = `manual` are always kept. Anything that fails a check (new listing,
+no Yahoo data, no MFN match) goes to `data/watchlist_review.csv`; add it by hand as a
+manual row if you want it. Settings are under `universe:` in `config.yaml`.
+
+Run it by hand about once a month, look at the diff, then commit. Each build writes a new
+`# version:` line, and new paper trades are tagged with it (`universe` column), so the
+weekly summary can show results per watchlist version. Trades from before versioning are
+`v1`.
+
+The lists come from Nasdaq Nordic's public share screener (`api.nasdaq.com`), which
+is the data behind nasdaqomxnordic.com, not a documented API. If it changes, the
+builder stops with an error and your watchlist is left as it is.
 
 ## Known limitations (v1)
 

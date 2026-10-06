@@ -162,7 +162,7 @@ def test_missing_and_short_history_tickers_reported(cfg, tmp_paths, monkeypatch)
 def pending_trade(ticker="X.ST", signal_date="2026-06-01"):
     rec = {c: "" for c in scanner.PAPER_COLUMNS}
     rec.update(id=f"{ticker}-{signal_date}", ticker=ticker, name="X",
-               signal_date=signal_date, score="4", status="pending")
+               signal_date=signal_date, score="4", status="pending", universe="v1")
     return pd.DataFrame([rec], columns=scanner.PAPER_COLUMNS)
 
 
@@ -540,3 +540,32 @@ def test_main_weekly_writes_report_and_one_row_per_week(cfg, tmp_paths, monkeypa
     assert "Signal hit rate" in html and "X.ST" in html
     assert (tmp_paths / "reports" / f"weekly_{log.iloc[0]['week']}.html").exists()
     assert sent == []                                   # --no-email respected
+
+
+# --------------------------------------------------------------------------- watchlist versions
+
+def test_watchlist_version(tmp_path):
+    wl = tmp_path / "w.csv"
+    wl.write_text("# note\nticker,name\nA.ST,A\n")
+    assert scanner.watchlist_version(wl) == "v1"
+    wl.write_text("# note\n# version: auto-2026-10-06\nticker,name\nA.ST,A\n")
+    assert scanner.watchlist_version(wl) == "auto-2026-10-06"
+    assert list(scanner.load_watchlist(wl)["ticker"]) == ["A.ST"]
+
+
+def test_new_trades_tagged_and_old_trades_backfilled(cfg, tmp_paths):
+    rows = [{"ticker": "B.ST", "name": "B", "date": "2026-06-02", "score": 4}]
+    p = scanner.add_paper_signals(pending_trade("A.ST"), rows, cfg, "auto-2026-10-06")
+    assert list(p["universe"]) == ["v1", "auto-2026-10-06"]
+    scanner.DATA_DIR.mkdir()
+    scanner.PAPER_LOG.write_text("id,ticker,status\nX-1,X.ST,pending\n")    # pre-versioning file
+    assert scanner.load_paper().iloc[0]["universe"] == "v1"
+
+
+def test_weekly_paper_split_by_universe():
+    a = _trade("A", "closed", "2026-09-20", "30.00", "2.00")
+    b = _trade("B", "closed", "2026-10-06", "-10.00", "1.00")
+    a["universe"], b["universe"] = "v1", "auto-2026-10-06"
+    wp = scanner.weekly_paper(pd.DataFrame([a, b], columns=scanner.PAPER_COLUMNS), dt.date(2026, 10, 5), 10000)
+    assert wp["by_universe"]["v1"]["pnl_sek"] == pytest.approx(3000)
+    assert wp["by_universe"]["auto-2026-10-06"]["avg_return"] == pytest.approx(-10)

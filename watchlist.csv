@@ -1,18 +1,73 @@
-# ticker = Yahoo Finance symbol (Stockholm listings end in .ST). Verify each on finance.yahoo.com.
-# query  = optional news search phrase; defaults to name. Use a distinctive phrase to avoid noise.
-# mfn_slug = optional company slug on mfn.se (feed: https://mfn.se/all/a/<slug>.rss). Blank = Google News only.
-ticker,name,query,mfn_slug
-SIVE.ST,Sivers Semiconductors,Sivers Semiconductors,sivers-semiconductors
-ACCON.ST,Acconeer,Acconeer,acconeer
-MVIR.ST,Medivir,Medivir,medivir
-ELTEL.ST,Eltel,Eltel,eltel
-INQ.ST,INQ Group (ex Anoto),INQ Group,inq-group
-EPIS-B.ST,Episurf Medical,Episurf,episurf-medical
-WYLD.ST,Wyld Networks,Wyld Networks,wyld-networks
-MILDEF.ST,MilDef Group,MilDef,mildef-group
-FNM.ST,Ferronordic,Ferronordic,ferronordic
-PREC.ST,Precise Biometrics,Precise Biometrics,precise-biometrics
-HTRO.ST,Hexatronic,Hexatronic,hexatronic-group
-NCAB.ST,NCAB Group,NCAB,ncab-group
-SEYE.ST,Smart Eye,Smart Eye,smart-eye
-CTM.ST,Catena Media,Catena Media,catena-media
+# ticker = Yahoo Finance symbol (Stockholm listings end in .ST).
+# query  = news search phrase. mfn_slug = company slug on mfn.se (blank = Google News only).
+# source = manual rows are kept by build_watchlist.py; auto rows are rebuilt on every run.
+#          To customise an auto row (e.g. a better query), change its source to manual.
+# version: auto-2026-10-06
+# built 2026-10-06 by build_watchlist.py: 52 auto rows (Nasdaq Stockholm Small Cap + First North, liquidity-filtered)
+ticker,name,query,mfn_slug,source
+SIVE.ST,Sivers Semiconductors,Sivers Semiconductors,sivers-semiconductors,manual
+ACCON.ST,Acconeer,Acconeer,acconeer,manual
+MVIR.ST,Medivir,Medivir,medivir,manual
+ELTEL.ST,Eltel,Eltel,eltel,manual
+INQ.ST,INQ Group (ex Anoto),INQ Group,inq-group,manual
+EPIS-B.ST,Episurf Medical,Episurf,episurf-medical,manual
+WYLD.ST,Wyld Networks,Wyld Networks,wyld-networks,manual
+MILDEF.ST,MilDef Group,MilDef,mildef-group,manual
+FNM.ST,Ferronordic,Ferronordic,ferronordic,manual
+PREC.ST,Precise Biometrics,Precise Biometrics,precise-biometrics,manual
+HTRO.ST,Hexatronic,Hexatronic,hexatronic-group,manual
+NCAB.ST,NCAB Group,NCAB,ncab-group,manual
+SEYE.ST,Smart Eye,Smart Eye,smart-eye,manual
+CTM.ST,Catena Media,Catena Media,catena-media,manual
+AAC.ST,AAC Clyde Space,AAC Clyde Space,aac-clyde-space,auto
+ALZCUR.ST,AlzeCure Pharma,AlzeCure Pharma,alzecure-pharma,auto
+ALZ.ST,Alzinova,Alzinova,alzinova,auto
+BAHN-B.ST,Bahnhof,Bahnhof,bahnhof,auto
+BEAMMW-B.ST,BeammWave,BeammWave,beammwave,auto
+BERNER-B.ST,Berner Industrier,Berner Industrier,berner-industrier,auto
+BORG.ST,Björn Borg,Björn Borg,bjorn-borg,auto
+BULTEN.ST,Bulten,Bulten,bulten,auto
+CANTA.ST,Cantargia,Cantargia,cantargia,auto
+CARA.ST,Carasent,Carasent,carasent,auto
+CRNO-B.ST,Cereno Scientific,Cereno Scientific,cereno-scientific,auto
+CHEF.ST,Cheffelo,Cheffelo,cheffelo,auto
+CLAV.ST,Clavister,Clavister,clavister,auto
+COFFEE-B.ST,Coffee Stain Group,Coffee Stain Group,coffee-stain,auto
+DICOT.ST,Dicot Pharma,Dicot Pharma,dicot-pharma,auto
+EG7.ST,Enad Global 7,Enad Global 7,enad-global-7,auto
+EOLU-B.ST,Eolus,Eolus,eolus,auto
+GENO.ST,Genovis,Genovis,genovis,auto
+GOMX.ST,GomSpace Group,GomSpace Group,gomspace-group,auto
+GULD.ST,Guldbrev Holding,Guldbrev Holding,guldbrev,auto
+HAYPP.ST,Haypp Group,Haypp Group,haypp,auto
+IRLAB-A.ST,IRLAB Therapeutics,IRLAB Therapeutics,irlab-therapeutics,auto
+IDUN-B.ST,Idun Industrier,Idun Industrier,idun-industrier,auto
+IMP-A-SDB.ST,Implantica,Implantica,implantica,auto
+INISS-B.ST,Inission,Inission,inission,auto
+KAMBI.ST,Kambi Group Plc,Kambi Group,kambi-group,auto
+KEOC.ST,Keo Capital,Keo Capital,keo-capital,auto
+KJELL.ST,Kjell Group,Kjell Group,kjell,auto
+MSAB-B.ST,Micro Systemation,Micro Systemation,micro-systemation,auto
+MSON-B.ST,Midsona,Midsona,midsona,auto
+MIDS.ST,Midsummer,Midsummer,midsummer,auto
+NYAB.ST,NYAB,NYAB,nyab,auto
+NANEXA.ST,Nanexa,Nanexa,nanexa,auto
+NREST.ST,Nordrest Holding,Nordrest Holding,nordrest,auto
+ONCO.ST,Oncopeptides,Oncopeptides,oncopeptides,auto
+PREV-B.ST,Prevas,Prevas,prevas,auto
+SALT-B.ST,SaltX Technology Holding,SaltX Technology Holding,saltx-technology-holding,auto
+SANION.ST,Saniona,Saniona,saniona,auto
+SNM-SDB.ST,ShaMaran Petroleum Ltd,ShaMaran Petroleum,shamaran-petroleum,auto
+SFAB.ST,Solid Försäkringsaktiebolag,Solid Försäkringsaktiebolag,solid-forsakring,auto
+SVIK.ST,Studsvik,Studsvik,studsvik,auto
+SUBGEN.ST,Subgen AI,Subgen AI,subgenai,auto
+SUS.ST,Surgical Science Sweden,Surgical Science Sweden,surgical-science-sweden,auto
+SECARE.ST,Swedencare,Swedencare,swedencare,auto
+SYNACT.ST,SynAct Pharma,SynAct Pharma,synact-pharma,auto
+TEQ.ST,Teqnion,Teqnion,teqnion,auto
+TERNOR.ST,Terranor Group,Terranor Group,terranor-group,auto
+TOBII.ST,Tobii,Tobii,tobii,auto
+UPSALE.ST,Upsales Technology,Upsales Technology,upsales-technology,auto
+VER.ST,Verve Group Media,Verve Group Media,verve-group-media,auto
+W5.ST,W5 Solutions,W5 Solutions,w5-solutions,auto
+ZZ-B.ST,Zinzino,Zinzino,zinzino,auto

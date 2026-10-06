@@ -41,6 +41,12 @@ import pandas as pd
 import yaml
 import yfinance as yf
 
+try:  # python.org macOS builds ship without CA certificates; use certifi's bundle
+    import certifi
+    os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+except ImportError:
+    pass
+
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
 REPORT_DIR = ROOT / "reports"
@@ -54,8 +60,9 @@ PAPER_COLUMNS = [
     "id", "ticker", "name", "signal_date", "score", "status",
     "entry_date", "entry_price", "bench_entry",
     "exit_date", "exit_price", "exit_reason", "bench_exit",
-    "last_price", "return_pct", "bench_return_pct",
+    "last_price", "return_pct", "bench_return_pct", "universe",
 ]
+DEFAULT_UNIVERSE = "v1"   # trades from before watchlist versioning (the hand-picked list)
 
 
 # --------------------------------------------------------------------------- config
@@ -76,6 +83,15 @@ def load_watchlist(path: Path) -> pd.DataFrame:
         wl["mfn_slug"] = ""
     wl["mfn_slug"] = wl["mfn_slug"].str.strip()
     return wl[wl["ticker"] != ""].reset_index(drop=True)
+
+
+def watchlist_version(path: Path) -> str:
+    """The '# version: …' comment written by build_watchlist.py; new paper trades carry it."""
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            if line.startswith("# version:"):
+                return line.split(":", 1)[1].strip() or DEFAULT_UNIVERSE
+    return DEFAULT_UNIVERSE
 
 
 # --------------------------------------------------------------------------- data
@@ -263,6 +279,7 @@ def load_paper() -> pd.DataFrame:
         for c in PAPER_COLUMNS:
             if c not in df.columns:
                 df[c] = ""
+        df["universe"] = df["universe"].replace("", DEFAULT_UNIVERSE)
         return df[PAPER_COLUMNS]
     return pd.DataFrame(columns=PAPER_COLUMNS, dtype=str)
 
@@ -336,7 +353,8 @@ def update_paper(paper: pd.DataFrame, histories: dict, bench: pd.DataFrame, cfg:
     return paper
 
 
-def add_paper_signals(paper: pd.DataFrame, rows: list[dict], cfg: dict) -> pd.DataFrame:
+def add_paper_signals(paper: pd.DataFrame, rows: list[dict], cfg: dict,
+                      universe: str = DEFAULT_UNIVERSE) -> pd.DataFrame:
     pc = cfg["paper_trading"]
     active = set(paper.loc[paper["status"].isin(["pending", "open"]), "ticker"])
     new = []
@@ -347,7 +365,7 @@ def add_paper_signals(paper: pd.DataFrame, rows: list[dict], cfg: dict) -> pd.Da
                 "id": f"{r['ticker']}-{r['date']}",
                 "ticker": r["ticker"], "name": r["name"],
                 "signal_date": r["date"], "score": str(r["score"]),
-                "status": "pending",
+                "status": "pending", "universe": universe,
             })
             new.append(rec)
             active.add(r["ticker"])
@@ -606,7 +624,8 @@ def weekly_paper(paper: pd.DataFrame, week_start: dt.date, notional: float) -> d
     week = closed[closed["exit_date"] >= week_start.isoformat()]
     opened = paper[paper["status"] == "open"]
     unreal = pd.to_numeric(opened["return_pct"], errors="coerce").dropna()
-    return {"week": stats(week), "all": stats(closed), "week_trades": week,
+    by_universe = {u: stats(g) for u, g in closed.groupby("universe", sort=True)}
+    return {"week": stats(week), "all": stats(closed), "by_universe": by_universe, "week_trades": week,
             "open": opened, "unrealised_sek": float(unreal.sum() / 100 * notional)}
 
 
@@ -658,6 +677,15 @@ def build_weekly(signals, outcomes, table, wp, cfg, now_local) -> tuple[str, str
         f"<td class=n>{_fmt_pct(pd.to_numeric(t['bench_return_pct'], errors='coerce'))}</td></tr>"
         for _, t in wp["week_trades"].iterrows()) or "<tr><td colspan=6>No trades closed this week.</td></tr>"
     notional = wc["notional_sek"]
+    # Watchlist changes alter what the test measures, so show each watchlist version separately.
+    urows = ("<p><small>All-time closed trades by watchlist version</small></p><div class=box><table>"
+             "<tr><th>Version</th><th>Closed</th><th>Win rate</th><th>Avg</th><th>Index</th>"
+             "<th>Excess</th><th>P&amp;L</th></tr>" + "".join(
+                 f"<tr><td>{escape(u)}</td><td class=n>{st['n']}</td><td class=n>{_fmt_rate(st['win_rate'])}</td>"
+                 f"<td class=n>{_fmt_pct(st['avg_return'])}</td><td class=n>{_fmt_pct(st['avg_bench'])}</td>"
+                 f"<td class=n>{_fmt_pct(st['avg_excess'])}</td><td class=n>{_fmt_sek(st['pnl_sek'])}</td></tr>"
+                 for u, st in wp["by_universe"].items()) + "</table></div>"
+             if len(wp["by_universe"]) > 1 else "")
 
     html = f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -675,6 +703,7 @@ signal-day close. A hit = the stock beat the index over the same days. n counts 
 <p><b>This week:</b> {pstats(wp['week'])}</p>
 <p><b>All time:</b> {pstats(wp['all'])}</p>
 <p><b>Open:</b> {len(wp['open'])} position(s), unrealised {_fmt_sek(wp['unrealised_sek'])}</p>
+{urows}
 <p><small>P&amp;L assumes {_fmt_sek(notional)[1:]} per trade, no costs.</small></p>
 <div class=box><table><tr><th>Stock</th><th>Entry</th><th>Exit</th><th>Reason</th><th>Return</th><th>Index same period</th></tr>
 {trows}</table></div>
@@ -792,7 +821,7 @@ def main(argv=None) -> int:
 
     if cfg["paper_trading"]["enabled"]:
         paper = update_paper(paper, histories, bench, cfg)
-        paper = add_paper_signals(paper, rows, cfg)
+        paper = add_paper_signals(paper, rows, cfg, watchlist_version(Path(args.watchlist)))
         paper.to_csv(PAPER_LOG, index=False)
     summary = paper_summary(paper)
 
