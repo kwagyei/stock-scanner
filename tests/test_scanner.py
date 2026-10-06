@@ -811,7 +811,7 @@ def test_component_values_without_data():
 
 def test_alert_table_escapes_and_headlines_link():
     t = scanner._alerts_table([_row()], "")
-    assert "**A \\| Co**<br><sub>A.ST</sub>" in t and "▲ 12.0%" in t and "📣 Company release" in t
+    assert "**A \\| Co**<br><sub>A.ST</sub>" in t and "▲&nbsp;12.0%" in t and "📣 Company release" in t
     h = scanner._headlines([_row()])
     assert h.startswith("<details>") and "](<https://x.test/a?b=(1)>)" in h and "A \\| Co wins order" in h
 
