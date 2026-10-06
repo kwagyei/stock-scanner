@@ -54,6 +54,7 @@ ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
 REPORT_DIR = ROOT / "reports"
 SIGNALS_LOG = DATA_DIR / "signals_log.csv"
+SCORES_LOG = DATA_DIR / "scores_log.csv"    # every stock, every run, with each score component
 PAPER_LOG = DATA_DIR / "paper_trades.csv"
 WEEKLY_LOG = DATA_DIR / "weekly_summary.csv"
 DASHBOARD = ROOT / "DASHBOARD.md"
@@ -265,32 +266,41 @@ def news_metrics(items: list[dict], now: dt.datetime, cfg: dict, releases=()) ->
     }
 
 
-def score_stock(pm: dict, nm: dict, mcap: float | None, cfg: dict):
+SCORE_COMPONENTS = ["release", "volume", "price", "news", "small_cap"]
+
+
+def score_breakdown(pm: dict, nm: dict, mcap: float | None, cfg: dict):
+    """Points per component (SCORE_COMPONENTS), reasons and the hype flag."""
     t = cfg["thresholds"]
-    score, reasons = 0, []
+    pts, reasons = dict.fromkeys(SCORE_COMPONENTS, 0), []
     if nm["releases_24h"]:
-        score += 2
+        pts["release"] = 2
         reasons.append("company release <24h")
     vr = pm["vol_ratio"]
     if not math.isnan(vr):
         if vr >= t["volume_strong"]:
-            score += 2
+            pts["volume"] = 2
             reasons.append(f"volume {vr:.1f}x avg")
         elif vr >= t["volume_mild"]:
-            score += 1
+            pts["volume"] = 1
             reasons.append(f"volume {vr:.1f}x avg")
     if abs(pm["chg_1d"]) >= t["price_move_1d"]:
-        score += 1
+        pts["price"] = 1
         reasons.append(f"price {pm['chg_1d']:+.0%} 1d")
     if nm["spike"]:
-        score += 1
+        pts["news"] = 1
         reasons.append(f"news spike ({nm['n_24h']} in 24h vs {nm['baseline_per_day']:.1f}/day)")
     # Small cap only amplifies an existing signal; it is not a signal on its own.
-    if score > 0 and mcap and mcap < t["small_cap_max_sek"]:
-        score += 1
+    if sum(pts.values()) > 0 and mcap and mcap < t["small_cap_max_sek"]:
+        pts["small_cap"] = 1
         reasons.append("small cap")
     hype = pm["chg_5d"] >= t["hype_5d_move"] and not nm["has_release_window"]
-    return score, reasons, hype
+    return pts, reasons, hype
+
+
+def score_stock(pm: dict, nm: dict, mcap: float | None, cfg: dict):
+    pts, reasons, hype = score_breakdown(pm, nm, mcap, cfg)
+    return sum(pts.values()), reasons, hype
 
 
 # --------------------------------------------------------------------------- paper trading
@@ -467,6 +477,49 @@ def add_paper_signals(paper: pd.DataFrame, rows: list[dict], cfg: dict,
     if new:
         paper = pd.concat([paper, pd.DataFrame(new, columns=PAPER_COLUMNS)], ignore_index=True)
     return paper
+
+
+# --------------------------------------------------------------------------- score log
+
+def score_log_rows(rows, missing, wl, now, universe, news_checked=True) -> list[dict]:
+    """One row per watchlist stock for this run, scored or not; stocks without price data too."""
+    run = now.isoformat(timespec="minutes")
+    out = []
+    for r in rows:
+        mc = r["market_cap"]
+        out.append({
+            "run_utc": run, "bar_date": r["date"], "ticker": r["ticker"], "name": r["name"],
+            "status": "ok", "score": r["score"],
+            **{f"pts_{k}": r["points"][k] for k in SCORE_COMPONENTS},
+            "hype": r["hype"], "close": round(r["close"], 4), "chg_1d": round(r["chg_1d"], 4),
+            "chg_5d": round(r["chg_5d"], 4),
+            "vol_ratio": "" if math.isnan(r["vol_ratio"]) else round(r["vol_ratio"], 2),
+            "news_24h": r["n_24h"] if news_checked else "", "releases_24h": r["n_releases"] if news_checked else "",
+            "market_cap_msek": "" if not mc else round(mc / 1e6), "universe": universe,
+            "reasons": "; ".join(r["reasons"]),
+        })
+    names = dict(zip(wl["ticker"], wl["name"]))
+    blank = {c: "" for c in ["bar_date", "score", *(f"pts_{k}" for k in SCORE_COMPONENTS), "hype", "close",
+                             "chg_1d", "chg_5d", "vol_ratio", "news_24h", "releases_24h", "market_cap_msek",
+                             "reasons"]}
+    out += [{"run_utc": run, "ticker": t, "name": names.get(t, ""), "status": "no price data",
+             **blank, "universe": universe} for t in missing]
+    return out
+
+
+def append_csv(path: Path, rows: list[dict]) -> None:
+    """Append rows; if the columns differ from the file's header, rewrite it with all columns."""
+    if not rows:
+        return
+    new = pd.DataFrame(rows)
+    if path.exists():
+        with open(path, encoding="utf-8") as fh:
+            header = fh.readline().strip().split(",")
+        if header != list(new.columns):
+            old = pd.read_csv(path, dtype=str).fillna("")
+            pd.concat([old, new.astype(str)], ignore_index=True).to_csv(path, index=False)
+            return
+    new.to_csv(path, mode="a", index=False, header=not path.exists())
 
 
 def paper_summary(paper: pd.DataFrame) -> dict:
@@ -1143,7 +1196,8 @@ def build_dashboard(rows, missing, paper, cfg, now_local, eval_res) -> str:
                        "evening.", "lccccr"),
             "</details>", "",
             "<details><summary>🗂️ Data files</summary>", "",
-            "- [Signals log](data/signals_log.csv): every scored stock, every run",
+            "- [Signals log](data/signals_log.csv): every stock that scored or got a hype warning",
+            "- [Score log](data/scores_log.csv): every stock, every run, with each score component",
             "- [Paper trades](data/paper_trades.csv): all trades, both rule sets",
             "- [Weekly summaries](data/weekly_summary.csv): one row per week",
             "- [Watchlist review](data/watchlist_review.csv): stocks the watchlist builder skipped",
@@ -1338,12 +1392,13 @@ def main(argv=None) -> int:
                 time.sleep(pause)
         nm = news_metrics(items, now, cfg, releases)
         mcap = fetch_market_cap(w["ticker"])
-        score, reasons, hype = score_stock(pm, nm, mcap, cfg)
+        pts, reasons, hype = score_breakdown(pm, nm, mcap, cfg)
+        score = sum(pts.values())
         rows.append({
             "ticker": w["ticker"], "name": w["name"], **pm,
             "market_cap": mcap, "n_24h": nm["n_24h"],
             "headlines": nm["headlines"], "score": score,
-            "reasons": reasons, "hype": hype,
+            "reasons": reasons, "hype": hype, "points": pts, "n_releases": len(nm["releases_24h"]),
         })
     rows.sort(key=lambda r: (r["score"], r["vol_ratio"] if not math.isnan(r["vol_ratio"]) else 0),
               reverse=True)
@@ -1371,6 +1426,8 @@ def main(argv=None) -> int:
     if log_rows:
         pd.DataFrame(log_rows).to_csv(SIGNALS_LOG, mode="a", index=False,
                                       header=not SIGNALS_LOG.exists())
+    append_csv(SCORES_LOG, score_log_rows(rows, missing, wl, now, watchlist_version(Path(args.watchlist)),
+                                          news_checked=not args.no_news))
 
     html = build_html(rows, missing, paper, summary, cfg, now_local, digest_eval)
     stamp = f"{now_local:%Y-%m-%d_%H%M}"

@@ -152,7 +152,7 @@ def scan_env(tmp_path, monkeypatch):
     for name, sub in [("DATA_DIR", "data"), ("REPORT_DIR", "reports")]:
         monkeypatch.setattr(scanner, name, tmp_path / sub)
     for name, f in [("SIGNALS_LOG", "signals_log.csv"), ("PAPER_LOG", "paper_trades.csv"),
-                    ("WEEKLY_LOG", "weekly_summary.csv")]:
+                    ("WEEKLY_LOG", "weekly_summary.csv"), ("SCORES_LOG", "scores_log.csv")]:
         monkeypatch.setattr(scanner, name, tmp_path / "data" / f)
     monkeypatch.setattr(scanner, "DASHBOARD", tmp_path / "DASHBOARD.md")
     flat = pd.DataFrame([(10, 10, 10, 10, 1000)] * 70, index=pd.bdate_range("2026-06-01", periods=70),

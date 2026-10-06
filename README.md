@@ -30,7 +30,9 @@ have made money. **It never places trades.**
    that stop or after 20 trading days. The main rules are not affected; the digest and
    weekly summary show both, so you can compare them.
 6. Writes `reports/latest.html` (the digest) and appends to `data/signals_log.csv` and
-   `data/paper_trades.csv`. Optionally e-mails the digest. It also writes `DASHBOARD.md` and
+   `data/paper_trades.csv`. `data/scores_log.csv` gets one row per stock per run, scored
+   or not, with each score component in its own column (`pts_release`, `pts_volume`,
+   `pts_price`, `pts_news`, `pts_small_cap`) and the raw numbers behind them. Optionally e-mails the digest. It also writes `DASHBOARD.md` and
    Markdown copies of the reports (`reports/*.md`), which GitHub shows as pages.
 7. On the Friday evening run (or with `--weekly`), writes a **weekly summary** to
    `reports/weekly_latest.html` and adds a row to `data/weekly_summary.csv`:

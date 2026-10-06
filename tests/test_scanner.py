@@ -36,6 +36,7 @@ def tmp_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(scanner, "SIGNALS_LOG", tmp_path / "data" / "signals_log.csv")
     monkeypatch.setattr(scanner, "PAPER_LOG", tmp_path / "data" / "paper_trades.csv")
     monkeypatch.setattr(scanner, "WEEKLY_LOG", tmp_path / "data" / "weekly_summary.csv")
+    monkeypatch.setattr(scanner, "SCORES_LOG", tmp_path / "data" / "scores_log.csv")
     monkeypatch.setattr(scanner, "DASHBOARD", tmp_path / "DASHBOARD.md")
     return tmp_path
 
@@ -904,3 +905,72 @@ def test_weekly_with_no_signals_in_window(cfg, tmp_paths):
     assert "No signals in the window yet." in md and "No signals this week." in md
     assert "img.shields.io" not in md                    # job-summary version has no button row
     assert "img.shields.io" in (scanner.REPORT_DIR / "weekly_latest.md").read_text()
+
+
+# --------------------------------------------------------------------------- score components / score log
+
+def _scenario(vol=1000, close=100, items=(), mcap=None):
+    h = flat(70)
+    h.iloc[-1] = (100, max(100, close), min(100, close), close, vol)
+    return (scanner.price_metrics(h, CFG_FOR_SCENARIOS), scanner.news_metrics(list(items), NOW, CFG_FOR_SCENARIOS), mcap)
+
+
+CFG_FOR_SCENARIOS = scanner.load_config(scanner.ROOT / "config.yaml")
+
+
+@pytest.mark.parametrize("kw,expected", [
+    ({}, {}),
+    ({"vol": 3500}, {"volume": 1}),
+    ({"vol": 6000, "close": 112, "mcap": 1e9}, {"volume": 2, "price": 1, "small_cap": 1}),
+    ({"mcap": 1e9}, {}),                                                   # small cap alone: nothing
+    ({"items": [news("Cision News", 2), news("di.se", 3), news("EFN", 5)], "mcap": 1e9},
+     {"release": 2, "news": 1, "small_cap": 1}),
+    ({"close": 85, "mcap": 9e9}, {"price": 1}),                            # big cap: no small-cap point
+])
+def test_score_breakdown_components_sum_to_score(cfg, kw, expected):
+    pm, nm, mcap = _scenario(**kw)
+    pts, reasons, hype = scanner.score_breakdown(pm, nm, mcap, cfg)
+    assert pts == {**dict.fromkeys(scanner.SCORE_COMPONENTS, 0), **expected}
+    assert scanner.score_stock(pm, nm, mcap, cfg) == (sum(pts.values()), reasons, hype)
+
+
+def test_main_logs_every_stock_with_components(cfg, tmp_paths, monkeypatch):
+    wl = tmp_paths / "watchlist.csv"
+    wl.write_text("# version: auto-test\nticker,name,query\nHOT.ST,Hot,Hot\nQUIET.ST,Quiet,Quiet\nGONE.ST,Gone,Gone\n")
+    hot = flat(70)
+    hot.iloc[-1] = (100, 112, 100, 111, 6000)
+    data = {"HOT.ST": hot, "QUIET.ST": flat(70), "^OMX": flat(70, 1000)}
+    monkeypatch.setattr(scanner, "fetch_history", lambda t, p: data.get(t, pd.DataFrame()))
+    monkeypatch.setattr(scanner, "fetch_news", lambda q, c: [])
+    monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: 1.5e9)
+    monkeypatch.setattr(scanner.time, "sleep", lambda s: None)
+
+    scanner.main(["--no-email", "--watchlist", str(wl)])
+    log = pd.read_csv(scanner.SCORES_LOG, dtype=str).fillna("").set_index("ticker")
+    assert list(log.index) == ["HOT.ST", "QUIET.ST", "GONE.ST"]
+    h = log.loc["HOT.ST"]
+    assert (h["score"], h["pts_volume"], h["pts_price"], h["pts_small_cap"], h["pts_release"], h["pts_news"]) == \
+        ("4", "2", "1", "1", "0", "0")
+    assert (h["status"], h["market_cap_msek"], h["universe"], h["news_24h"]) == ("ok", "1500", "auto-test", "0")
+    q = log.loc["QUIET.ST"]
+    assert (q["score"], q["pts_small_cap"], q["reasons"]) == ("0", "0", "")    # logged although quiet
+    g = log.loc["GONE.ST"]
+    assert (g["status"], g["score"], g["name"]) == ("no price data", "", "Gone")
+    sig = pd.read_csv(scanner.SIGNALS_LOG)
+    assert list(sig["ticker"]) == ["HOT.ST"]                                     # signals log unchanged
+
+    scanner.main(["--no-email", "--no-news", "--watchlist", str(wl)])
+    log = pd.read_csv(scanner.SCORES_LOG, dtype=str).fillna("")
+    assert len(log) == 6 and log["run_utc"].nunique() >= 1
+    assert log.iloc[3]["news_24h"] == "" and log.iloc[3]["releases_24h"] == ""   # news not checked
+
+
+def test_append_csv_rewrites_when_columns_change(tmp_path):
+    path = tmp_path / "log.csv"
+    scanner.append_csv(path, [{"a": 1, "b": 2}])
+    scanner.append_csv(path, [{"a": 3, "b": 4}])
+    scanner.append_csv(path, [{"a": 5, "b": 6, "c": 7}])
+    df = pd.read_csv(path, dtype=str).fillna("")
+    assert list(df.columns) == ["a", "b", "c"] and df["c"].tolist() == ["", "", "7"]
+    scanner.append_csv(path, [])
+    assert len(pd.read_csv(path)) == 3
