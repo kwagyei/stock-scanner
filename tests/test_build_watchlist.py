@@ -35,7 +35,7 @@ def test_class_suffix_gives_company_stem():
 
 def test_build(monkeypatch, tmp_path, capsys):
     wl = tmp_path / "watchlist.csv"
-    wl.write_text("ticker,name,query,mfn_slug\nMAN.ST,Manual Co,Manual,manual-co\n")
+    wl.write_text("ticker,name,query,mfn_slug,title_match\nMAN.ST,Manual Co,Manual,manual-co,Manual\n")
     lists = {
         "SMALL_CAP": [("MAN", "Manual Co"), ("BIG A", "Big Co A"), ("BIG B", "Big Co B"),
                       ("THIN", "Thin Co"), ("PRF PREF", "Prf Pref")],
@@ -64,9 +64,9 @@ def test_build(monkeypatch, tmp_path, capsys):
     version = scanner.watchlist_version(wl)
     assert re.fullmatch(r"auto-\d{4}-\d{2}-\d{2}-[0-9a-f]{6}", version)
     out = scanner.load_watchlist(wl)
-    assert list(zip(out["ticker"], out["source"], out["mfn_slug"])) == [
-        ("MAN.ST", "manual", "manual-co"),          # kept although illiquid
-        ("BIG-B.ST", "auto", "big-co"),             # most liquid share class only
+    assert list(zip(out["ticker"], out["source"], out["mfn_slug"], out["title_match"])) == [
+        ("MAN.ST", "manual", "manual-co", "Manual"),   # kept as is, although illiquid
+        ("BIG-B.ST", "auto", "big-co", ""),            # most liquid share class only
     ]
     review = pd.read_csv(bw.REVIEW_LOG).set_index("ticker")["reason"].to_dict()
     assert review == {"PRF-PREF.ST": "preference share",

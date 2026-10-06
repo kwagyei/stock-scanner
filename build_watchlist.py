@@ -42,6 +42,7 @@ MFN_SEARCH = "https://mfn.se/search/companies?query={q}"
 CLASS_SUFFIX = re.compile(r"\s+(ser\.?\s*)?(A|B|C|D|SDB|A SDB|STAM|PREF|Pref)$")
 LEGAL_SUFFIX = re.compile(r"\s+(AB|\(publ\)|Plc|plc|PLC|Ltd\.?|Inc\.?|Corp\.?|ASA|A/S|Oyj|SE|N\.V\.)$")
 REVIEW_LOG = scanner.DATA_DIR / "watchlist_review.csv"
+WATCHLIST_COLUMNS = ["ticker", "name", "query", "mfn_slug", "source", "title_match"]
 PAUSE = 1.0
 
 
@@ -115,7 +116,7 @@ def news_query(company: str) -> str:
 
 def read_current(path: Path) -> pd.DataFrame:
     if not path.exists():
-        return pd.DataFrame(columns=["ticker", "name", "query", "mfn_slug", "source"])
+        return pd.DataFrame(columns=WATCHLIST_COLUMNS)
     wl = scanner.load_watchlist(path)
     if "source" not in wl.columns:
         wl["source"] = "manual"           # pre-builder watchlist: everything was hand-picked
@@ -127,13 +128,15 @@ def write_watchlist(path: Path, rows: pd.DataFrame, version: str, n_auto: int) -
     header = [
         "# ticker = Yahoo Finance symbol (Stockholm listings end in .ST).",
         "# query  = news search phrase. mfn_slug = company slug on mfn.se (blank = Google News only).",
+        "# title_match = optional word a news headline must contain (whole word, exact case);",
+        "#          for names that are also common words, where Google News matches loosely.",
         "# source = manual rows are kept by build_watchlist.py; auto rows are rebuilt on every run.",
         "#          To customise an auto row (e.g. a better query), change its source to manual.",
         f"# version: {version}",
         f"# built {dt.date.today().isoformat()} by build_watchlist.py: {n_auto} auto rows "
         "(Nasdaq Stockholm Small Cap + First North, liquidity-filtered)",
     ]
-    cols = ["ticker", "name", "query", "mfn_slug", "source"]
+    cols = WATCHLIST_COLUMNS
     with open(path, "w", encoding="utf-8", newline="") as fh:
         fh.write("\n".join(header) + "\n")
         rows[cols].to_csv(fh, index=False)
@@ -203,7 +206,7 @@ def main(argv=None) -> int:
                 continue
         auto.append({"ticker": r["ticker"], "name": r["company"], "query": news_query(r["company"]),
                      "mfn_slug": slug, "source": "auto"})
-    auto = pd.DataFrame(auto, columns=["ticker", "name", "query", "mfn_slug", "source"])
+    auto = pd.DataFrame(auto, columns=WATCHLIST_COLUMNS)
 
     old_auto = set(current.loc[current["source"] == "auto", "ticker"])
     added, removed = sorted(set(auto["ticker"]) - old_auto), sorted(old_auto - set(auto["ticker"]))

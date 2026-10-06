@@ -27,6 +27,7 @@ import argparse
 import datetime as dt
 import math
 import os
+import re
 import smtplib
 import ssl
 import sys
@@ -82,6 +83,9 @@ def load_watchlist(path: Path) -> pd.DataFrame:
     if "mfn_slug" not in wl.columns:
         wl["mfn_slug"] = ""
     wl["mfn_slug"] = wl["mfn_slug"].str.strip()
+    if "title_match" not in wl.columns:
+        wl["title_match"] = ""
+    wl["title_match"] = wl["title_match"].str.strip()
     return wl[wl["ticker"] != ""].reset_index(drop=True)
 
 
@@ -147,6 +151,18 @@ def fetch_news(query: str, cfg: dict) -> list[dict]:
         items.append({"title": e.get("title", ""), "link": e.get("link", ""),
                       "source": source, "ts": ts})
     return items
+
+
+def filter_titles(items: list[dict], word: str) -> list[dict]:
+    """Keep news items whose title contains `word` as a whole word (case-sensitive),
+    allowing the Swedish genitive -s ("Pricers vd").
+
+    For names that are also common words, where Google News matches loosely.
+    """
+    if not word:
+        return items
+    pat = re.compile(rf"(?<!\w){re.escape(word)}s?(?!\w)")
+    return [i for i in items if pat.search(i["title"])]
 
 
 def fetch_releases(slug: str, cfg: dict) -> list[dict]:
@@ -802,7 +818,7 @@ def main(argv=None) -> int:
         pause = cfg["news"].get("pause_seconds", 1.0)
         items, releases = [], []
         if not args.no_news:
-            items = fetch_news(w["query"], cfg)
+            items = filter_titles(fetch_news(w["query"], cfg), w["title_match"])
             time.sleep(pause)
             if cfg.get("releases", {}).get("enabled") and w["mfn_slug"]:
                 releases = fetch_releases(w["mfn_slug"], cfg)

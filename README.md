@@ -84,7 +84,9 @@ The PC must be on at those times.
    no data is listed in red at the top of the digest.
 2. **Extend the watchlist.** Either add rows by hand (`source` = `manual`), or rebuild it
    from the exchange lists (see below). Use a distinctive `query` for names that cause
-   news noise (e.g. "Elon Group", not "Elon").
+   news noise (e.g. "Elon Group", not "Elon"). If the name is a common word and no
+   phrase helps, set `title_match` (e.g. `Stille`): only headlines that contain that word
+   (exact case, Swedish genitive -s allowed) are counted as news for that stock.
 3. **Leave the rules alone for 2–3 months.** Don't tune thresholds after every run, or you'll
    fit the noise. After about 30 closed paper trades, compare the average return with the
    index column. If the signals don't beat the index on paper, they won't with real money.

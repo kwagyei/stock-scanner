@@ -569,3 +569,40 @@ def test_weekly_paper_split_by_universe():
     wp = scanner.weekly_paper(pd.DataFrame([a, b], columns=scanner.PAPER_COLUMNS), dt.date(2026, 10, 5), 10000)
     assert wp["by_universe"]["v1"]["pnl_sek"] == pytest.approx(3000)
     assert wp["by_universe"]["auto-2026-10-06"]["avg_return"] == pytest.approx(-10)
+
+
+# --------------------------------------------------------------------------- title filter
+
+@pytest.mark.parametrize("word,title,keep", [
+    ("Stille", "Pareto höjer riktkursen för Stille till 295 kronor, upprepar köp", True),
+    ("Stille", "Stilles vd köper aktier", True),
+    ("Stille", "Stille-aktien rusar", True),
+    ("Stille", "Lördagsrysare i arenan: ”Jag gillar verkligen det vi gör”", False),
+    ("Stille", "Ein stille Nacht", False),                       # case-sensitive
+    ("I-Tech", "Strategen: Se möjligheterna utanför tech", False),
+    ("I-Tech", "I-Tech tecknar nytt avtal för Selektope", True),
+    ("K33", "K330 lanseras", False),
+    ("Pricer", "Sifonen ersätter Quaero Capital i valberedningen i Pricer", True),
+    ("Pricer", "Pricers vd: starkt kvartal", True),
+])
+def test_filter_titles(word, title, keep):
+    assert (scanner.filter_titles([news("di.se", 1, title)], word) != []) is keep
+
+
+def test_filter_titles_blank_keeps_all():
+    items = [news("di.se", 1, "anything")]
+    assert scanner.filter_titles(items, "") == items
+
+
+def test_main_applies_title_match(cfg, tmp_paths, monkeypatch):
+    wl = tmp_paths / "watchlist.csv"
+    wl.write_text("ticker,name,query,title_match\nS.ST,Stille,Stille,Stille\nO.ST,Other,Other,\n")
+    feed = [news("di.se", h, t) for h, t in ((1, "Stille rusar"), (2, "Rockbjörnens röda matta"), (3, "Seger för RIG Haga"))]
+    monkeypatch.setattr(scanner, "fetch_history", lambda t, p: flat(70))
+    monkeypatch.setattr(scanner, "fetch_news", lambda q, c: feed)
+    monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: None)
+    monkeypatch.setattr(scanner.time, "sleep", lambda s: None)
+    scanner.main(["--no-email", "--watchlist", str(wl)])
+    log = pd.read_csv(scanner.SIGNALS_LOG).set_index("ticker")
+    assert "S.ST" not in log.index                     # 1 relevant item: no spike, no signal
+    assert log.loc["O.ST", "news_24h"] == 3 and "news spike" in log.loc["O.ST", "reasons"]
