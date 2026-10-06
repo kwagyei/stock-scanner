@@ -1,0 +1,52 @@
+name: attention-scan
+
+on:
+  schedule:
+    # GitHub cron runs in UTC and can start a few minutes late.
+    - cron: "30 6 * * 1-5"    # 08:30 Stockholm summer / 07:30 winter (before 09:00 open)
+    - cron: "45 16 * * 1-5"   # 18:45 Stockholm summer / 17:45 winter (after close)
+  workflow_dispatch: {}       # "Run workflow" button for manual runs
+
+permissions:
+  contents: write
+
+concurrency:
+  group: attention-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Run scanner
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python scanner.py
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest
+          path: reports/latest.html
+          retention-days: 30
+
+      - name: Commit logs
+        run: |
+          git config user.name "scanner-bot"
+          git config user.email "scanner-bot@users.noreply.github.com"
+          git add data/ reports/latest.html
+          git diff --cached --quiet || git commit -m "scan $(date -u +%Y-%m-%d_%H%M)"
+          git push

@@ -1,0 +1,17 @@
+# ticker = Yahoo Finance symbol (Stockholm listings end in .ST). Verify each on finance.yahoo.com.
+# query  = optional news search phrase; defaults to name. Use a distinctive phrase to avoid noise.
+ticker,name,query
+SIVE.ST,Sivers Semiconductors,Sivers Semiconductors
+ACCON.ST,Acconeer,Acconeer
+MVIR.ST,Medivir,Medivir
+ELTEL.ST,Eltel,Eltel
+INQ.ST,INQ Group (ex Anoto),INQ Group
+EPIS-B.ST,Episurf Medical,Episurf
+WYLD.ST,Wyld Networks,Wyld Networks
+MILDEF.ST,MilDef Group,MilDef
+FNM.ST,Ferronordic,Ferronordic
+PREC.ST,Precise Biometrics,Precise Biometrics
+HTRO.ST,Hexatronic,Hexatronic
+NCAB.ST,NCAB Group,NCAB
+SEYE.ST,Smart Eye,Smart Eye
+CTM.ST,Catena Media,Catena Media

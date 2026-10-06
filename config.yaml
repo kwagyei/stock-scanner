@@ -1,0 +1,38 @@
+# Benchmark for paper-trade comparison (Yahoo symbol). ^OMX = OMX Stockholm 30.
+benchmark: "^OMX"
+history_period: "6mo"
+volume_baseline_days: 60
+
+thresholds:
+  volume_mild: 3            # today's volume vs 60-day average
+  volume_strong: 5
+  price_move_1d: 0.10       # |1-day move| >= 10%
+  news_spike_min_items: 3   # at least this many news items in 24h ...
+  news_spike_multiplier: 3  # ... and >= 3x the daily average of the past week
+  small_cap_max_sek: 5000000000   # 5 bn SEK
+  hype_5d_move: 0.50        # +50% in 5 days with no company release = hype warning
+
+alert_min_score: 3          # shown under "Alerts" in the digest
+
+# Google News source names that count as a company release (case-insensitive substring).
+# Verified 2026-10-06: Google News labels the wires "Cision News" (news.cision.com) and
+# "storage.mfn.se". Coverage of these wires in Google News is very sparse, so expect
+# most real releases to be missed until a direct MFN/Cision feed is added.
+release_sources: [cision, mfn, globenewswire, inderes, nasdaq]
+
+news:
+  lookback_days: 7
+  language: sv
+  country: SE
+  pause_seconds: 1.0        # politeness delay between news requests
+
+paper_trading:
+  enabled: true
+  min_score: 4              # open a paper position at next open when score >= this
+  take_profit: 0.30
+  stop_loss: -0.15
+  max_hold_days: 20         # trading days
+
+email:
+  enabled: false            # set true and add SMTP_* / EMAIL_TO secrets to receive the digest
+  send_when: always         # always | alerts
