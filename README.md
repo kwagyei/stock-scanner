@@ -23,6 +23,10 @@ have made money. **It never places trades.**
 5. Updates the **paper-trade log**. When score ≥ 4, it buys at the next day's open and
    exits at +30%, −15%, or after 20 trading days. Each trade is compared with OMXS30
    over the same period.
+   A **partial-exit variant** is tracked next to it on the same entries (columns `pe_*`):
+   sell half at +30%, move the stop on the rest to the entry price, and sell the rest at
+   that stop or after 20 trading days. The main rules are not affected; the digest and
+   weekly summary show both, so you can compare them.
 6. Writes `reports/latest.html` (the digest) and appends to `data/signals_log.csv` and
    `data/paper_trades.csv`. Optionally e-mails the digest.
 7. On the Friday evening run (or with `--weekly`), writes a **weekly summary** to

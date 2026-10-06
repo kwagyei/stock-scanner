@@ -55,6 +55,13 @@ paper_trading:
   take_profit: 0.30
   stop_loss: -0.15
   max_hold_days: 20         # trading days
+  # Shadow variant, tracked next to the rules above (it never changes them): sell `fraction`
+  # at take_profit, then move the stop on the rest to entry x (1 + remainder_stop). The rest
+  # exits at that stop or after max_hold_days. Results go to the pe_* columns.
+  partial_exit:
+    enabled: true
+    fraction: 0.5
+    remainder_stop: 0.0     # 0 = breakeven
 
 # Watchlist builder (python build_watchlist.py): Nasdaq Stockholm Small Cap + First North
 # Stockholm, filtered on liquidity. Rows marked source=manual in watchlist.csv are always kept.

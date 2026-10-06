@@ -606,3 +606,132 @@ def test_main_applies_title_match(cfg, tmp_paths, monkeypatch):
     log = pd.read_csv(scanner.SIGNALS_LOG).set_index("ticker")
     assert "S.ST" not in log.index                     # 1 relevant item: no spike, no signal
     assert log.loc["O.ST", "news_24h"] == 3 and "news spike" in log.loc["O.ST", "reasons"]
+
+
+# --------------------------------------------------------------------------- partial-exit variant
+# Entry 100 at the day-1 open: target 130, stop 85, remainder stop 100 (breakeven).
+
+D1 = (100, 101, 99, 100, 1)
+
+
+def test_partial_config_defaults(cfg):
+    px = cfg["paper_trading"]["partial_exit"]
+    assert (px["enabled"], px["fraction"], px["remainder_stop"]) == (True, 0.5, 0.0)
+
+
+def test_partial_then_breakeven(cfg):
+    r = run_trade(cfg, [D1, (110, 131, 109, 125, 1), (120, 121, 99, 100, 1)])
+    assert (r["status"], r["exit_reason"], r["return_pct"]) == ("closed", "target", "30.00")  # main unchanged
+    assert (r["pe_status"], r["pe_partial_date"], r["pe_partial_price"]) == ("closed", "2026-06-03", "130.0000")
+    assert (r["pe_exit_reason"], r["pe_exit_price"], r["pe_exit_date"]) == ("remainder stop", "100.0000", "2026-06-04")
+    assert r["pe_return_pct"] == "15.00"
+
+
+def test_partial_then_time_exit(cfg):
+    rows = [D1, (110, 131, 109, 125, 1)] + [(135, 138, 132, 135, 1)] * 17 + [(138, 141, 136, 140, 1)]
+    r = run_trade(cfg, rows)
+    assert (r["pe_exit_reason"], r["pe_exit_price"]) == ("time", "140.0000")
+    assert r["pe_return_pct"] == "35.00"                     # 0.5 x 30% + 0.5 x 40%
+
+
+def test_partial_gap_up_fills_at_open(cfg):
+    r = run_trade(cfg, [D1, (140, 145, 138, 142, 1), (142, 143, 98, 99, 1)])
+    assert r["pe_partial_price"] == "140.0000" and r["pe_return_pct"] == "20.00"
+
+
+@pytest.mark.parametrize("bar,price", [((98, 99, 84, 90, 1), "85.0000"), ((80, 82, 78, 79, 1), "80.0000")])
+def test_stop_before_target_exits_whole_position(cfg, bar, price):
+    r = run_trade(cfg, [D1, bar])
+    assert (r["pe_exit_reason"], r["pe_exit_price"], r["pe_partial_date"]) == ("stop", price, "")
+    assert r["pe_return_pct"] == r["return_pct"]
+
+
+def test_remainder_gap_down_fills_at_open(cfg):
+    r = run_trade(cfg, [D1, (110, 131, 109, 125, 1), (95, 96, 90, 92, 1)])
+    assert (r["pe_exit_reason"], r["pe_exit_price"], r["pe_return_pct"]) == ("remainder stop", "95.0000", "12.50")
+
+
+def test_target_on_last_day_sells_rest_at_close(cfg):
+    rows = [(100, 105, 95, 100, 1)] * 19 + [(110, 131, 109, 128, 1)]
+    r = run_trade(cfg, rows)
+    assert (r["pe_partial_date"] == r["pe_exit_date"]) and r["pe_exit_reason"] == "time"
+    assert r["pe_return_pct"] == "29.00"
+
+
+def test_remainder_stop_not_checked_on_the_partial_bar(cfg):
+    r = run_trade(cfg, [D1, (110, 131, 95, 120, 1), (120, 122, 118, 120, 1)])
+    assert (r["pe_status"], r["pe_exit_reason"], r["pe_return_pct"]) == ("open", "", "25.00")
+
+
+def test_still_open_before_target(cfg):
+    r = run_trade(cfg, [D1, (100, 110, 99, 108, 1)])
+    assert (r["pe_status"], r["pe_partial_date"], r["pe_return_pct"]) == ("open", "", "8.00")
+
+
+def test_variant_keeps_running_after_main_trade_closes(cfg):
+    base = [(100, 100, 100, 100, 1), D1, (110, 131, 109, 125, 1)]
+    h1 = bars(base)
+    p = scanner.update_paper(pending_trade(), {"X.ST": h1}, flat(len(h1), 1000), cfg)
+    r = p.iloc[0]
+    assert (r["status"], r["pe_status"]) == ("closed", "open")
+    main_cols = [c for c in scanner.PAPER_COLUMNS if not c.startswith("pe_")]
+    before = r[main_cols].copy()
+
+    h2 = bars(base + [(126, 127, 99, 101, 1)])
+    p = scanner.update_paper(p, {"X.ST": h2}, flat(len(h2), 1000), cfg)
+    r = p.iloc[0]
+    assert (r["pe_status"], r["pe_exit_reason"], r["pe_return_pct"]) == ("closed", "remainder stop", "15.00")
+    pd.testing.assert_series_equal(r[main_cols], before, check_names=False)
+
+
+def test_variant_index_return_is_weighted_like_the_position(cfg):
+    h = bars([(100, 100, 100, 100, 1), D1, (110, 131, 109, 125, 1), (120, 121, 99, 100, 1)])
+    bench = bars([(1000, 1000, 1000, c, 0) for c in (1000, 1000, 1100, 1200)])
+    bench.iloc[1, 0] = 1000                                   # entry at the index open
+    r = scanner.update_paper(pending_trade(), {"X.ST": h}, bench, cfg).iloc[0]
+    assert r["pe_bench_return_pct"] == "15.00"               # 0.5 x 10% + 0.5 x 20%
+
+
+@pytest.mark.parametrize("rows", [
+    [D1, (110, 131, 109, 125, 1), (120, 121, 99, 100, 1)],
+    [D1, (80, 82, 78, 79, 1)],
+    [(100, 105, 95, 100 + i * 0.1, 1) for i in range(25)],
+    [D1, (100, 110, 99, 108, 1)],
+])
+def test_main_rules_identical_with_variant_on_or_off(cfg, rows):
+    import copy
+    off = copy.deepcopy(cfg)
+    off["paper_trading"]["partial_exit"]["enabled"] = False
+    main_cols = [c for c in scanner.PAPER_COLUMNS if not c.startswith("pe_")]
+    on_row, off_row = run_trade(cfg, rows), run_trade(off, rows)
+    pd.testing.assert_series_equal(on_row[main_cols], off_row[main_cols])
+    assert off_row["pe_status"] == ""
+
+
+def test_variant_summaries(cfg):
+    a = _trade("A", "closed", "2026-10-06", "30.00", "1.00")
+    a.update(pe_status="closed", pe_exit_date="2026-10-07", pe_return_pct="15.00", pe_bench_return_pct="2.00")
+    b = _trade("B", "closed", "2026-09-01", "-15.00", "0.00")
+    b.update(pe_status="closed", pe_exit_date="2026-09-01", pe_return_pct="-15.00", pe_bench_return_pct="0.00")
+    paper = pd.DataFrame([a, b], columns=scanner.PAPER_COLUMNS)
+    s = scanner.paper_summary(paper)
+    assert (s["pe_n_closed"], s["pe_avg_return"], s["pe_avg_bench"]) == (2, 0.0, 1.0)
+    wp = scanner.weekly_paper(paper, dt.date(2026, 10, 5), 10000)
+    assert wp["pe_week"]["n"] == 1 and wp["pe_week"]["pnl_sek"] == pytest.approx(1500)
+    assert wp["pe_all"]["pnl_sek"] == pytest.approx(0)
+
+
+def test_open_variant_ticker_is_still_fetched(cfg, tmp_paths, monkeypatch):
+    scanner.DATA_DIR.mkdir()
+    t = _trade("OLD.ST", "closed", "2026-10-01", "30.00")
+    t.update(entry_date="2026-09-01", entry_price="100", pe_status="open")
+    pd.DataFrame([t], columns=scanner.PAPER_COLUMNS).to_csv(scanner.PAPER_LOG, index=False)
+    wl = tmp_paths / "watchlist.csv"
+    wl.write_text("ticker,name,query\nX.ST,X,X\n")
+    fetched = []
+    monkeypatch.setattr(scanner, "fetch_history", lambda t, p: fetched.append(t) or flat(70))
+    monkeypatch.setattr(scanner, "fetch_news", lambda q, c: [])
+    monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: None)
+    monkeypatch.setattr(scanner.time, "sleep", lambda s: None)
+    scanner.main(["--no-email", "--watchlist", str(wl)])
+    assert "OLD.ST" in fetched

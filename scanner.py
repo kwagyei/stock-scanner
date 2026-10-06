@@ -62,6 +62,9 @@ PAPER_COLUMNS = [
     "entry_date", "entry_price", "bench_entry",
     "exit_date", "exit_price", "exit_reason", "bench_exit",
     "last_price", "return_pct", "bench_return_pct", "universe",
+    # partial-exit variant (paper_trading.partial_exit); same entry as the main trade
+    "pe_status", "pe_partial_date", "pe_partial_price",
+    "pe_exit_date", "pe_exit_price", "pe_exit_reason", "pe_return_pct", "pe_bench_return_pct",
 ]
 DEFAULT_UNIVERSE = "v1"   # trades from before watchlist versioning (the hand-picked list)
 
@@ -311,62 +314,135 @@ def _price_on(hist: pd.DataFrame, date: pd.Timestamp, field: str) -> float | Non
 
 def update_paper(paper: pd.DataFrame, histories: dict, bench: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     pc = cfg["paper_trading"]
+    pe_enabled = (pc.get("partial_exit") or {}).get("enabled", False)
     for idx, row in paper.iterrows():
-        if row["status"] not in ("pending", "open"):
+        main_todo = row["status"] in ("pending", "open")
+        pe_todo = pe_enabled and row["status"] != "pending" and row["pe_status"] != "closed"
+        if not (main_todo or pe_todo):
             continue
         h = histories.get(row["ticker"])
         if h is None or h.empty:
             continue
-
-        if row["status"] == "pending":
-            after = h[h.index > pd.Timestamp(row["signal_date"])]
-            if after.empty:
-                continue
-            entry_day = after.index[0]
-            paper.at[idx, "entry_date"] = entry_day.date().isoformat()
-            paper.at[idx, "entry_price"] = f"{float(after.iloc[0]['Open']):.4f}"
-            be = _price_on(bench, entry_day, "Open")
-            paper.at[idx, "bench_entry"] = f"{be:.4f}" if be else ""
-            paper.at[idx, "status"] = "open"
-            row = paper.loc[idx]
-
-        entry_day = pd.Timestamp(row["entry_date"])
-        entry = float(row["entry_price"])
-        target = entry * (1 + pc["take_profit"])
-        stop = entry * (1 + pc["stop_loss"])
-        bars = h[h.index >= entry_day]
-
-        exit_info = None
-        for n, (day, b) in enumerate(bars.iterrows(), start=1):
-            gap_ok = n > 1  # on entry day we bought at the open, so no gap fill
-            if b["Low"] <= stop:  # check stop first (conservative)
-                exit_info = (day, min(b["Open"], stop) if gap_ok else stop, "stop")
-            elif b["High"] >= target:
-                exit_info = (day, max(b["Open"], target) if gap_ok else target, "target")
-            elif n >= pc["max_hold_days"]:
-                exit_info = (day, b["Close"], "time")
-            if exit_info:
-                break
-
-        bench_entry = float(row["bench_entry"]) if row["bench_entry"] else None
-        if exit_info:
-            day, price, reason = exit_info
-            paper.at[idx, "status"] = "closed"
-            paper.at[idx, "exit_date"] = day.date().isoformat()
-            paper.at[idx, "exit_price"] = f"{float(price):.4f}"
-            paper.at[idx, "exit_reason"] = reason
-            paper.at[idx, "last_price"] = f"{float(price):.4f}"
-            paper.at[idx, "return_pct"] = f"{(float(price) / entry - 1) * 100:.2f}"
-            bx = _price_on(bench, day, "Close")
-        else:
-            last = float(bars.iloc[-1]["Close"]) if not bars.empty else entry
-            paper.at[idx, "last_price"] = f"{last:.4f}"
-            paper.at[idx, "return_pct"] = f"{(last / entry - 1) * 100:.2f}"
-            bx = _price_on(bench, bars.index[-1], "Close") if not bars.empty else None
-        if bx and bench_entry:
-            paper.at[idx, "bench_exit"] = f"{bx:.4f}"
-            paper.at[idx, "bench_return_pct"] = f"{(bx / bench_entry - 1) * 100:.2f}"
+        if main_todo:
+            _update_main(paper, idx, row, h, bench, pc)
+        row = paper.loc[idx]
+        if pe_enabled and row["entry_date"] and row["pe_status"] != "closed":
+            _update_partial(paper, idx, row, h, bench, pc)
     return paper
+
+
+def _update_main(paper, idx, row, h, bench, pc) -> None:
+    """The fixed paper-trade rules: one exit at target, stop or time."""
+    if row["status"] == "pending":
+        after = h[h.index > pd.Timestamp(row["signal_date"])]
+        if after.empty:
+            return
+        entry_day = after.index[0]
+        paper.at[idx, "entry_date"] = entry_day.date().isoformat()
+        paper.at[idx, "entry_price"] = f"{float(after.iloc[0]['Open']):.4f}"
+        be = _price_on(bench, entry_day, "Open")
+        paper.at[idx, "bench_entry"] = f"{be:.4f}" if be else ""
+        paper.at[idx, "status"] = "open"
+        row = paper.loc[idx]
+
+    entry_day = pd.Timestamp(row["entry_date"])
+    entry = float(row["entry_price"])
+    target = entry * (1 + pc["take_profit"])
+    stop = entry * (1 + pc["stop_loss"])
+    bars = h[h.index >= entry_day]
+
+    exit_info = None
+    for n, (day, b) in enumerate(bars.iterrows(), start=1):
+        gap_ok = n > 1  # on entry day we bought at the open, so no gap fill
+        if b["Low"] <= stop:  # check stop first (conservative)
+            exit_info = (day, min(b["Open"], stop) if gap_ok else stop, "stop")
+        elif b["High"] >= target:
+            exit_info = (day, max(b["Open"], target) if gap_ok else target, "target")
+        elif n >= pc["max_hold_days"]:
+            exit_info = (day, b["Close"], "time")
+        if exit_info:
+            break
+
+    bench_entry = float(row["bench_entry"]) if row["bench_entry"] else None
+    if exit_info:
+        day, price, reason = exit_info
+        paper.at[idx, "status"] = "closed"
+        paper.at[idx, "exit_date"] = day.date().isoformat()
+        paper.at[idx, "exit_price"] = f"{float(price):.4f}"
+        paper.at[idx, "exit_reason"] = reason
+        paper.at[idx, "last_price"] = f"{float(price):.4f}"
+        paper.at[idx, "return_pct"] = f"{(float(price) / entry - 1) * 100:.2f}"
+        bx = _price_on(bench, day, "Close")
+    else:
+        last = float(bars.iloc[-1]["Close"]) if not bars.empty else entry
+        paper.at[idx, "last_price"] = f"{last:.4f}"
+        paper.at[idx, "return_pct"] = f"{(last / entry - 1) * 100:.2f}"
+        bx = _price_on(bench, bars.index[-1], "Close") if not bars.empty else None
+    if bx and bench_entry:
+        paper.at[idx, "bench_exit"] = f"{bx:.4f}"
+        paper.at[idx, "bench_return_pct"] = f"{(bx / bench_entry - 1) * 100:.2f}"
+
+
+def simulate_partial(bars: pd.DataFrame, entry: float, pc: dict) -> dict:
+    """Partial-exit variant over the bars from the entry day on.
+
+    Before the target it behaves like the main rules (stop first, gap fills at the open,
+    time exit). At the target it sells `fraction`; the rest then exits at the remainder
+    stop or at max_hold_days. Remainder rules apply from the next bar, since the order of
+    high and low within a bar is unknown.
+    """
+    px = pc["partial_exit"]
+    target = entry * (1 + pc["take_profit"])
+    stop = entry * (1 + pc["stop_loss"])
+    rem_stop = entry * (1 + px["remainder_stop"])
+    partial = exit_ = None
+    for n, (day, b) in enumerate(bars.iterrows(), start=1):
+        gap_ok = n > 1
+        if partial is None:
+            if b["Low"] <= stop:
+                exit_ = (day, min(b["Open"], stop) if gap_ok else stop, "stop")
+            elif b["High"] >= target:
+                partial = (day, max(b["Open"], target) if gap_ok else target)
+                if n >= pc["max_hold_days"]:
+                    exit_ = (day, b["Close"], "time")
+            elif n >= pc["max_hold_days"]:
+                exit_ = (day, b["Close"], "time")
+        elif b["Low"] <= rem_stop:
+            exit_ = (day, min(b["Open"], rem_stop), "remainder stop")
+        elif n >= pc["max_hold_days"]:
+            exit_ = (day, b["Close"], "time")
+        if exit_:
+            break
+    end_day, end_px = (exit_[0], exit_[1]) if exit_ else (bars.index[-1], float(bars.iloc[-1]["Close"]))
+    f = px["fraction"] if partial else 0.0
+    ret = f * (partial[1] / entry - 1 if partial else 0) + (1 - f) * (float(end_px) / entry - 1)
+    return {"status": "closed" if exit_ else "open", "partial": partial, "exit": exit_,
+            "end_day": end_day, "ret": ret, "fraction": f}
+
+
+def _update_partial(paper, idx, row, h, bench, pc) -> None:
+    entry = float(row["entry_price"])
+    bars = h[h.index >= pd.Timestamp(row["entry_date"])]
+    if bars.empty:
+        return
+    r = simulate_partial(bars, entry, pc)
+    paper.at[idx, "pe_status"] = r["status"]
+    if r["partial"]:
+        paper.at[idx, "pe_partial_date"] = r["partial"][0].date().isoformat()
+        paper.at[idx, "pe_partial_price"] = f"{float(r['partial'][1]):.4f}"
+    if r["exit"]:
+        paper.at[idx, "pe_exit_date"] = r["exit"][0].date().isoformat()
+        paper.at[idx, "pe_exit_price"] = f"{float(r['exit'][1]):.4f}"
+        paper.at[idx, "pe_exit_reason"] = r["exit"][2]
+    paper.at[idx, "pe_return_pct"] = f"{r['ret'] * 100:.2f}"
+    # Index return weighted the same way as the position: part to the partial sale, rest to the end.
+    b0 = float(row["bench_entry"]) if row["bench_entry"] else None
+    b_end = _price_on(bench, r["end_day"], "Close")
+    b_part = _price_on(bench, r["partial"][0], "Close") if r["partial"] else None
+    if b0 and b_end and (b_part or not r["partial"]):
+        f = r["fraction"]
+        bret = f * ((b_part / b0 - 1) if r["partial"] else 0) + (1 - f) * (b_end / b0 - 1)
+        paper.at[idx, "pe_bench_return_pct"] = f"{bret * 100:.2f}"
 
 
 def add_paper_signals(paper: pd.DataFrame, rows: list[dict], cfg: dict,
@@ -401,7 +477,17 @@ def paper_summary(paper: pd.DataFrame) -> dict:
         "win_rate": float((rets > 0).mean() * 100) if len(rets) else None,
         "avg_return": float(rets.mean()) if len(rets) else None,
         "avg_bench": float(bench.mean()) if len(bench) else None,
+        **_pe_summary(paper),
     }
+
+
+def _pe_summary(paper: pd.DataFrame) -> dict:
+    closed = paper[paper["pe_status"] == "closed"]
+    rets = pd.to_numeric(closed["pe_return_pct"], errors="coerce").dropna()
+    bench = pd.to_numeric(closed["pe_bench_return_pct"], errors="coerce").dropna()
+    return {"pe_n_closed": len(closed),
+            "pe_avg_return": float(rets.mean()) if len(rets) else None,
+            "pe_avg_bench": float(bench.mean()) if len(bench) else None}
 
 
 # --------------------------------------------------------------------------- reporting
@@ -475,6 +561,8 @@ def build_html(rows, missing, paper, summary, cfg, now_local) -> str:
         + (f" · Win rate: {s['win_rate']:.0f}% · Avg return: {_fmt_pct(s['avg_return'])}"
            f" · Avg index return same periods: {_fmt_pct(s['avg_bench'])}"
            if s["n_closed"] else "")
+        + (f"<br><small>Partial-exit variant: {s['pe_n_closed']} closed · avg {_fmt_pct(s['pe_avg_return'])}"
+           f" vs index {_fmt_pct(s['pe_avg_bench'])}</small>" if s["pe_n_closed"] else "")
     )
 
     missing_html = (f"<p class=warn>No price data for: {escape(', '.join(missing))} "
@@ -641,7 +729,11 @@ def weekly_paper(paper: pd.DataFrame, week_start: dt.date, notional: float) -> d
     opened = paper[paper["status"] == "open"]
     unreal = pd.to_numeric(opened["return_pct"], errors="coerce").dropna()
     by_universe = {u: stats(g) for u, g in closed.groupby("universe", sort=True)}
-    return {"week": stats(week), "all": stats(closed), "by_universe": by_universe, "week_trades": week,
+    pe = paper[paper["pe_status"] == "closed"].assign(
+        return_pct=lambda d: d["pe_return_pct"], bench_return_pct=lambda d: d["pe_bench_return_pct"])
+    pe_week = pe[pe["pe_exit_date"] >= week_start.isoformat()]
+    return {"week": stats(week), "all": stats(closed), "by_universe": by_universe,
+            "pe_week": stats(pe_week), "pe_all": stats(pe), "week_trades": week,
             "open": opened, "unrealised_sek": float(unreal.sum() / 100 * notional)}
 
 
@@ -693,6 +785,11 @@ def build_weekly(signals, outcomes, table, wp, cfg, now_local) -> tuple[str, str
         f"<td class=n>{_fmt_pct(pd.to_numeric(t['bench_return_pct'], errors='coerce'))}</td></tr>"
         for _, t in wp["week_trades"].iterrows()) or "<tr><td colspan=6>No trades closed this week.</td></tr>"
     notional = wc["notional_sek"]
+    pe_cfg = cfg["paper_trading"].get("partial_exit") or {}
+    pe_html = (f"<p><b>Partial-exit variant</b> <small>(sell {pe_cfg['fraction']:.0%} at the target, rest at "
+               f"{pe_cfg['remainder_stop']:+.0%} stop or time; same entries)</small><br>"
+               f"This week: {pstats(wp['pe_week'])}<br>All time: {pstats(wp['pe_all'])}</p>"
+               if pe_cfg.get("enabled") else "")
     # Watchlist changes alter what the test measures, so show each watchlist version separately.
     urows = ("<p><small>All-time closed trades by watchlist version</small></p><div class=box><table>"
              "<tr><th>Version</th><th>Closed</th><th>Win rate</th><th>Avg</th><th>Index</th>"
@@ -718,6 +815,7 @@ signal-day close. A hit = the stock beat the index over the same days. n counts 
 <h2>Paper trading</h2>
 <p><b>This week:</b> {pstats(wp['week'])}</p>
 <p><b>All time:</b> {pstats(wp['all'])}</p>
+{pe_html}
 <p><b>Open:</b> {len(wp['open'])} position(s), unrealised {_fmt_sek(wp['unrealised_sek'])}</p>
 {urows}
 <p><small>P&amp;L assumes {_fmt_sek(notional)[1:]} per trade, no costs.</small></p>
@@ -734,6 +832,8 @@ signal-day close. A hit = the stock beat the index over the same days. n counts 
                   f"{_fmt_pct(overall[f'avg_{n}d'])} | {_fmt_pct(overall[f'excess_{n}d'])} |" for n in horizons]
     lines += ["", f"Paper this week: {pstats(wp['week']).replace('&amp;', '&')}",
               f"Paper all time: {pstats(wp['all']).replace('&amp;', '&')}",
+              *([f"Partial-exit variant, all time: {pstats(wp['pe_all']).replace('&amp;', '&')}"]
+                if pe_cfg.get("enabled") else []),
               f"Open: {len(wp['open'])}, unrealised {_fmt_sek(wp['unrealised_sek'])}"]
 
     row = {"week": label, "generated_local": f"{now_local:%Y-%m-%d %H:%M}",
@@ -749,6 +849,10 @@ signal-day close. A hit = the stock beat the index over the same days. n counts 
                     f"paper_{scope}_avg_return": "" if st["avg_return"] is None else round(st["avg_return"], 2),
                     f"paper_{scope}_avg_bench": "" if st["avg_bench"] is None else round(st["avg_bench"], 2),
                     f"paper_{scope}_pnl_sek": round(st["pnl_sek"])})
+    pe_all = wp["pe_all"]
+    row.update({"paper_pe_all_n": pe_all["n"],
+                "paper_pe_all_avg_return": "" if pe_all["avg_return"] is None else round(pe_all["avg_return"], 2),
+                "paper_pe_all_pnl_sek": round(pe_all["pnl_sek"])})
     row.update({"open": len(wp["open"]), "unrealised_sek": round(wp["unrealised_sek"])})
     return html, "\n".join(lines) + "\n", row
 
@@ -798,7 +902,8 @@ def main(argv=None) -> int:
         now_local = now
 
     paper = load_paper()
-    active_tickers = set(paper.loc[paper["status"].isin(["pending", "open"]), "ticker"])
+    active_tickers = set(paper.loc[paper["status"].isin(["pending", "open"])
+                                   | (paper["pe_status"] == "open"), "ticker"])
     weekly = weekly_due(now_local, cfg, args.weekly)
     signal_tickers = set(load_signals()["ticker"]) if weekly else set()
     tickers = list(dict.fromkeys(list(wl["ticker"]) + sorted(active_tickers | signal_tickers)))
