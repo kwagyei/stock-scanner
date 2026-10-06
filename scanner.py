@@ -19,6 +19,7 @@ Usage:
   python scanner.py                 # normal run
   python scanner.py --no-news       # skip news and release fetching (price/volume only)
   python scanner.py --no-email      # never send e-mail on this run
+  python scanner.py --weekly        # also build the weekly summary now (otherwise Friday evening)
 """
 from __future__ import annotations
 
@@ -45,6 +46,7 @@ DATA_DIR = ROOT / "data"
 REPORT_DIR = ROOT / "reports"
 SIGNALS_LOG = DATA_DIR / "signals_log.csv"
 PAPER_LOG = DATA_DIR / "paper_trades.csv"
+WEEKLY_LOG = DATA_DIR / "weekly_summary.csv"
 UTC = dt.timezone.utc
 USER_AGENT = "Mozilla/5.0 (stock-attention-scanner)"
 
@@ -370,6 +372,15 @@ def paper_summary(paper: pd.DataFrame) -> dict:
 
 # --------------------------------------------------------------------------- reporting
 
+STYLE = """
+body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:16px;color:#1d1d1f;max-width:1100px}
+h1{font-size:20px} h2{font-size:16px;margin-top:28px;border-bottom:1px solid #ddd;padding-bottom:4px}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{border-bottom:1px solid #eee;padding:6px;text-align:left;vertical-align:top}
+td.n{text-align:right;white-space:nowrap} ul{margin:4px 0 0 16px;padding:0}
+.warn{color:#a15c00} small{color:#666} .box{overflow-x:auto}
+"""
+
 def _fmt_pct(x, digits=1):
     return "–" if x is None or (isinstance(x, float) and math.isnan(x)) else f"{x:+.{digits}f}%"
 
@@ -438,14 +449,7 @@ def build_html(rows, missing, paper, summary, cfg, now_local) -> str:
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Scanner digest {now_local:%Y-%m-%d %H:%M}</title>
-<style>
-body{{font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:16px;color:#1d1d1f;max-width:1100px}}
-h1{{font-size:20px}} h2{{font-size:16px;margin-top:28px;border-bottom:1px solid #ddd;padding-bottom:4px}}
-table{{border-collapse:collapse;width:100%;font-size:13px}}
-th,td{{border-bottom:1px solid #eee;padding:6px;text-align:left;vertical-align:top}}
-td.n{{text-align:right;white-space:nowrap}} ul{{margin:4px 0 0 16px;padding:0}}
-.warn{{color:#a15c00}} small{{color:#666}} .box{{overflow-x:auto}}
-</style></head><body>
+<style>{STYLE}</style></head><body>
 <h1>Attention scanner · {now_local:%a %d %b %Y, %H:%M}</h1>
 <p><small>Research tool, not advice. Prices from Yahoo Finance may be delayed. News from Google News RSS.</small></p>
 {missing_html}
@@ -506,6 +510,225 @@ def send_email(html: str, subject: str) -> None:
     print(f"[info] digest e-mailed to {to}")
 
 
+# --------------------------------------------------------------------------- weekly summary
+
+def week_label(d: dt.date) -> str:
+    y, w, _ = d.isocalendar()
+    return f"{y}-W{w:02d}"
+
+
+def weekly_due(now_local: dt.datetime, cfg: dict, force: bool = False) -> bool:
+    """Once per ISO week, on the first run at/after the configured weekday and hour."""
+    wc = cfg.get("weekly_summary") or {}
+    if force:
+        return True
+    if not wc.get("enabled") or (now_local.weekday(), now_local.hour) < (wc["weekday"], wc["after_hour"]):
+        return False
+    if WEEKLY_LOG.exists():
+        # Only a row generated at/after the scheduled time counts: an earlier --weekly
+        # run must not stop the Friday summary.
+        log = pd.read_csv(WEEKLY_LOG, dtype=str)
+        gen = pd.to_datetime(log.loc[log["week"] == week_label(now_local.date()), "generated_local"])
+        return not any((g.weekday(), g.hour) >= (wc["weekday"], wc["after_hour"]) for g in gen)
+    return True
+
+
+def load_signals() -> pd.DataFrame:
+    """Signals log with one row per (ticker, bar date); several runs log the same bar."""
+    cols = ["run_utc", "bar_date", "ticker", "name", "score", "reasons"]
+    if not SIGNALS_LOG.exists():
+        return pd.DataFrame(columns=cols)
+    df = pd.read_csv(SIGNALS_LOG, dtype=str).fillna("")
+    df["score"] = pd.to_numeric(df["score"], errors="coerce").fillna(0).astype(int)
+    df = df.sort_values(["score", "run_utc"]).drop_duplicates(["ticker", "bar_date"], keep="last")
+    return df.sort_values(["bar_date", "ticker"]).reset_index(drop=True)
+
+
+def signal_outcomes(signals: pd.DataFrame, histories: dict, bench: pd.DataFrame,
+                    horizons: list[int]) -> pd.DataFrame:
+    """Return after n trading days from the signal-day close, and the excess over the benchmark."""
+    cols = [f"{k}_{n}d" for n in horizons for k in ("ret", "excess")]
+    out = []
+    for _, s in signals.iterrows():
+        rec = {"ticker": s["ticker"], "name": s["name"], "bar_date": s["bar_date"],
+               "score": int(s["score"]), "reasons": s.get("reasons", "")}
+        h, day = histories.get(s["ticker"]), pd.Timestamp(s["bar_date"])
+        if h is not None and not h.empty and day in h.index:
+            pos = h.index.get_loc(day)
+            c0, b0 = float(h["Close"].iloc[pos]), _price_on(bench, day, "Close")
+            for n in horizons:
+                if pos + n >= len(h):
+                    continue
+                r = float(h["Close"].iloc[pos + n]) / c0 - 1
+                b1 = _price_on(bench, h.index[pos + n], "Close")
+                rec[f"ret_{n}d"] = r
+                rec[f"excess_{n}d"] = r - (b1 / b0 - 1) if b0 and b1 else float("nan")
+        out.append(rec)
+    return pd.DataFrame(out).reindex(columns=["ticker", "name", "bar_date", "score", "reasons"] + cols)
+
+
+def hit_rate_table(outcomes: pd.DataFrame, horizons: list[int], top_score: int) -> list[dict]:
+    """Per score bucket (and overall): signals, hit rate vs benchmark, avg return, avg excess (in %)."""
+    if outcomes.empty:
+        return []
+    o = outcomes.copy()
+    o["bucket"] = o["score"].clip(upper=top_score).map(lambda s: f"{s}+" if s == top_score else str(s))
+    rows = []
+    for label, g in [("all", o)] + sorted(o.groupby("bucket")):
+        row = {"score": label, "signals": len(g)}
+        for n in horizons:
+            ex, r = g[f"excess_{n}d"].dropna(), g[f"ret_{n}d"].dropna()
+            row[f"n_{n}d"] = len(ex)
+            row[f"hit_{n}d"] = float((ex > 0).mean() * 100) if len(ex) else None
+            row[f"avg_{n}d"] = float(r.mean() * 100) if len(r) else None
+            row[f"excess_{n}d"] = float(ex.mean() * 100) if len(ex) else None
+        rows.append(row)
+    return rows
+
+
+def weekly_paper(paper: pd.DataFrame, week_start: dt.date, notional: float) -> dict:
+    closed = paper[paper["status"] == "closed"]
+
+    def stats(df):
+        r = pd.to_numeric(df["return_pct"], errors="coerce")
+        b = pd.to_numeric(df["bench_return_pct"], errors="coerce")
+        ex = (r - b).dropna()
+        r = r.dropna()
+        return {
+            "n": len(r),
+            "win_rate": float((r > 0).mean() * 100) if len(r) else None,
+            "avg_return": float(r.mean()) if len(r) else None,
+            "avg_bench": float(b.dropna().mean()) if b.notna().any() else None,
+            "avg_excess": float(ex.mean()) if len(ex) else None,
+            "pnl_sek": float(r.sum() / 100 * notional),
+        }
+
+    week = closed[closed["exit_date"] >= week_start.isoformat()]
+    opened = paper[paper["status"] == "open"]
+    unreal = pd.to_numeric(opened["return_pct"], errors="coerce").dropna()
+    return {"week": stats(week), "all": stats(closed), "week_trades": week,
+            "open": opened, "unrealised_sek": float(unreal.sum() / 100 * notional)}
+
+
+def _fmt_rate(x):
+    return "–" if x is None else f"{x:.0f}%"
+
+
+def _fmt_sek(x):
+    return f"{x:+,.0f} SEK".replace(",", " ")
+
+
+def build_weekly(signals, outcomes, table, wp, cfg, now_local) -> tuple[str, str, dict]:
+    """Returns (html, markdown, csv row)."""
+    wc = cfg["weekly_summary"]
+    horizons, label = wc["horizons"], week_label(now_local.date())
+    week_start = now_local.date() - dt.timedelta(days=now_local.weekday())
+    this_week = outcomes[outcomes["bar_date"] >= week_start.isoformat()]
+
+    hhead = "<tr><th>Score</th><th>Signals</th>" + "".join(
+        f"<th>{n}d: n</th><th>{n}d hit</th><th>{n}d avg</th><th>{n}d vs index</th>" for n in horizons) + "</tr>"
+    hrows = "\n".join(
+        f"<tr><td>{escape(r['score'])}</td><td class=n>{r['signals']}</td>" + "".join(
+            f"<td class=n>{r[f'n_{n}d']}</td><td class=n>{_fmt_rate(r[f'hit_{n}d'])}</td>"
+            f"<td class=n>{_fmt_pct(r[f'avg_{n}d'])}</td><td class=n>{_fmt_pct(r[f'excess_{n}d'])}</td>"
+            for n in horizons) + "</tr>"
+        for r in table) or f"<tr><td colspan={2 + 4 * len(horizons)}>No signals in the window.</td></tr>"
+
+    def pct(v):
+        return None if pd.isna(v) else float(v) * 100
+
+    shead = "<tr><th>Stock</th><th>Bar date</th><th>Score</th>" + "".join(
+        f"<th>{n}d</th>" for n in horizons) + "<th>Why</th></tr>"
+    srows = "\n".join(
+        f"<tr><td>{escape(s['name'])} <small>{escape(s['ticker'])}</small></td><td>{escape(s['bar_date'])}</td>"
+        f"<td class=n>{s['score']}</td>"
+        + "".join(f"<td class=n>{_fmt_pct(pct(s[f'ret_{n}d']))}</td>" for n in horizons)
+        + f"<td>{escape(str(s['reasons']))}</td></tr>"
+        for _, s in this_week.iterrows()) or f"<tr><td colspan={4 + len(horizons)}>No signals this week.</td></tr>"
+
+    def pstats(st):
+        return (f"{st['n']} closed · win rate {_fmt_rate(st['win_rate'])} · avg {_fmt_pct(st['avg_return'])}"
+                f" vs index {_fmt_pct(st['avg_bench'])} (excess {_fmt_pct(st['avg_excess'])})"
+                f" · P&amp;L {_fmt_sek(st['pnl_sek'])}")
+
+    trows = "\n".join(
+        f"<tr><td>{escape(t['name'])} <small>{escape(t['ticker'])}</small></td><td>{escape(t['entry_date'])}</td>"
+        f"<td>{escape(t['exit_date'])}</td><td>{escape(t['exit_reason'])}</td>"
+        f"<td class=n>{_fmt_pct(pd.to_numeric(t['return_pct'], errors='coerce'))}</td>"
+        f"<td class=n>{_fmt_pct(pd.to_numeric(t['bench_return_pct'], errors='coerce'))}</td></tr>"
+        for _, t in wp["week_trades"].iterrows()) or "<tr><td colspan=6>No trades closed this week.</td></tr>"
+    notional = wc["notional_sek"]
+
+    html = f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scanner weekly {label}</title>
+<style>{STYLE}</style></head><body>
+<h1>Attention scanner · weekly summary {label}</h1>
+<p><small>Generated {now_local:%a %d %b %Y, %H:%M}. Research tool, not advice. Benchmark {escape(cfg['benchmark'])}.</small></p>
+<h2>Signal hit rate · last {wc['lookback_weeks']} weeks</h2>
+<p><small>Signals = score ≥ {cfg['alert_min_score']}, one per stock and bar date. Return is measured from the
+signal-day close. A hit = the stock beat the index over the same days. n counts signals old enough to measure.</small></p>
+<div class=box><table>{hhead}{hrows}</table></div>
+<h2>Signals this week · {len(this_week)}</h2>
+<div class=box><table>{shead}{srows}</table></div>
+<h2>Paper trading</h2>
+<p><b>This week:</b> {pstats(wp['week'])}</p>
+<p><b>All time:</b> {pstats(wp['all'])}</p>
+<p><b>Open:</b> {len(wp['open'])} position(s), unrealised {_fmt_sek(wp['unrealised_sek'])}</p>
+<p><small>P&amp;L assumes {_fmt_sek(notional)[1:]} per trade, no costs.</small></p>
+<div class=box><table><tr><th>Stock</th><th>Entry</th><th>Exit</th><th>Reason</th><th>Return</th><th>Index same period</th></tr>
+{trows}</table></div>
+</body></html>"""
+
+    overall = table[0] if table else {}
+    lines = [f"## Weekly summary {label}", "",
+             f"**Signals this week:** {len(this_week)} · **in last {wc['lookback_weeks']} weeks:** {len(outcomes)}", ""]
+    if overall:
+        lines += ["| Horizon | n | Hit vs index | Avg | Avg vs index |", "|---|---|---|---|---|"]
+        lines += [f"| {n}d | {overall[f'n_{n}d']} | {_fmt_rate(overall[f'hit_{n}d'])} | "
+                  f"{_fmt_pct(overall[f'avg_{n}d'])} | {_fmt_pct(overall[f'excess_{n}d'])} |" for n in horizons]
+    lines += ["", f"Paper this week: {pstats(wp['week']).replace('&amp;', '&')}",
+              f"Paper all time: {pstats(wp['all']).replace('&amp;', '&')}",
+              f"Open: {len(wp['open'])}, unrealised {_fmt_sek(wp['unrealised_sek'])}"]
+
+    row = {"week": label, "generated_local": f"{now_local:%Y-%m-%d %H:%M}",
+           "signals_week": len(this_week), "signals_window": len(outcomes)}
+    for n in horizons:
+        for k in ("n", "hit", "excess"):
+            v = overall.get(f"{k}_{n}d")
+            row[f"{k}_{n}d"] = "" if v is None else (v if k == "n" else round(v, 2))
+    for scope in ("week", "all"):
+        st = wp[scope]
+        row.update({f"paper_{scope}_n": st["n"],
+                    f"paper_{scope}_win_rate": "" if st["win_rate"] is None else round(st["win_rate"], 1),
+                    f"paper_{scope}_avg_return": "" if st["avg_return"] is None else round(st["avg_return"], 2),
+                    f"paper_{scope}_avg_bench": "" if st["avg_bench"] is None else round(st["avg_bench"], 2),
+                    f"paper_{scope}_pnl_sek": round(st["pnl_sek"])})
+    row.update({"open": len(wp["open"]), "unrealised_sek": round(wp["unrealised_sek"])})
+    return html, "\n".join(lines) + "\n", row
+
+
+def run_weekly(paper, histories, bench, cfg, now_local) -> tuple[str, str]:
+    wc = cfg["weekly_summary"]
+    week_start = now_local.date() - dt.timedelta(days=now_local.weekday())
+    window_start = week_start - dt.timedelta(weeks=wc["lookback_weeks"] - 1)
+    signals = load_signals()
+    signals = signals[(signals["score"] >= cfg["alert_min_score"])
+                      & (signals["bar_date"] >= window_start.isoformat())]
+    outcomes = signal_outcomes(signals, histories, bench, wc["horizons"])
+    table = hit_rate_table(outcomes, wc["horizons"], cfg["paper_trading"]["min_score"] + 1)
+    wp = weekly_paper(paper, week_start, wc["notional_sek"])
+    html, md, row = build_weekly(signals, outcomes, table, wp, cfg, now_local)
+
+    (REPORT_DIR / f"weekly_{row['week']}.html").write_text(html, encoding="utf-8")
+    (REPORT_DIR / "weekly_latest.html").write_text(html, encoding="utf-8")
+    log = pd.read_csv(WEEKLY_LOG, dtype=str) if WEEKLY_LOG.exists() else pd.DataFrame()
+    if not log.empty:
+        log = log[log["week"] != row["week"]]   # a forced re-run replaces that week's row
+    pd.concat([log, pd.DataFrame([row]).astype(str)], ignore_index=True).to_csv(WEEKLY_LOG, index=False)
+    return html, md
+
+
 # --------------------------------------------------------------------------- main
 
 def main(argv=None) -> int:
@@ -514,6 +737,7 @@ def main(argv=None) -> int:
     ap.add_argument("--watchlist", default=str(ROOT / "watchlist.csv"))
     ap.add_argument("--no-news", action="store_true")
     ap.add_argument("--no-email", action="store_true")
+    ap.add_argument("--weekly", action="store_true", help="build the weekly summary on this run")
     args = ap.parse_args(argv)
 
     cfg = load_config(Path(args.config))
@@ -530,7 +754,9 @@ def main(argv=None) -> int:
 
     paper = load_paper()
     active_tickers = set(paper.loc[paper["status"].isin(["pending", "open"]), "ticker"])
-    tickers = list(dict.fromkeys(list(wl["ticker"]) + sorted(active_tickers)))
+    weekly = weekly_due(now_local, cfg, args.weekly)
+    signal_tickers = set(load_signals()["ticker"]) if weekly else set()
+    tickers = list(dict.fromkeys(list(wl["ticker"]) + sorted(active_tickers | signal_tickers)))
 
     print(f"[info] fetching prices for {len(tickers)} tickers …")
     histories = {t: fetch_history(t, cfg["history_period"]) for t in tickers}
@@ -594,11 +820,21 @@ def main(argv=None) -> int:
             fh.write(md)
     print(md)
 
+    weekly_html = None
+    if weekly:
+        weekly_html, weekly_md = run_weekly(paper, histories, bench, cfg, now_local)
+        if gh_summary:
+            with open(gh_summary, "a", encoding="utf-8") as fh:
+                fh.write("\n" + weekly_md)
+        print(weekly_md)
+
     n_alerts = sum(r["score"] >= cfg["alert_min_score"] for r in rows)
     email_cfg = cfg.get("email", {})
     if email_cfg.get("enabled") and not args.no_email:
         if n_alerts or email_cfg.get("send_when", "always") == "always":
             send_email(html, f"Scanner {now_local:%d %b %H:%M}: {n_alerts} alert(s)")
+        if weekly_html:
+            send_email(weekly_html, f"Scanner weekly {week_label(now_local.date())}")
     return 0
 
 

@@ -35,6 +35,7 @@ def tmp_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(scanner, "REPORT_DIR", tmp_path / "reports")
     monkeypatch.setattr(scanner, "SIGNALS_LOG", tmp_path / "data" / "signals_log.csv")
     monkeypatch.setattr(scanner, "PAPER_LOG", tmp_path / "data" / "paper_trades.csv")
+    monkeypatch.setattr(scanner, "WEEKLY_LOG", tmp_path / "data" / "weekly_summary.csv")
     return tmp_path
 
 
@@ -424,3 +425,118 @@ def test_routine_release_does_not_suppress_hype(cfg):
     score, reasons, hype = scanner.score_stock(pm, nm, None, cfg)
     assert "company release <24h" not in reasons and hype
     assert nm["n_24h"] == 1                        # still counted as news
+
+
+# --------------------------------------------------------------------------- weekly summary
+
+FRI_EVE = dt.datetime(2026, 10, 9, 18, 45)          # Friday, ISO week 41
+
+
+@pytest.mark.parametrize("when,expected", [
+    (FRI_EVE, True),
+    (dt.datetime(2026, 10, 9, 8, 30), False),       # Friday morning run
+    (dt.datetime(2026, 10, 8, 18, 45), False),      # Thursday
+    (dt.datetime(2026, 10, 10, 12, 0), True),       # weekend manual run, week not yet done
+])
+def test_weekly_due_schedule(cfg, tmp_paths, when, expected):
+    assert scanner.weekly_due(when, cfg) is expected
+
+
+def test_weekly_due_once_per_week_unless_forced(cfg, tmp_paths):
+    scanner.DATA_DIR.mkdir()
+    scanner.WEEKLY_LOG.write_text("week,generated_local\n2026-W41,2026-10-06 20:23\n")
+    assert scanner.weekly_due(FRI_EVE, cfg)            # early forced run doesn't count
+    scanner.WEEKLY_LOG.write_text("week,generated_local\n2026-W41,2026-10-09 18:46\n")
+    assert not scanner.weekly_due(FRI_EVE, cfg)
+    assert scanner.weekly_due(FRI_EVE, cfg, force=True)
+    assert scanner.weekly_due(dt.datetime(2026, 10, 16, 18, 45), cfg)
+
+
+def test_load_signals_dedupes_runs_keeping_best_score(tmp_paths):
+    scanner.DATA_DIR.mkdir()
+    scanner.SIGNALS_LOG.write_text(
+        "run_utc,bar_date,ticker,name,score,reasons\n"
+        "2026-10-06T06:30,2026-10-05,A.ST,A,3,x\n"
+        "2026-10-06T16:45,2026-10-06,A.ST,A,4,y\n"
+        "2026-10-07T06:30,2026-10-06,A.ST,A,3,z\n"
+        "2026-10-06T16:45,2026-10-06,B.ST,B,1,w\n")
+    s = scanner.load_signals()
+    assert list(zip(s["bar_date"], s["ticker"], s["score"])) == [
+        ("2026-10-05", "A.ST", 3), ("2026-10-06", "A.ST", 4), ("2026-10-06", "B.ST", 1)]
+
+
+def _signals(*rows):
+    return pd.DataFrame([dict(zip(["bar_date", "ticker", "name", "score"], r)) for r in rows])
+
+
+def test_signal_outcomes_vs_benchmark(cfg):
+    h = bars([(100, 100, 100, c, 1) for c in (100, 110, 105, 120)])
+    bench = bars([(1000, 1000, 1000, c, 0) for c in (1000, 1050, 1000, 1000)])
+    sig = _signals(("2026-06-01", "X.ST", "X", 4), ("2026-06-03", "X.ST", "X", 3),
+                   ("2026-06-01", "GONE.ST", "Gone", 5))
+    o = scanner.signal_outcomes(sig, {"X.ST": h}, bench, [1, 2])
+    assert o.loc[0, "ret_1d"] == pytest.approx(0.10) and o.loc[0, "excess_1d"] == pytest.approx(0.05)
+    assert o.loc[0, "ret_2d"] == pytest.approx(0.05) and o.loc[0, "excess_2d"] == pytest.approx(0.05)
+    assert o.loc[1, "ret_1d"] == pytest.approx(120 / 105 - 1)
+    assert pd.isna(o.loc[1, "ret_2d"])                       # not enough bars yet
+    assert o.loc[2, ["ret_1d", "ret_2d"]].isna().all()      # ticker without data
+
+
+def test_hit_rate_table_buckets():
+    o = pd.DataFrame({"score": [3, 3, 4, 6],
+                      "ret_5d": [0.10, -0.05, 0.02, 0.30],
+                      "excess_5d": [0.08, -0.06, -0.01, float("nan")]})
+    t = {r["score"]: r for r in scanner.hit_rate_table(o, [5], top_score=5)}
+    assert list(t) == ["all", "3", "4", "5+"]
+    assert (t["all"]["signals"], t["all"]["n_5d"]) == (4, 3)
+    assert t["all"]["hit_5d"] == pytest.approx(100 / 3)
+    assert t["3"]["hit_5d"] == 50 and t["3"]["avg_5d"] == pytest.approx(2.5)
+    assert t["5+"]["n_5d"] == 0 and t["5+"]["hit_5d"] is None and t["5+"]["avg_5d"] == pytest.approx(30)
+
+
+def _trade(ticker, status, exit_date="", ret="", bench=""):
+    rec = {c: "" for c in scanner.PAPER_COLUMNS}
+    rec.update(ticker=ticker, name=ticker, status=status, exit_date=exit_date,
+               return_pct=ret, bench_return_pct=bench)
+    return rec
+
+
+def test_weekly_paper_week_vs_all_time():
+    paper = pd.DataFrame([
+        _trade("A", "closed", "2026-09-20", "30.00", "2.00"),
+        _trade("B", "closed", "2026-10-06", "-15.00", "1.00"),
+        _trade("C", "closed", "2026-10-08", "10.00", "-1.00"),
+        _trade("D", "open", ret="5.00"),
+        _trade("E", "pending"),
+    ], columns=scanner.PAPER_COLUMNS)
+    wp = scanner.weekly_paper(paper, dt.date(2026, 10, 5), 10000)
+    assert wp["week"]["n"] == 2 and wp["week"]["win_rate"] == 50
+    assert wp["week"]["avg_return"] == pytest.approx(-2.5) and wp["week"]["pnl_sek"] == pytest.approx(-500)
+    assert wp["week"]["avg_excess"] == pytest.approx(-2.5)
+    assert wp["all"]["n"] == 3 and wp["all"]["pnl_sek"] == pytest.approx(2500)
+    assert wp["all"]["avg_bench"] == pytest.approx(2 / 3)
+    assert len(wp["open"]) == 1 and wp["unrealised_sek"] == pytest.approx(500)
+
+
+def test_main_weekly_writes_report_and_one_row_per_week(cfg, tmp_paths, monkeypatch):
+    wl = tmp_paths / "watchlist.csv"
+    wl.write_text("ticker,name,query\nX.ST,X,X\n")
+    start = (pd.Timestamp.today().normalize() - pd.offsets.BDay(69)).date()   # last bar = today
+    h = flat(70, start=start)
+    h.iloc[-1] = (100, 112, 100, 111, 6000)
+    monkeypatch.setattr(scanner, "fetch_history", lambda t, p: h if t == "X.ST" else flat(70, 1000, start=start))
+    monkeypatch.setattr(scanner, "fetch_news", lambda q, c: [])
+    monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: 1e9)
+    monkeypatch.setattr(scanner.time, "sleep", lambda s: None)
+    sent = []
+    monkeypatch.setattr(scanner, "send_email", lambda html, subject: sent.append(subject))
+
+    scanner.main(["--no-email", "--weekly", "--watchlist", str(wl)])
+    scanner.main(["--no-email", "--weekly", "--watchlist", str(wl)])
+
+    log = pd.read_csv(scanner.WEEKLY_LOG, dtype=str)
+    assert len(log) == 1 and log.iloc[0]["signals_window"] == "1"
+    html = (tmp_paths / "reports" / "weekly_latest.html").read_text()
+    assert "Signal hit rate" in html and "X.ST" in html
+    assert (tmp_paths / "reports" / f"weekly_{log.iloc[0]['week']}.html").exists()
+    assert sent == []                                   # --no-email respected

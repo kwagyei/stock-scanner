@@ -25,6 +25,15 @@ have made money. **It never places trades.**
    over the same period.
 6. Writes `reports/latest.html` (the digest) and appends to `data/signals_log.csv` and
    `data/paper_trades.csv`. Optionally e-mails the digest.
+7. On the Friday evening run (or with `--weekly`), writes a **weekly summary** to
+   `reports/weekly_latest.html` and adds a row to `data/weekly_summary.csv`:
+   - *Signal hit rate* over the last 12 weeks: for each signal (score ≥ 3, one per stock
+     and day), the return 1, 5 and 20 trading days after the signal-day close, and
+     whether it beat the index over the same days. Split by score.
+   - *Paper P&L*: trades closed this week and all time, win rate, average return vs
+     the index, and P&L in SEK at a fixed size per trade (no costs).
+
+   The CSV keeps one row per week, so it becomes the long-run record.
 
 All thresholds are in `config.yaml`.
 

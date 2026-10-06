@@ -56,6 +56,14 @@ paper_trading:
   stop_loss: -0.15
   max_hold_days: 20         # trading days
 
+weekly_summary:
+  enabled: true
+  weekday: 4                # 0=Mon … 4=Fri. Generated once per ISO week, on the first run
+  after_hour: 17            # at/after this Stockholm hour (the Friday evening run, year-round)
+  lookback_weeks: 12        # rolling window for signal hit-rate (signals = score >= alert_min_score)
+  horizons: [1, 5, 20]      # trading days after the signal-day close; hit = beat the benchmark
+  notional_sek: 10000       # paper P&L shown as if every trade were this size
+
 email:
   enabled: false            # set true and add SMTP_* / EMAIL_TO secrets to receive the digest
   send_when: always         # always | alerts
