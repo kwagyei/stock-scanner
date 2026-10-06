@@ -1048,10 +1048,26 @@ def _stock(name, ticker) -> str:
     return f"**{_md(name)}**<br><sub>{ticker}</sub>"
 
 
+COMPONENT_HEADS = {"release": ("📣", "Release"), "volume": ("📊", "Volume"), "price": ("📈", "Price"),
+                   "news": ("📰", "News"), "small_cap": ("🔹", "Small cap")}
+SCORE_LEGEND = ("<sub>Score = 📣 company release (+2) + 📊 volume (+1 at 3×, +2 at 5× normal) + "
+                "📈 price move ±10% (+1) + 📰 news spike (+1) + 🔹 small cap (+1, only with another signal)."
+                "</sub>\n")
+
+
+def _pts(n) -> str:
+    return "·" if not n else (f"**+{n}**" if n >= 2 else f"+{n}")
+
+
 def _alerts_table(rs, empty) -> str:
-    return _md_table(["Stock", "Score", "Today", "Why it was flagged"],
-                     [[_stock(r["name"], r["ticker"]), f"**{r['score']}**", _arrow(r["chg_1d"] * 100),
-                       _why(r["reasons"], short_price=True)] for r in rs], empty, "lcrl")
+    if not rs:
+        return f"_{empty}_\n" if empty else ""
+    heads = [f"{icon}<br><sub>{label}</sub>" for icon, label in COMPONENT_HEADS.values()]
+    rows = [[_stock(r["name"], r["ticker"]), f"**{r['score']}**"]
+            + [_pts((r.get("points") or {}).get(k, 0)) for k in COMPONENT_HEADS]
+            + [_arrow(r["chg_1d"] * 100), _why(r["reasons"], short_price=True)] for r in rs]
+    return (_md_table(["Stock", "Score", *heads, "Today", "Why it was flagged"], rows,
+                      align="lc" + "c" * len(heads) + "rl") + "\n" + SCORE_LEGEND)
 
 
 def _headlines(rs) -> str:

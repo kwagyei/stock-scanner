@@ -745,9 +745,10 @@ import evaluate as ev
 
 
 def _row(**k):
-    r = {"ticker": "A.ST", "name": "A | Co", "score": 4, "close": 10.0, "chg_1d": 0.12, "chg_5d": 0.2,
+    r = {"ticker": "A.ST", "name": "A | Co", "score": 6, "close": 10.0, "chg_1d": 0.12, "chg_5d": 0.2,
          "vol_ratio": 6.0, "n_24h": 2, "hype": False, "date": "2026-10-06",
          "reasons": ["company release <24h", "volume 6.0x avg", "price +12% 1d", "small cap"],
+         "points": {"release": 2, "volume": 2, "price": 1, "news": 0, "small_cap": 1},
          "headlines": [{"title": "A | Co wins order", "link": "https://x.test/a?b=(1)"}]}
     r.update(k)
     return r
@@ -784,6 +785,15 @@ def test_why_accepts_list_or_logged_string():
                                      (float("nan"), "–")])
 def test_arrow(pct, out):
     assert scanner._arrow(pct) == out
+
+
+def test_alert_table_shows_score_components():
+    t = scanner._alerts_table([_row()], "")
+    head, sep, row = t.splitlines()[:3]
+    assert "📣<br><sub>Release</sub>" in head and "🔹<br><sub>Small cap</sub>" in head
+    assert "| **6** | **+2** | **+2** | +1 | · | +1 | ▲ 12.0% |" in row
+    assert sep.count(":---:") == 6 and "Score = 📣 company release (+2)" in t
+    assert scanner._alerts_table([], "✅ None.") == "_✅ None._\n" and scanner._alerts_table([], "") == ""
 
 
 def test_alert_table_escapes_and_headlines_link():
