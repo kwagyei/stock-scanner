@@ -1048,26 +1048,41 @@ def _stock(name, ticker) -> str:
     return f"**{_md(name)}**<br><sub>{ticker}</sub>"
 
 
-COMPONENT_HEADS = {"release": ("📣", "Release"), "volume": ("📊", "Volume"), "price": ("📈", "Price"),
-                   "news": ("📰", "News"), "small_cap": ("🔹", "Small cap")}
-SCORE_LEGEND = ("<sub>Score = 📣 company release (+2) + 📊 volume (+1 at 3×, +2 at 5× normal) + "
-                "📈 price move ±10% (+1) + 📰 news spike (+1) + 🔹 small cap (+1, only with another signal)."
-                "</sub>\n")
+COMPONENT_HEADS = {"release": ("📣", "Releases 24h"), "volume": ("📊", "Volume"), "price": ("📈", "Price today"),
+                   "news": ("📰", "News 24h"), "small_cap": ("🔹", "Market cap")}
+SCORE_LEGEND = ("<sub>**Bold** = counted towards the score: 📣 company release (+2) · 📊 volume 3× normal (+1) "
+                "or 5× (+2) · 📈 price move ±10% (+1) · 📰 news spike (+1) · 🔹 under 5 bn SEK (+1, only "
+                "with another signal).</sub>\n")
 
 
-def _pts(n) -> str:
-    return "·" if not n else (f"**+{n}**" if n >= 2 else f"+{n}")
+def _mcap(mc) -> str:
+    if not mc:
+        return "–"
+    return f"{mc / 1e9:.1f}&nbsp;bn" if mc >= 1e9 else f"{mc / 1e6:.0f}&nbsp;M"
+
+
+def _component_values(r) -> dict:
+    """The measured value behind each score component, as table text."""
+    vr = r["vol_ratio"]
+    return {"release": str(r.get("n_releases", 0) or "–"),
+            "volume": "–" if vr is None or math.isnan(vr) else f"{vr:.1f}×",
+            "price": _arrow(r["chg_1d"] * 100).replace(" ", "&nbsp;"),
+            "news": str(r.get("n_24h", 0) or "–"),
+            "small_cap": _mcap(r.get("market_cap"))}
 
 
 def _alerts_table(rs, empty) -> str:
     if not rs:
         return f"_{empty}_\n" if empty else ""
     heads = [f"{icon}<br><sub>{label}</sub>" for icon, label in COMPONENT_HEADS.values()]
-    rows = [[_stock(r["name"], r["ticker"]), f"**{r['score']}**"]
-            + [_pts((r.get("points") or {}).get(k, 0)) for k in COMPONENT_HEADS]
-            + [_arrow(r["chg_1d"] * 100), _why(r["reasons"], short_price=True)] for r in rs]
-    return (_md_table(["Stock", "Score", *heads, "Today", "Why it was flagged"], rows,
-                      align="lc" + "c" * len(heads) + "rl") + "\n" + SCORE_LEGEND)
+    rows = []
+    for r in rs:
+        vals, pts = _component_values(r), r.get("points") or {}
+        rows.append([_stock(r["name"], r["ticker"]), f"**{r['score']}**"]
+                    + [f"**{vals[k]}**" if pts.get(k) else vals[k] for k in COMPONENT_HEADS]
+                    + [_why(r["reasons"], short_price=True)])
+    return (_md_table(["Stock", "Score", *heads, "Why it was flagged"], rows,
+                      align="lc" + "r" * len(heads) + "l") + "\n" + SCORE_LEGEND)
 
 
 def _headlines(rs) -> str:

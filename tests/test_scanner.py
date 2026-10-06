@@ -749,6 +749,7 @@ def _row(**k):
          "vol_ratio": 6.0, "n_24h": 2, "hype": False, "date": "2026-10-06",
          "reasons": ["company release <24h", "volume 6.0x avg", "price +12% 1d", "small cap"],
          "points": {"release": 2, "volume": 2, "price": 1, "news": 0, "small_cap": 1},
+         "market_cap": 1.5e9, "n_releases": 1,
          "headlines": [{"title": "A | Co wins order", "link": "https://x.test/a?b=(1)"}]}
     r.update(k)
     return r
@@ -787,13 +788,25 @@ def test_arrow(pct, out):
     assert scanner._arrow(pct) == out
 
 
-def test_alert_table_shows_score_components():
+def test_alert_table_shows_component_values():
     t = scanner._alerts_table([_row()], "")
     head, sep, row = t.splitlines()[:3]
-    assert "📣<br><sub>Release</sub>" in head and "🔹<br><sub>Small cap</sub>" in head
-    assert "| **6** | **+2** | **+2** | +1 | · | +1 | ▲ 12.0% |" in row
-    assert sep.count(":---:") == 6 and "Score = 📣 company release (+2)" in t
+    assert "📣<br><sub>Releases 24h</sub>" in head and "🔹<br><sub>Market cap</sub>" in head
+    assert "Today" not in head                                   # price column replaces it
+    # bold = counted: release, volume, price, small cap; news (2 items) did not score
+    assert "| **6** | **1** | **6.0×** | **▲&nbsp;12.0%** | 2 | **1.5&nbsp;bn** |" in row
+    assert sep.count("|---:") == 5 and "**Bold** = counted towards the score" in t
     assert scanner._alerts_table([], "✅ None.") == "_✅ None._\n" and scanner._alerts_table([], "") == ""
+
+
+@pytest.mark.parametrize("mc,out", [(None, "–"), (0, "–"), (4.97e8, "497&nbsp;M"), (2.868e9, "2.9&nbsp;bn")])
+def test_market_cap_format(mc, out):
+    assert scanner._mcap(mc) == out
+
+
+def test_component_values_without_data():
+    v = scanner._component_values(_row(vol_ratio=float("nan"), n_24h=0, n_releases=0, market_cap=None))
+    assert (v["volume"], v["news"], v["release"], v["small_cap"]) == ("–", "–", "–", "–")
 
 
 def test_alert_table_escapes_and_headlines_link():
