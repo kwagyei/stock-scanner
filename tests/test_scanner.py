@@ -376,3 +376,51 @@ def test_main_fetches_releases_only_with_slug(cfg, tmp_paths, monkeypatch):
     assert calls == ["a-co"]
     scanner.main(["--no-email", "--no-news", "--watchlist", str(wl)])
     assert calls == ["a-co"]
+
+
+# --------------------------------------------------------------------------- routine releases
+
+ROUTINE = [
+    "Antalet aktier och röster i Medivir AB per den 30 september 2026",
+    "Förändring av det totala antalet aktier och röster i Sivers Semiconductors AB",
+    "Förändring av antal röster i Hexatronic",
+    "Number of shares and votes in Medivir AB on September 30",
+    "Catena Media announces share buybacks executed from 28 September to 2 October 2026",
+    "Emission och återköp av C-aktier för incitamentsprogram",
+    "Valberedning utsedd i Smart Eye AB inför årsstämman 2027",
+    "Valberedningens förslag till styrelse i MilDef Group",
+    "Inbjudan till presentation om MilDef Q2 rapport 2026, den 16 juli",
+    "Inbjudan till NCAB:s presentation av tredje kvartalet 2026, fredag den 23 oktober 2026",
+    "Ferronordic AB: Inbjudan till Ferronordics investerarpresentation 12 augusti 2026",
+    "Invitation to presentation of Catena Media's Q2 results 2026",
+]
+MATERIAL = [
+    "Eltel Norge tilldelas långsiktigt partneravtal med Telenor Norge",
+    "Sivers Semiconductors har beslutat om en riktad nyemission av aktier om cirka 700 MSEK",
+    "Kallelse till extra bolagsstämma i Sivers Semiconductors AB",
+    "Catena Media commences share buyback programme",
+    "Notification of Major Holdings in Catena Media plc",
+    "MEDIVIR AB – DELÅRSRAPPORT JANUARI – JUNI 2026",
+    "Episurfs styrelse har beslutat om nyemission av B-aktier och konvertibler som del av vederlaget",
+]
+
+
+@pytest.mark.parametrize("title", ROUTINE)
+def test_routine_release_ignored(cfg, title):
+    nm = scanner.news_metrics([], NOW, cfg, [mfn(2, title)])
+    assert nm["releases_24h"] == [] and not nm["has_release_window"]
+
+
+@pytest.mark.parametrize("title", MATERIAL)
+def test_material_release_counts(cfg, title):
+    nm = scanner.news_metrics([], NOW, cfg, [mfn(2, title)])
+    assert len(nm["releases_24h"]) == 1
+
+
+def test_routine_release_does_not_suppress_hype(cfg):
+    pm = scanner.price_metrics(_run_up(0.6), cfg)
+    items = [news("Cision News", 3, ROUTINE[0])]
+    nm = scanner.news_metrics(items, NOW, cfg, [mfn(5, ROUTINE[4])])
+    score, reasons, hype = scanner.score_stock(pm, nm, None, cfg)
+    assert "company release <24h" not in reasons and hype
+    assert nm["n_24h"] == 1                        # still counted as news

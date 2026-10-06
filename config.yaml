@@ -20,6 +20,23 @@ alert_min_score: 3          # shown under "Alerts" in the digest
 # most real releases to be missed; the direct MFN feed below is the primary source.
 release_sources: [cision, mfn, globenewswire, inderes, nasdaq]
 
+# Routine releases that carry no new information. A release whose title contains any of
+# these (case-insensitive substring) is ignored for both the release signal and the hype
+# check. Picked from real MFN titles for the watchlist, Swedish and English.
+release_ignore_titles:
+  - aktier och röster              # share/vote count updates
+  - antal röster
+  - shares and votes
+  - share buybacks executed        # weekly buyback execution reports
+  - återköp av egna aktier under
+  - c-aktier för incitamentsprogram
+  - valberedning                   # nomination committee
+  - nomination committee
+  - inbjudan till presentation     # report presentation invitations
+  - presentation av
+  - investerarpresentation
+  - invitation to presentation
+
 # Company releases straight from MFN, which also carries Cision-distributed releases.
 # Per-company feed: https://mfn.se/all/a/<mfn_slug>.rss (mfn_slug column in watchlist.csv).
 releases:

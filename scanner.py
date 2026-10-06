@@ -200,8 +200,13 @@ def news_metrics(items: list[dict], now: dt.datetime, cfg: dict, releases=()) ->
     baseline = len(older) / max(lookback - 1, 1)
 
     release_keys = [s.lower() for s in cfg["release_sources"]]
+    ignore_keys = [s.lower() for s in cfg.get("release_ignore_titles") or []]
+    def is_routine(i):
+        return any(k in i["title"].lower() for k in ignore_keys)
     def is_release(i):
-        return any(k in i["source"].lower() for k in release_keys)
+        return any(k in i["source"].lower() for k in release_keys) and not is_routine(i)
+
+    releases = [r for r in releases if not is_routine(r)]
 
     direct_24h = [r for r in releases if now - r["ts"] <= day]
     direct_window = [r for r in releases if now - r["ts"] <= dt.timedelta(days=lookback)]
