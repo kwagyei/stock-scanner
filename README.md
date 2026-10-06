@@ -1,5 +1,7 @@
 # Stockholm small-cap attention scanner (v1)
 
+**📊 [Open the dashboard](DASHBOARD.md)**: latest alerts, paper trades, weekly results and links to every report. Updated on every run.
+
 A research and alerting tool. It flags unusual attention on Stockholm small caps and
 tracks hypothetical (paper) trades so you can see whether the signals would actually
 have made money. **It never places trades.**
@@ -28,7 +30,8 @@ have made money. **It never places trades.**
    that stop or after 20 trading days. The main rules are not affected; the digest and
    weekly summary show both, so you can compare them.
 6. Writes `reports/latest.html` (the digest) and appends to `data/signals_log.csv` and
-   `data/paper_trades.csv`. Optionally e-mails the digest.
+   `data/paper_trades.csv`. Optionally e-mails the digest. It also writes `DASHBOARD.md` and
+   Markdown copies of the reports (`reports/*.md`), which GitHub shows as pages.
 7. On the Friday evening run (or with `--weekly`), writes a **weekly summary** to
    `reports/weekly_latest.html` and adds a row to `data/weekly_summary.csv`:
    - *Signal hit rate* over the last 12 weeks: for each signal (score ≥ 3, one per stock

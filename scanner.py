@@ -54,6 +54,7 @@ REPORT_DIR = ROOT / "reports"
 SIGNALS_LOG = DATA_DIR / "signals_log.csv"
 PAPER_LOG = DATA_DIR / "paper_trades.csv"
 WEEKLY_LOG = DATA_DIR / "weekly_summary.csv"
+DASHBOARD = ROOT / "DASHBOARD.md"
 UTC = dt.timezone.utc
 USER_AGENT = "Mozilla/5.0 (stock-attention-scanner)"
 
@@ -686,7 +687,10 @@ def signal_outcomes(signals: pd.DataFrame, histories: dict, bench: pd.DataFrame,
                 rec[f"ret_{n}d"] = r
                 rec[f"excess_{n}d"] = r - (b1 / b0 - 1) if b0 and b1 else float("nan")
         out.append(rec)
-    return pd.DataFrame(out).reindex(columns=["ticker", "name", "bar_date", "score", "reasons"] + cols)
+    columns = ["ticker", "name", "bar_date", "score", "reasons"] + cols
+    if not out:  # keep text columns as text so date comparisons work on an empty window
+        return pd.DataFrame(columns=columns, dtype=object)
+    return pd.DataFrame(out).reindex(columns=columns)
 
 
 def hit_rate_table(outcomes: pd.DataFrame, horizons: list[int], top_score: int) -> list[dict]:
@@ -824,17 +828,46 @@ signal-day close. A hit = the stock beat the index over the same days. n counts 
 </body></html>"""
 
     overall = table[0] if table else {}
-    lines = [f"## Weekly summary {label}", "",
-             f"**Signals this week:** {len(this_week)} · **in last {wc['lookback_weeks']} weeks:** {len(outcomes)}", ""]
-    if overall:
-        lines += ["| Horizon | n | Hit vs index | Avg | Avg vs index |", "|---|---|---|---|---|"]
-        lines += [f"| {n}d | {overall[f'n_{n}d']} | {_fmt_rate(overall[f'hit_{n}d'])} | "
-                  f"{_fmt_pct(overall[f'avg_{n}d'])} | {_fmt_pct(overall[f'excess_{n}d'])} |" for n in horizons]
-    lines += ["", f"Paper this week: {pstats(wp['week']).replace('&amp;', '&')}",
-              f"Paper all time: {pstats(wp['all']).replace('&amp;', '&')}",
-              *([f"Partial-exit variant, all time: {pstats(wp['pe_all']).replace('&amp;', '&')}"]
-                if pe_cfg.get("enabled") else []),
-              f"Open: {len(wp['open'])}, unrealised {_fmt_sek(wp['unrealised_sek'])}"]
+    def mpstats(st):
+        return pstats(st).replace("&amp;", "&")
+
+    hrows_md = [[r["score"], r["signals"]] + [x for n in horizons for x in (
+        r[f"n_{n}d"], _fmt_rate(r[f"hit_{n}d"]), _fmt_pct(r[f"avg_{n}d"]), _fmt_pct(r[f"excess_{n}d"]))]
+        for r in table]
+    lines = [f"# Weekly summary {label}", "",
+             f"[← Dashboard](../DASHBOARD.md) · Generated {now_local:%a %d %b %Y, %H:%M} · "
+             f"benchmark {cfg['benchmark']} · research tool, not advice.", "",
+             f"## Signal hit rate · last {wc['lookback_weeks']} weeks", "",
+             f"Signals = score ≥ {cfg['alert_min_score']}, one per stock and bar date. Return from the "
+             "signal-day close; a hit = the stock beat the index over the same days. "
+             "n = signals old enough to measure.", "",
+             _md_table(["Score", "Signals"] + [h for n in horizons for h in
+                       (f"{n}d n", f"{n}d hit", f"{n}d avg", f"{n}d vs index")], hrows_md,
+                       "No signals in the window."),
+             f"## Signals this week · {len(this_week)}", "",
+             _md_table(["Stock", "Bar date", "Score"] + [f"{n}d" for n in horizons] + ["Why"],
+                       [[f"{_md(s['name'])} `{s['ticker']}`", s["bar_date"], s["score"]]
+                        + [_fmt_pct(pct(s[f"ret_{n}d"])) for n in horizons] + [_md(s["reasons"])]
+                        for _, s in this_week.iterrows()], "No signals this week."),
+             "## Paper trading", "",
+             f"- **This week:** {mpstats(wp['week'])}",
+             f"- **All time:** {mpstats(wp['all'])}",
+             *([f"- **Partial-exit variant** (sell {pe_cfg['fraction']:.0%} at target, rest at "
+                f"{pe_cfg['remainder_stop']:+.0%} stop or time) – this week: {mpstats(wp['pe_week'])}; "
+                f"all time: {mpstats(wp['pe_all'])}"] if pe_cfg.get("enabled") else []),
+             f"- **Open:** {len(wp['open'])} position(s), unrealised {_fmt_sek(wp['unrealised_sek'])}",
+             f"- P&L assumes {_fmt_sek(notional)[1:]} per trade, no costs.", ""]
+    if len(wp["by_universe"]) > 1:
+        lines += ["### By watchlist version (all time)", "", _md_table(
+            ["Version", "Closed", "Win rate", "Avg", "Index", "Vs index", "P&L"],
+            [[u, st["n"], _fmt_rate(st["win_rate"]), _fmt_pct(st["avg_return"]), _fmt_pct(st["avg_bench"]),
+              _fmt_pct(st["avg_excess"]), _fmt_sek(st["pnl_sek"])] for u, st in wp["by_universe"].items()])]
+    lines += ["### Closed this week", "", _md_table(
+        ["Stock", "Entry", "Exit", "Reason", "Return", "Index same period"],
+        [[f"{_md(t['name'])} `{t['ticker']}`", t["entry_date"], t["exit_date"], t["exit_reason"],
+          _fmt_pct(pd.to_numeric(t["return_pct"], errors="coerce")),
+          _fmt_pct(pd.to_numeric(t["bench_return_pct"], errors="coerce"))]
+         for _, t in wp["week_trades"].iterrows()], "No trades closed this week.")]
 
     row = {"week": label, "generated_local": f"{now_local:%Y-%m-%d %H:%M}",
            "signals_week": len(this_week), "signals_window": len(outcomes)}
@@ -871,11 +904,165 @@ def run_weekly(paper, histories, bench, cfg, now_local) -> tuple[str, str]:
 
     (REPORT_DIR / f"weekly_{row['week']}.html").write_text(html, encoding="utf-8")
     (REPORT_DIR / "weekly_latest.html").write_text(html, encoding="utf-8")
+    (REPORT_DIR / f"weekly_{row['week']}.md").write_text(md, encoding="utf-8")
+    (REPORT_DIR / "weekly_latest.md").write_text(md, encoding="utf-8")
     log = pd.read_csv(WEEKLY_LOG, dtype=str) if WEEKLY_LOG.exists() else pd.DataFrame()
     if not log.empty:
         log = log[log["week"] != row["week"]]   # a forced re-run replaces that week's row
     pd.concat([log, pd.DataFrame([row]).astype(str)], ignore_index=True).to_csv(WEEKLY_LOG, index=False)
     return html, md
+
+
+# --------------------------------------------------------------------------- markdown reports
+# GitHub renders Markdown (not HTML) in a private repo, so the dashboard and the reports
+# are also written as .md files. Links are relative to the repo root unless noted.
+
+def _md(text) -> str:
+    """Escape text for use inside a Markdown table cell."""
+    return str(text).replace("|", "\\|").replace("\n", " ")
+
+
+def _md_table(head: list[str], rows: list[list], empty: str = "None.") -> str:
+    if not rows:
+        return f"_{empty}_\n"
+    out = ["| " + " | ".join(head) + " |", "|" + "|".join("---" for _ in head) + "|"]
+    out += ["| " + " | ".join(str(c) for c in r) + " |" for r in rows]
+    return "\n".join(out) + "\n"
+
+
+def _md_vol(vr) -> str:
+    return "–" if vr is None or (isinstance(vr, float) and math.isnan(vr)) else f"{vr:.1f}x"
+
+
+def _md_stocks(rs, empty="None.") -> str:
+    rows = []
+    for r in rs:
+        heads = "".join(f"<br>· [{_md(h['title'])}](<{h['link']}>)" for h in r["headlines"])
+        rows.append([f"**{_md(r['name'])}** `{r['ticker']}`", r["score"], f"{r['close']:.2f}",
+                     f"{r['chg_1d'] * 100:+.1f}%", f"{r['chg_5d'] * 100:+.1f}%", _md_vol(r["vol_ratio"]),
+                     r["n_24h"], (_md("; ".join(r["reasons"])) or "–") + heads])
+    return _md_table(["Stock", "Score", "Close", "1d", "5d", "Vol/avg", "News 24h", "Why"], rows, empty)
+
+
+def _md_paper(df: pd.DataFrame, empty="None.") -> str:
+    rows = []
+    for _, p in df.iterrows():
+        ret = pd.to_numeric(p["return_pct"], errors="coerce")
+        bret = pd.to_numeric(p["bench_return_pct"], errors="coerce")
+        pe = pd.to_numeric(p["pe_return_pct"], errors="coerce")
+        rows.append([f"{_md(p['name'])} `{p['ticker']}`", p["status"], p["entry_date"] or "–",
+                     p["entry_price"] or "–", p["exit_date"] or "–", p["exit_reason"] or "–",
+                     _fmt_pct(None if pd.isna(ret) else float(ret)),
+                     _fmt_pct(None if pd.isna(bret) else float(bret)),
+                     (f"{p['pe_status']} {_fmt_pct(None if pd.isna(pe) else float(pe))}"
+                      + (f" (half sold {p['pe_partial_date']})" if p["pe_partial_date"] else ""))
+                     if p["pe_status"] else "–"])
+    return _md_table(["Stock", "Status", "Entry", "Entry px", "Exit", "Reason", "Return",
+                      "Index same period", "Partial-exit variant"], rows, empty)
+
+
+def build_digest_md(rows, missing, paper, summary, cfg, now_local) -> str:
+    alerts = [r for r in rows if r["score"] >= cfg["alert_min_score"]]
+    hype = [r for r in rows if r["hype"]]
+    pc = cfg["paper_trading"]
+    out = [f"# Scanner digest · {now_local:%a %d %b %Y, %H:%M}", "",
+           "[← Dashboard](../DASHBOARD.md) · Research tool, not advice. Prices from Yahoo Finance "
+           "may be delayed.", ""]
+    if missing:
+        out += [f"> ⚠️ No price data for: {', '.join(missing)} – check watchlist.csv.", ""]
+    out += [f"## Alerts (score ≥ {cfg['alert_min_score']}) · {len(alerts)}", "", _md_stocks(alerts, "No alerts."),
+            f"## Hype warnings · {len(hype)}", "",
+            f"Up ≥ {cfg['thresholds']['hype_5d_move']:.0%} in 5 days with no company release found.", "",
+            _md_stocks(hype),
+            "## Paper trading", "",
+            f"Rules: enter at next open when score ≥ {pc['min_score']}; exit at +{pc['take_profit']:.0%}, "
+            f"{pc['stop_loss']:.0%}, or after {pc['max_hold_days']} trading days.", "",
+            "### Open and pending", "", _md_paper(paper[paper["status"].isin(["open", "pending"])]),
+            "### Last closed", "", _md_paper(paper[paper["status"] == "closed"].tail(15)),
+            f"## Full watchlist · {len(rows)}", "", _md_stocks(rows)]
+    return "\n".join(out)
+
+
+def _repo_url() -> str | None:
+    """Base URL of this repo when running in GitHub Actions (for links outside the files)."""
+    server, repo = os.environ.get("GITHUB_SERVER_URL"), os.environ.get("GITHUB_REPOSITORY")
+    return f"{server}/{repo}" if server and repo else None
+
+
+def build_dashboard(rows, missing, paper, cfg, now_local) -> str:
+    alerts = [r for r in rows if r["score"] >= cfg["alert_min_score"]]
+    hype = [r for r in rows if r["hype"]]
+    notional = (cfg.get("weekly_summary") or {}).get("notional_sek", 10000)
+    week_start = now_local.date() - dt.timedelta(days=now_local.weekday())
+    wp = weekly_paper(paper, week_start, notional)
+    repo = _repo_url()
+    run_id = os.environ.get("GITHUB_RUN_ID")
+    bar_date = max((r["date"] for r in rows), default="–")
+
+    links = ["[Full digest](reports/latest.md)", "[Weekly summary](reports/weekly_latest.md)"]
+    if repo:
+        links.append(f"[All runs]({repo}/actions)")
+    links += ["[Watchlist](watchlist.csv)", "[Settings](config.yaml)", "[How it works](README.md)"]
+    run = f" · [this run]({repo}/actions/runs/{run_id})" if repo and run_id else ""
+
+    out = ["# 📊 Attention scanner dashboard", "",
+           f"Updated **{now_local:%a %d %b %Y, %H:%M}** (Stockholm) · {len(rows)} stocks · "
+           f"prices to {bar_date}{run}", "",
+           " · ".join(links), ""]
+    if missing:
+        out += [f"> ⚠️ No price data for: {', '.join(missing)}", ""]
+
+    out += [f"## Today: {len(alerts)} alert(s) · {len(hype)} hype warning(s)", "",
+            _md_stocks(alerts, "No alerts on this run.")]
+    if hype:
+        out += ["**Hype warnings** – up ≥ "
+                f"{cfg['thresholds']['hype_5d_move']:.0%} in 5 days, no company release found:", "",
+                _md_stocks(hype)]
+
+    def srow(label, st, n_open):
+        return [label, n_open, st["n"], _fmt_rate(st["win_rate"]), _fmt_pct(st["avg_return"]),
+                _fmt_pct(st["avg_bench"]), _fmt_pct(st["avg_excess"]), _fmt_sek(st["pnl_sek"])]
+
+    pe_on = (cfg["paper_trading"].get("partial_exit") or {}).get("enabled")
+    srows = [srow("Main rules", wp["all"], int(paper["status"].isin(["open", "pending"]).sum()))]
+    if pe_on:
+        srows.append(srow("Partial-exit variant", wp["pe_all"], int((paper["pe_status"] == "open").sum())))
+    out += ["## Paper trading (all time)", "",
+            _md_table(["Rules", "Open/pending", "Closed", "Win rate", "Avg return", "Avg index",
+                       "Vs index", f"P&L at {_fmt_sek(notional)[1:]}/trade"], srows),
+            "### Open and pending", "", _md_paper(paper[paper["status"].isin(["open", "pending"])]),
+            "### Last 10 closed", "", _md_paper(paper[paper["status"] == "closed"].tail(10))]
+
+    sig = load_signals()
+    sig = sig[sig["score"] >= cfg["alert_min_score"]]
+    recent_days = sorted(sig["bar_date"].unique())[-10:]
+    sig = sig[sig["bar_date"].isin(recent_days)].sort_values(["bar_date", "score"], ascending=False).head(25)
+    out += ["## Recent signals (last 10 trading days)", "",
+            _md_table(["Date", "Stock", "Score", "Why"],
+                      [[s["bar_date"], f"{_md(s['name'])} `{s['ticker']}`", s["score"], _md(s["reasons"])]
+                       for _, s in sig.iterrows()], "No signals yet."),
+            f"Full history: [signals_log.csv](data/signals_log.csv)", ""]
+
+    hist = []
+    if WEEKLY_LOG.exists():
+        wk = pd.read_csv(WEEKLY_LOG, dtype=str).fillna("").iloc[::-1]
+        for _, w in wk.head(12).iterrows():
+            md_file = REPORT_DIR / f"weekly_{w['week']}.md"
+            label = f"[{w['week']}](reports/{md_file.name})" if md_file.exists() else w["week"]
+            hit = lambda n: f"{float(w[f'hit_{n}d']):.0f}% (n={w[f'n_{n}d']})" if w.get(f"hit_{n}d") else "–"
+            hist.append([label, w["signals_week"], hit(5), hit(20), w["paper_all_n"],
+                         _fmt_sek(float(w["paper_all_pnl_sek"] or 0)),
+                         _fmt_sek(float(w["paper_pe_all_pnl_sek"])) if w.get("paper_pe_all_pnl_sek") else "–"])
+    out += ["## Weekly history", "",
+            _md_table(["Week", "Signals", "5d hit vs index", "20d hit vs index", "Paper closed (all time)",
+                       "Paper P&L", "Variant P&L"], hist, "No weekly summaries yet (first one on Friday evening)."),
+            "## Data files", "",
+            "- [signals_log.csv](data/signals_log.csv) – every scored stock, every run",
+            "- [paper_trades.csv](data/paper_trades.csv) – all paper trades, both rule sets",
+            "- [weekly_summary.csv](data/weekly_summary.csv) – one row per week",
+            "- [watchlist_review.csv](data/watchlist_review.csv) – stocks the watchlist builder skipped",
+            "", "_Research tool, not investment advice._", ""]
+    return "\n".join(out)
 
 
 # --------------------------------------------------------------------------- main
@@ -977,6 +1164,10 @@ def main(argv=None) -> int:
             with open(gh_summary, "a", encoding="utf-8") as fh:
                 fh.write("\n" + weekly_md)
         print(weekly_md)
+
+    (REPORT_DIR / "latest.md").write_text(build_digest_md(rows, missing, paper, summary, cfg, now_local),
+                                          encoding="utf-8")
+    DASHBOARD.write_text(build_dashboard(rows, missing, paper, cfg, now_local), encoding="utf-8")
 
     n_alerts = sum(r["score"] >= cfg["alert_min_score"] for r in rows)
     email_cfg = cfg.get("email", {})
