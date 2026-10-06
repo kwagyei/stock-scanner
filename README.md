@@ -1,6 +1,6 @@
 # Stockholm small-cap attention scanner (v1)
 
-**📊 [Open the dashboard](DASHBOARD.md)**: latest alerts, paper trades, weekly results and links to every report. Updated on every run.
+**📊 [Open the dashboard](DASHBOARD.md)**: today's alerts, open paper trades and the evaluation verdict, with buttons to the *Today*, *Weekly*, *Paper trades* and *Evaluation* pages. Updated on every run.
 
 A research and alerting tool. It flags unusual attention on Stockholm small caps and
 tracks hypothetical (paper) trades so you can see whether the signals would actually

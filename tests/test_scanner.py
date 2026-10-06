@@ -738,61 +738,148 @@ def test_open_variant_ticker_is_still_fetched(cfg, tmp_paths, monkeypatch):
     assert "OLD.ST" in fetched
 
 
-# --------------------------------------------------------------------------- dashboard / markdown
+# --------------------------------------------------------------------------- markdown pages
+
+import evaluate as ev
+
 
 def _row(**k):
     r = {"ticker": "A.ST", "name": "A | Co", "score": 4, "close": 10.0, "chg_1d": 0.12, "chg_5d": 0.2,
-         "vol_ratio": float("nan"), "n_24h": 2, "reasons": ["volume 6.0x avg", "small cap"], "hype": False,
-         "date": "2026-10-06",
+         "vol_ratio": 6.0, "n_24h": 2, "hype": False, "date": "2026-10-06",
+         "reasons": ["company release <24h", "volume 6.0x avg", "price +12% 1d", "small cap"],
          "headlines": [{"title": "A | Co wins order", "link": "https://x.test/a?b=(1)"}]}
     r.update(k)
     return r
 
 
-def test_md_table_cells_are_escaped():
-    out = scanner._md_stocks([_row()])
-    assert "A \\| Co" in out and "A \\| Co wins order" in out
-    assert "](<https://x.test/a?b=(1)>)" in out          # angle brackets keep odd URLs intact
-    assert "| – |" in out                                 # NaN volume ratio
-    assert all(line.count(" | ") >= 7 for line in out.splitlines()[2:])
+@pytest.mark.parametrize("raw,nice", [
+    ("company release <24h", "📣 Company release"),
+    ("volume 5.1x avg", "📊 Volume 5.1× normal"),
+    ("price -11% 1d", "📉 Big drop ▼ 11%"),
+    ("price +10% 1d", "📈 Big jump ▲ 10%"),
+    ("news spike (3 in 24h vs 1.0/day)", "📰 3 news items today (usually 1.0/day)"),
+    ("small cap", "🔹 Small cap"),
+    ("something new", "something new"),
+])
+def test_friendly_reasons(raw, nice):
+    assert scanner._friendly(raw) == nice
 
 
-def test_dashboard_sections_and_links(cfg, tmp_paths, monkeypatch):
+def test_price_reason_without_number_next_to_a_price_column():
+    assert scanner._friendly("price -11% 1d", short_price=True) == "📉 Big drop"
+    assert "📈 Big jump ·" in scanner._alerts_table([_row()], "")
+
+
+def test_day_format():
+    assert scanner._day("2026-10-06") == "Tue&nbsp;6&nbsp;Oct" and scanner._day("junk") == "junk"
+
+
+def test_why_accepts_list_or_logged_string():
+    assert scanner._why("volume 5.1x avg; small cap") == "📊 Volume 5.1× normal · 🔹 Small cap"
+    assert scanner._why([]) == "–"
+
+
+@pytest.mark.parametrize("pct,out", [(2.5, "▲ 2.5%"), (-11.2, "▼ 11.2%"), (0.01, "0.0%"), (None, "–"),
+                                     (float("nan"), "–")])
+def test_arrow(pct, out):
+    assert scanner._arrow(pct) == out
+
+
+def test_alert_table_escapes_and_headlines_link():
+    t = scanner._alerts_table([_row()], "")
+    assert "**A \\| Co**<br><sub>A.ST</sub>" in t and "▲ 12.0%" in t and "📣 Company release" in t
+    h = scanner._headlines([_row()])
+    assert h.startswith("<details>") and "](<https://x.test/a?b=(1)>)" in h and "A \\| Co wins order" in h
+
+
+def test_nav_buttons(monkeypatch):
+    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+    root, sub = scanner._nav("DASHBOARD.md"), scanner._nav("reports/latest.md")
+    assert "badge/Dashboard-d0d7de" in root and "(reports/latest.md)" in root      # current page greyed
+    assert "(../DASHBOARD.md)" in sub and "(latest.md)" not in sub and "(../reports/latest.md)" in sub
+    assert "badge/Paper%20trades-" in root and "Runs" not in root
     monkeypatch.setenv("GITHUB_SERVER_URL", "https://github.com")
     monkeypatch.setenv("GITHUB_REPOSITORY", "me/repo")
-    monkeypatch.setenv("GITHUB_RUN_ID", "42")
+    assert "(https://github.com/me/repo/actions)" in scanner._nav("DASHBOARD.md")
+
+
+def _paper_fixture():
+    o = _trade("O.ST", "open", ret="4.00", bench="1.00")
+    o.update(entry_date="2026-10-01", entry_price="100.0000", last_price="104.0000", pe_status="open")
+    c = _trade("C.ST", "closed", "2026-10-02", "30.00", "1.00")
+    c.update(entry_date="2026-09-20", exit_reason="target", pe_status="closed", pe_return_pct="15.00",
+             pe_exit_reason="remainder stop")
+    p = _trade("P.ST", "pending")
+    p.update(signal_date="2026-10-06", score="5")
+    return pd.DataFrame([o, c, p], columns=scanner.PAPER_COLUMNS)
+
+
+def test_dashboard(cfg, tmp_paths, monkeypatch):
+    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
     scanner.DATA_DIR.mkdir(); scanner.REPORT_DIR.mkdir()
     scanner.SIGNALS_LOG.write_text("run_utc,bar_date,ticker,name,score,reasons\n"
-                                   "2026-10-06T16:45,2026-10-06,A.ST,A,4,volume\n"
-                                   "2026-10-06T16:45,2026-10-06,B.ST,B,1,news\n")
-    scanner.WEEKLY_LOG.write_text("week,signals_week,hit_5d,n_5d,hit_20d,n_20d,paper_all_n,paper_all_pnl_sek,"
-                                  "paper_pe_all_pnl_sek\n2026-W41,3,50.0,2,,0,1,1500,750\n")
+                                   "2026-10-06T16:45,2026-10-06,A.ST,A,4,volume 6.0x avg\n"
+                                   "2026-10-06T16:45,2026-10-06,B.ST,B,1,small cap\n")
+    scanner.WEEKLY_LOG.write_text("week,signals_week,hit_5d,n_5d,hit_20d,n_20d,paper_all_n,paper_all_pnl_sek\n"
+                                  "2026-W41,3,50.0,2,,0,1,1500\n")
     (scanner.REPORT_DIR / "weekly_2026-W41.md").write_text("x")
-    t = _trade("A.ST", "closed", "2026-10-06", "30.00", "1.00")
-    t.update(pe_status="open", pe_partial_date="2026-10-06", pe_return_pct="15.00")
-    paper = pd.DataFrame([t, _trade("B.ST", "pending")], columns=scanner.PAPER_COLUMNS)
-    md = scanner.build_dashboard([_row(), _row(ticker="H.ST", score=0, hype=True)], ["BAD.ST"], paper,
-                                 cfg, dt.datetime(2026, 10, 6, 18, 45))
-    for s in ["# 📊 Attention scanner dashboard", "## Today: 1 alert(s) · 1 hype warning(s)",
-              "No price data for: BAD.ST", "## Paper trading (all time)", "| Main rules | 1 | 1 | 100% |",
-              "| Partial-exit variant | 1 | 0 |", "(half sold 2026-10-06)", "## Recent signals",
-              "[2026-W41](reports/weekly_2026-W41.md)", "50% (n=2)", "+1 500 SEK", "+750 SEK",
-              "[All runs](https://github.com/me/repo/actions)",
-              "[this run](https://github.com/me/repo/actions/runs/42)", "(reports/latest.md)",
-              "(data/paper_trades.csv)"]:
+    res = ev.evaluate(ev.closed_trades(_paper_fixture()))
+    md = scanner.build_dashboard([_row(), _row(ticker="H.ST", score=0, hype=True)], ["BAD.ST"],
+                                 _paper_fixture(), cfg, dt.datetime(2026, 10, 7, 18, 45), res)
+    for s in ["# 📊 Attention scanner", "> [!WARNING]\n> No price data for: BAD.ST",
+              "| 🔔 Alerts | ⚠️ Hype warnings | 💼 Open trades | ✅ Closed trades | ⚖️ Evaluation |",
+              "| **1**<br><sub>score ≥ 3</sub> | **1** | **1**<br><sub>+1 waiting</sub> | **1** | **NOT YET**",
+              "## ⚠️ Hype warnings", "> [!CAUTION]",
+              "🎯 130.00<br>🛑 85.00", "| 5 of 20 |", "100.00 → 104.00", "⏳ buys at the next open",
+              "> [!NOTE]\n> **Evaluation: NOT YET – 1 of 30 trades**",
+              "[2026-W41](reports/weekly_2026-W41.md)", "50% <sub>of 2</sub>", "+1 500 SEK",
+              "(reports/paper_trades.md)", "(reports/evaluation.md)", "(data/signals_log.csv)"]:
         assert s in md, s
-    assert "B.ST" not in md.split("## Recent signals")[1].split("## Weekly")[0]   # score 1 isn't a signal
+    recent = md.split("Signals in the last 10 trading days")[1].split("</details>")[0]
+    assert "A.ST" in recent and "B.ST" not in recent              # score 1 isn't a signal
+    assert md.count("<details>") == md.count("</details>")
 
 
-def test_dashboard_without_history_or_actions(cfg, tmp_paths, monkeypatch):
+def test_dashboard_empty(cfg, tmp_paths, monkeypatch):
     monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
     md = scanner.build_dashboard([], [], pd.DataFrame(columns=scanner.PAPER_COLUMNS), cfg,
-                                 dt.datetime(2026, 10, 6, 8, 30))
-    assert "No alerts on this run." in md and "No signals yet." in md and "first one on Friday" in md
-    assert "All runs" not in md
+                                 dt.datetime(2026, 10, 6, 8, 30), ev.evaluate(None))
+    for s in ["✅ No alerts on this run.", "No signals yet.", "first one comes on Friday", "No open positions."]:
+        assert s in md, s
+    assert "## ⚠️ Hype warnings" not in md and "Waiting to buy" not in md
 
 
-def test_main_writes_markdown_reports(cfg, tmp_paths, monkeypatch):
+def test_paper_page(cfg):
+    paper = _paper_fixture()
+    md = scanner.build_paper_md(paper, cfg, dt.datetime(2026, 10, 7, 18, 45), ev.evaluate(ev.closed_trades(paper)))
+    for s in ["# 💼 Paper trades", "| **Main rules** | 2 | 1 | 100% | ▲ 30.0% | ▲ 29.0% | +3 000 SEK |",
+              "| **Partial-exit variant** | 1 | 1 |", "## Open (1)", "## Waiting to buy (1)", "## Closed (1)",
+              "2026-09-20 → 2026-10-02", "🎯 Target", "▲ 15.0%<br><sub>🛑 Breakeven stop</sub>"]:
+        assert s in md, s
+
+
+def _eval_res(tmp_path, excess, n):
+    rows = [{"ticker": f"T{i}", "status": "closed", "return_pct": excess[i % len(excess)] + 1,
+             "bench_return_pct": 0, "exit_reason": "time", "exit_date": f"2026-01-{i % 28 + 1:02d}"}
+            for i in range(n)]
+    path = tmp_path / "p.csv"
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return ev.evaluate(ev.load_trades(path))
+
+
+def test_evaluation_page_verdicts(cfg, tmp_path):
+    now = dt.datetime(2026, 10, 7, 18, 45)
+    passed = scanner.build_evaluation_md(_eval_res(tmp_path, [1, 5], 40), None, cfg, now)
+    assert "> [!TIP]\n> **Evaluation: PASS – 40 trades" in passed and "| ✅ | Enough trades | 40 closed (need 30) |" in passed
+    failed = scanner.build_evaluation_md(_eval_res(tmp_path, [6, -4.5], 40), None, cfg, now)
+    assert "> [!WARNING]" in failed and "Failed: unlikely to be luck (t > 2)." in failed and "| ❌ |" in failed
+    empty = scanner.build_evaluation_md(ev.evaluate(None), ev.evaluate(None), cfg, now)
+    assert "No paper-trade log yet" in empty and "## Partial-exit variant" in empty
+    early = scanner.build_evaluation_md(_eval_res(tmp_path, [1, 5], 5), None, cfg, now)
+    assert "| ⏳ | Enough trades | 5 closed (need 30) |" in early and "### By exit reason" in early
+
+
+def test_main_writes_all_pages(cfg, tmp_paths, monkeypatch):
     wl = tmp_paths / "watchlist.csv"
     wl.write_text("ticker,name,query\nX.ST,X,X\n")
     monkeypatch.setattr(scanner, "fetch_history", lambda t, p: flat(70))
@@ -801,14 +888,19 @@ def test_main_writes_markdown_reports(cfg, tmp_paths, monkeypatch):
     monkeypatch.setattr(scanner.time, "sleep", lambda s: None)
     scanner.main(["--no-email", "--weekly", "--watchlist", str(wl)])
     rep = tmp_paths / "reports"
-    assert scanner.DASHBOARD.read_text().startswith("# 📊")
-    assert "## Full watchlist · 1" in (rep / "latest.md").read_text()
-    weekly = (rep / "weekly_latest.md").read_text()
-    assert weekly.startswith("# Weekly summary") and "[← Dashboard](../DASHBOARD.md)" in weekly
+    titles = {scanner.DASHBOARD: "# 📊", rep / "latest.md": "# 📰 Today", rep / "paper_trades.md": "# 💼",
+              rep / "evaluation.md": "# ⚖️ Evaluation", rep / "weekly_latest.md": "# 📅 Weekly summary"}
+    for path, title in titles.items():
+        text = path.read_text()
+        assert text.startswith(title), path
+        assert "img.shields.io/badge/Dashboard" in text, path               # button row on every page
+        assert text.count("<details>") == text.count("</details>"), path
     assert len(list(rep.glob("weekly_20*.md"))) == 1
 
 
 def test_weekly_with_no_signals_in_window(cfg, tmp_paths):
     scanner.DATA_DIR.mkdir(); scanner.REPORT_DIR.mkdir()
     html, md = scanner.run_weekly(pd.DataFrame(columns=scanner.PAPER_COLUMNS), {}, flat(5), cfg, FRI_EVE)
-    assert "No signals in the window." in md and "No signals this week." in md
+    assert "No signals in the window yet." in md and "No signals this week." in md
+    assert "img.shields.io" not in md                    # job-summary version has no button row
+    assert "img.shields.io" in (scanner.REPORT_DIR / "weekly_latest.md").read_text()

@@ -143,6 +143,61 @@ def one_line(res: dict) -> str:
             f"{res['avg_excess']:+.1f}% vs index per trade after costs, t = {t}")
 
 
+def callout(res: dict) -> tuple[str, str]:
+    """(GitHub callout kind, one-sentence explanation) for the verdict."""
+    if res["verdict"] == "NOT YET":
+        return "NOTE", ("Too early to judge. Keep the rules unchanged and let closed trades build up to "
+                        f"{res['min_trades']}.")
+    if res["verdict"] == "PASS":
+        return "TIP", ("On paper the signals beat the index after costs, and it is unlikely to be luck. "
+                       "This describes the past, not the future.")
+    failed = [k for k, ok in res["checks"].items() if not ok]
+    return "WARNING", ("On paper the signals do not reliably beat the index. Failed: " + ", ".join(failed) + ".")
+
+
+def format_markdown(res: dict) -> str:
+    """The full report as Markdown tables (GitHub pages). Same numbers as format_report."""
+    if res["n"] == 0:
+        return ("_No closed paper trades yet. The numbers appear here once the first trade closes._\n"
+                if not res["file_missing"] else "_No paper-trade log yet. Run the scanner first._\n")
+    t = "–" if res["t_stat"] is None else f"{res['t_stat']:.2f}"
+    pp = "–" if res["p_positive"] is None else f"{res['p_positive']:.0%}"
+    detail = {
+        "enough trades": f"{res['n']} closed (need {res['min_trades']})",
+        "beats the index on average": _p(res["avg_excess"]) + " per trade",
+        "still beats it without the best trade": _p(res["excess_wo_best"]) + " per trade",
+        "unlikely to be luck (t > 2)": f"t = {t}",
+    }
+    icon = lambda ok: "✅" if ok else ("⏳" if res["verdict"] == "NOT YET" else "❌")
+    rows = lambda items: "\n".join(f"| {a} | **{b}** | {c} |" for a, b, c in items)
+    head = "| | | |\n|:---|---:|:---|\n"
+    out = ["### The four checks", "", "| | Check | Result |", "|:---:|:---|:---|"]
+    out += [f"| {icon(ok)} | {name[0].upper() + name[1:]} | {detail[name]} |" for name, ok in res["checks"].items()]
+    if res["verdict"] == "NOT YET":
+        out += ["", "<sub>⏳ = not decided until there are enough trades. Early numbers can change a lot.</sub>"]
+    out += ["", f"### Per trade, after {res['cost']:.1f}% cost", "", head + rows([
+        ("Average return", _p(res["avg_net"]), ""),
+        ("Index over the same days", _p(res["avg_bench"]), ""),
+        ("Average excess over the index", _p(res["avg_excess"]), "the edge per trade; the number that matters"),
+        ("Median excess", _p(res["median_excess"]), "a typical trade, ignoring extremes"),
+        ("Excess without the best trade", _p(res["excess_wo_best"]), "does it rest on one lucky trade?"),
+        ("Excess without the best two", _p(res["excess_wo_best2"]), ""),
+    ]), "", "### Wins and losses", "", head + rows([
+        ("Win rate", f"{res['win_rate']:.0f}%", f"{res['n_wins']} of {res['n']} trades made money"),
+        ("Average win", "–" if res["avg_win"] is None else f"{res['avg_win']:+.1f}%", ""),
+        ("Average loss", "–" if res["avg_loss"] is None else f"{res['avg_loss']:+.1f}%", ""),
+        ("Longest losing streak", f"{res['losing_streak']} trade(s)", "losses in a row to sit through"),
+        (f"Worst drawdown at {res['stake']:.0%} per trade", f"{res['max_drawdown']:+.1f}%",
+         "biggest fall from a high point"),
+    ]), "", "### Is it more than luck?", "", head + rows([
+        ("t-statistic", t, "above 2 = unlikely to be chance alone"),
+        ("Chance the true excess is above 0", pp, f"from {RESAMPLES:,} reshuffles of the trades"),
+    ]), "", "### By exit reason", "", "| Exit | Trades | Avg return | Avg vs index |", "|:---|:---:|---:|---:|"]
+    out += [f"| {reason} | {int(r['trades'])} | {r['avg_net']:+.1f}% | {r['avg_excess']:+.1f}% |"
+            for reason, r in res["by_reason"].iterrows()]
+    return "\n".join(out) + "\n"
+
+
 def _p(x, digits=1) -> str:
     return "–" if x is None else f"{x:+.{digits}f}%"
 
