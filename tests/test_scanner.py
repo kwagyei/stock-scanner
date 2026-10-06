@@ -997,3 +997,29 @@ def test_append_csv_rewrites_when_columns_change(tmp_path):
     assert list(df.columns) == ["a", "b", "c"] and df["c"].tolist() == ["", "", "7"]
     scanner.append_csv(path, [])
     assert len(pd.read_csv(path)) == 3
+
+
+def test_stale_bar_is_skipped_not_backdated(cfg, tmp_paths, monkeypatch):
+    """Yahoo dropped the latest bar (seen around midnight): no back-dated signal or paper trade."""
+    wl = tmp_paths / "watchlist.csv"
+    wl.write_text("ticker,name,query\nHOT.ST,Hot,Hot\nOK.ST,Ok,Ok\n")
+    hot = flat(70)
+    hot.iloc[-1] = (100, 112, 100, 111, 6000)                     # would score 4 (with small cap)
+    last = hot.index[-1].date().isoformat()
+    later = (hot.index[-1] + pd.offsets.BDay(1)).date().isoformat()
+    scanner.DATA_DIR.mkdir()
+    scanner.SCORES_LOG.write_text("run_utc,bar_date,ticker,status\n"
+                                  f"x,{later},HOT.ST,ok\nx,{last},OK.ST,ok\nx,{later},OK.ST,no price data\n")
+    monkeypatch.setattr(scanner, "fetch_history", lambda t, p: hot if t == "HOT.ST" else flat(70))
+    monkeypatch.setattr(scanner, "fetch_news", lambda q, c: [])
+    monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: 1e9)
+    monkeypatch.setattr(scanner.time, "sleep", lambda s: None)
+    scanner.main(["--no-email", "--watchlist", str(wl)])
+
+    assert not scanner.PAPER_LOG.exists() or "HOT.ST" not in scanner.PAPER_LOG.read_text()
+    assert not scanner.SIGNALS_LOG.exists() or "HOT.ST" not in scanner.SIGNALS_LOG.read_text()
+    log = pd.read_csv(scanner.SCORES_LOG, dtype=str).fillna("")
+    new = log[log["run_utc"] != "x"].set_index("ticker")
+    assert new.loc["HOT.ST", "status"] == "stale price data"
+    assert new.loc["OK.ST", "status"] == "ok"                    # same date as before is fine
+    assert "HOT.ST (stale)" in scanner.DASHBOARD.read_text()

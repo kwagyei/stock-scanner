@@ -481,7 +481,16 @@ def add_paper_signals(paper: pd.DataFrame, rows: list[dict], cfg: dict,
 
 # --------------------------------------------------------------------------- score log
 
-def score_log_rows(rows, missing, wl, now, universe, news_checked=True) -> list[dict]:
+def last_logged_bars() -> dict:
+    """Latest bar date already logged per ticker (from the score log)."""
+    if not SCORES_LOG.exists():
+        return {}
+    log = pd.read_csv(SCORES_LOG, dtype=str, usecols=lambda c: c in ("ticker", "status", "bar_date")).fillna("")
+    log = log[log["status"] == "ok"]
+    return log.groupby("ticker")["bar_date"].max().to_dict()
+
+
+def score_log_rows(rows, missing, wl, now, universe, news_checked=True, stale=()) -> list[dict]:
     """One row per watchlist stock for this run, scored or not; stocks without price data too."""
     run = now.isoformat(timespec="minutes")
     out = []
@@ -502,8 +511,9 @@ def score_log_rows(rows, missing, wl, now, universe, news_checked=True) -> list[
     blank = {c: "" for c in ["bar_date", "score", *(f"pts_{k}" for k in SCORE_COMPONENTS), "hype", "close",
                              "chg_1d", "chg_5d", "vol_ratio", "news_24h", "releases_24h", "market_cap_msek",
                              "reasons"]}
-    out += [{"run_utc": run, "ticker": t, "name": names.get(t, ""), "status": "no price data",
-             **blank, "universe": universe} for t in missing]
+    out += [{"run_utc": run, "ticker": t, "name": names.get(t, ""),
+             "status": "stale price data" if t in stale else "no price data",
+             **blank, "universe": universe} for t in [*missing, *stale]]
     return out
 
 
@@ -1407,11 +1417,19 @@ def main(argv=None) -> int:
     if bench.empty:
         print(f"[warn] no benchmark data for {cfg['benchmark']}", file=sys.stderr)
 
-    rows, missing = [], []
+    rows, missing, stale = [], [], []
+    seen = last_logged_bars()
     for _, w in wl.iterrows():
         pm = price_metrics(histories.get(w["ticker"]), cfg)
         if pm is None:
             missing.append(w["ticker"])
+            continue
+        # Yahoo sometimes drops the latest bar for a while (seen around midnight). Scoring an older
+        # bar than one already logged would back-date signals and paper entries, so skip it.
+        if pm["date"] < seen.get(w["ticker"], ""):
+            print(f"[warn] {w['ticker']}: Yahoo returned {pm['date']}, older than the logged "
+                  f"{seen[w['ticker']]}; skipped this run", file=sys.stderr)
+            stale.append(w["ticker"])
             continue
         pause = cfg["news"].get("pause_seconds", 1.0)
         items, releases = [], []
@@ -1458,7 +1476,8 @@ def main(argv=None) -> int:
         pd.DataFrame(log_rows).to_csv(SIGNALS_LOG, mode="a", index=False,
                                       header=not SIGNALS_LOG.exists())
     append_csv(SCORES_LOG, score_log_rows(rows, missing, wl, now, watchlist_version(Path(args.watchlist)),
-                                          news_checked=not args.no_news))
+                                          news_checked=not args.no_news, stale=stale))
+    missing = missing + [f"{t} (stale)" for t in stale]   # shown in the reports' warnings
 
     html = build_html(rows, missing, paper, summary, cfg, now_local, digest_eval)
     stamp = f"{now_local:%Y-%m-%d_%H%M}"
