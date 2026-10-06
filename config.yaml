@@ -60,7 +60,7 @@ paper_trading:
 # Stockholm, filtered on liquidity. Rows marked source=manual in watchlist.csv are always kept.
 universe:
   segments: [SMALL_CAP, FIRST_NORTH]
-  min_median_turnover_sek: 1000000   # median daily close x volume over turnover_days
+  min_median_turnover_sek: 500000    # median daily close x volume over turnover_days
   turnover_days: 60
   min_history_days: 40               # fewer bars (new listings) -> sent to review instead
 

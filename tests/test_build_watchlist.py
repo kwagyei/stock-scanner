@@ -1,4 +1,5 @@
 """Offline tests for build_watchlist.py. All network calls are mocked."""
+import re
 import socket
 
 import pandas as pd
@@ -26,9 +27,10 @@ def test_news_query_strips_legal_form(company, query):
 
 
 def test_class_suffix_gives_company_stem():
-    names = pd.Series(["Episurf B", "Acrinova A", "Implantica SDB", "Navigo Invest Pref", "AAC Clyde Space"])
+    names = pd.Series(["Episurf B", "Acrinova A", "Implantica SDB", "Navigo Invest Pref", "AAC Clyde Space",
+                       "Hilbert Group ser. B"])
     assert list(names.str.replace(bw.CLASS_SUFFIX, "", regex=True)) == [
-        "Episurf", "Acrinova", "Implantica", "Navigo Invest", "AAC Clyde Space"]
+        "Episurf", "Acrinova", "Implantica", "Navigo Invest", "AAC Clyde Space", "Hilbert Group"]
 
 
 def test_build(monkeypatch, tmp_path, capsys):
@@ -59,8 +61,8 @@ def test_build(monkeypatch, tmp_path, capsys):
 
     assert bw.main(["--watchlist", str(wl)]) == 0
 
-    text = wl.read_text()
-    assert "# version: auto-" in text
+    version = scanner.watchlist_version(wl)
+    assert re.fullmatch(r"auto-\d{4}-\d{2}-\d{2}-[0-9a-f]{6}", version)
     out = scanner.load_watchlist(wl)
     assert list(zip(out["ticker"], out["source"], out["mfn_slug"])) == [
         ("MAN.ST", "manual", "manual-co"),          # kept although illiquid
@@ -78,3 +80,8 @@ def test_build(monkeypatch, tmp_path, capsys):
     assert bw.main(["--watchlist", str(wl)]) == 0
     assert looked_up == ["NOMFN"]
     assert list(scanner.load_watchlist(wl)["ticker"]) == ["MAN.ST", "BIG-B.ST"]
+    assert scanner.watchlist_version(wl) == version          # same members, same version
+
+    turnover["BIG-B.ST"] = (1e5, 60)                          # now illiquid -> membership changes
+    assert bw.main(["--watchlist", str(wl)]) == 0
+    assert scanner.watchlist_version(wl) != version

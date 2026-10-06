@@ -2,8 +2,8 @@
 # query  = news search phrase. mfn_slug = company slug on mfn.se (blank = Google News only).
 # source = manual rows are kept by build_watchlist.py; auto rows are rebuilt on every run.
 #          To customise an auto row (e.g. a better query), change its source to manual.
-# version: auto-2026-10-06
-# built 2026-10-06 by build_watchlist.py: 52 auto rows (Nasdaq Stockholm Small Cap + First North, liquidity-filtered)
+# version: auto-2026-10-06-73556e
+# built 2026-10-06 by build_watchlist.py: 87 auto rows (Nasdaq Stockholm Small Cap + First North, liquidity-filtered)
 ticker,name,query,mfn_slug,source
 SIVE.ST,Sivers Semiconductors,Sivers Semiconductors,sivers-semiconductors,manual
 ACCON.ST,Acconeer,Acconeer,acconeer,manual
@@ -26,39 +26,70 @@ BAHN-B.ST,Bahnhof,Bahnhof,bahnhof,auto
 BEAMMW-B.ST,BeammWave,BeammWave,beammwave,auto
 BERNER-B.ST,Berner Industrier,Berner Industrier,berner-industrier,auto
 BORG.ST,Björn Borg,Björn Borg,bjorn-borg,auto
+BLINC-B.ST,BlincVision AB,BlincVision,blincvision,auto
 BULTEN.ST,Bulten,Bulten,bulten,auto
+BYGGP.ST,ByggPartner Gruppen,ByggPartner Gruppen,byggpartnergruppen,auto
 CANTA.ST,Cantargia,Cantargia,cantargia,auto
 CARA.ST,Carasent,Carasent,carasent,auto
 CRNO-B.ST,Cereno Scientific,Cereno Scientific,cereno-scientific,auto
 CHEF.ST,Cheffelo,Cheffelo,cheffelo,auto
 CLAV.ST,Clavister,Clavister,clavister,auto
 COFFEE-B.ST,Coffee Stain Group,Coffee Stain Group,coffee-stain,auto
+DVYSR.ST,Devyser Diagnostics,Devyser Diagnostics,devyser-diagnostics,auto
 DICOT.ST,Dicot Pharma,Dicot Pharma,dicot-pharma,auto
+EQL.ST,EQL Pharma,EQL Pharma,eql-pharma,auto
+ELIC.ST,Elicera Therapeutics,Elicera Therapeutics,elicera-therapeutics,auto
+ELLOS.ST,Ellos Holding,Ellos Holding,ellos-holding,auto
 EG7.ST,Enad Global 7,Enad Global 7,enad-global-7,auto
 EOLU-B.ST,Eolus,Eolus,eolus,auto
+EXS.ST,Exsitec Holding,Exsitec Holding,exsitec-holding,auto
+FASTAT.ST,Fastator,Fastator,fastator,auto
+FLEXQ.ST,FlexQube,FlexQube,flexqube,auto
+FREJA.ST,Freja eID Group,Freja eID Group,freja-eid-group,auto
+G5EN.ST,G5 Entertainment,G5 Entertainment,g5-entertainment,auto
+GRANGX.ST,GRANGEX,GRANGEX,grangex,auto
 GENO.ST,Genovis,Genovis,genovis,auto
 GOMX.ST,GomSpace Group,GomSpace Group,gomspace-group,auto
 GULD.ST,Guldbrev Holding,Guldbrev Holding,guldbrev,auto
 HAYPP.ST,Haypp Group,Haypp Group,haypp,auto
+HILB-B.ST,Hilbert Group,Hilbert Group,hilbertgroup,auto
+ITECH.ST,I-Tech,I-Tech,i-tech,auto
 IRLAB-A.ST,IRLAB Therapeutics,IRLAB Therapeutics,irlab-therapeutics,auto
 IDUN-B.ST,Idun Industrier,Idun Industrier,idun-industrier,auto
 IMP-A-SDB.ST,Implantica,Implantica,implantica,auto
 INISS-B.ST,Inission,Inission,inission,auto
+K33.ST,K33,K33,k33,auto
 KAMBI.ST,Kambi Group Plc,Kambi Group,kambi-group,auto
+KEBNI-B.ST,KebNi,KebNi,kebni,auto
 KEOC.ST,Keo Capital,Keo Capital,keo-capital,auto
+BRAVE.ST,Kinda Brave Entertainment,Kinda Brave Entertainment,kinda-brave,auto
 KJELL.ST,Kjell Group,Kjell Group,kjell,auto
 MSAB-B.ST,Micro Systemation,Micro Systemation,micro-systemation,auto
 MSON-B.ST,Midsona,Midsona,midsona,auto
 MIDS.ST,Midsummer,Midsummer,midsummer,auto
+MINEST.ST,Minesto,Minesto,minesto,auto
 NYAB.ST,NYAB,NYAB,nyab,auto
 NANEXA.ST,Nanexa,Nanexa,nanexa,auto
 NREST.ST,Nordrest Holding,Nordrest Holding,nordrest,auto
 ONCO.ST,Oncopeptides,Oncopeptides,oncopeptides,auto
+OSSD.ST,OssDsign,OssDsign,ossdsign,auto
+PAX.ST,Paxman,Paxman,paxman,auto
+PIERCE.ST,Pierce Group,Pierce Group,pierce-group,auto
 PREV-B.ST,Prevas,Prevas,prevas,auto
+PRIC-B.ST,Pricer,Pricer,pricer,auto
+PROGEN.ST,Prostatype Genomics,Prostatype Genomics,prostatype-genomics,auto
+QLIRO.ST,Qliro,Qliro,qliro-ab,auto
+RROS.ST,Rottneros,Rottneros,rottneros,auto
+RUG.ST,RugVista Group,RugVista Group,rugvista-group,auto
 SALT-B.ST,SaltX Technology Holding,SaltX Technology Holding,saltx-technology-holding,auto
 SANION.ST,Saniona,Saniona,saniona,auto
+SEDANA.ST,Sedana Medical,Sedana Medical,sedana-medical,auto
+SEZI.ST,Senzime,Senzime,senzime,auto
 SNM-SDB.ST,ShaMaran Petroleum Ltd,ShaMaran Petroleum,shamaran-petroleum,auto
+SOLT.ST,SolTech Energy Sweden,SolTech Energy Sweden,soltech-energy-sweden,auto
 SFAB.ST,Solid Försäkringsaktiebolag,Solid Försäkringsaktiebolag,solid-forsakring,auto
+SPRINT.ST,Sprint Bioscience,Sprint Bioscience,sprint-bioscience,auto
+STIL.ST,Stille,Stille,stille,auto
 SVIK.ST,Studsvik,Studsvik,studsvik,auto
 SUBGEN.ST,Subgen AI,Subgen AI,subgenai,auto
 SUS.ST,Surgical Science Sweden,Surgical Science Sweden,surgical-science-sweden,auto
@@ -67,7 +98,11 @@ SYNACT.ST,SynAct Pharma,SynAct Pharma,synact-pharma,auto
 TEQ.ST,Teqnion,Teqnion,teqnion,auto
 TERNOR.ST,Terranor Group,Terranor Group,terranor-group,auto
 TOBII.ST,Tobii,Tobii,tobii,auto
+UNIBAP.ST,Unibap Space Solutions,Unibap Space Solutions,unibap-space-solutions,auto
 UPSALE.ST,Upsales Technology,Upsales Technology,upsales-technology,auto
 VER.ST,Verve Group Media,Verve Group Media,verve-group-media,auto
 W5.ST,W5 Solutions,W5 Solutions,w5-solutions,auto
+WSG.ST,WS WeSports Group,WS WeSports Group,ws-we-sports-group,auto
+WPTG-B.ST,White Pearl Technology Group,White Pearl Technology Group,white-pearl,auto
+XSPRAY.ST,Xspray Pharma,Xspray Pharma,xspray-pharma,auto
 ZZ-B.ST,Zinzino,Zinzino,zinzino,auto

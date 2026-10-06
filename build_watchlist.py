@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import re
 import sys
@@ -38,7 +39,7 @@ import scanner
 NASDAQ_URL = ("https://api.nasdaq.com/api/nordic/screener/shares"
               "?category={category}&tableonly=true&market=STO{segment}")
 MFN_SEARCH = "https://mfn.se/search/companies?query={q}"
-CLASS_SUFFIX = re.compile(r"\s+(A|B|C|D|SDB|A SDB|STAM|PREF|Pref)$")
+CLASS_SUFFIX = re.compile(r"\s+(ser\.?\s*)?(A|B|C|D|SDB|A SDB|STAM|PREF|Pref)$")
 LEGAL_SUFFIX = re.compile(r"\s+(AB|\(publ\)|Plc|plc|PLC|Ltd\.?|Inc\.?|Corp\.?|ASA|A/S|Oyj|SE|N\.V\.)$")
 REVIEW_LOG = scanner.DATA_DIR / "watchlist_review.csv"
 PAUSE = 1.0
@@ -206,7 +207,9 @@ def main(argv=None) -> int:
 
     old_auto = set(current.loc[current["source"] == "auto", "ticker"])
     added, removed = sorted(set(auto["ticker"]) - old_auto), sorted(old_auto - set(auto["ticker"]))
-    version = f"auto-{dt.date.today().isoformat()}"
+    # Date plus a hash of the membership: any change in tickers gives a new version.
+    members = ",".join(sorted(set(manual["ticker"]) | set(auto["ticker"])))
+    version = f"auto-{dt.date.today().isoformat()}-{hashlib.sha1(members.encode()).hexdigest()[:6]}"
     print(f"[info] manual rows kept: {len(manual)} · auto rows: {len(auto)} "
           f"(+{len(added)} / -{len(removed)} vs current) · below liquidity floor: {n_illiquid} "
           f"· for review: {len(review)}")
