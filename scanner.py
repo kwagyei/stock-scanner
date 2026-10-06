@@ -6,7 +6,8 @@ Research and alerting tool. It does NOT place trades.
 
 Each run:
   1. Pulls daily price/volume history for every ticker in watchlist.csv (Yahoo Finance).
-  2. Pulls recent news per company (Google News RSS, Swedish edition).
+  2. Pulls recent news per company (Google News RSS, Swedish edition) and company
+     releases straight from MFN (which also carries Cision-distributed releases).
   3. Scores each stock on: fresh company release, abnormal volume, big price move,
      news-count spike, small market cap.
   4. Flags "hype warnings": big 5-day run-ups with no company release behind them.
@@ -16,7 +17,7 @@ Each run:
 
 Usage:
   python scanner.py                 # normal run
-  python scanner.py --no-news       # skip news fetching (faster, price/volume only)
+  python scanner.py --no-news       # skip news and release fetching (price/volume only)
   python scanner.py --no-email      # never send e-mail on this run
 """
 from __future__ import annotations
@@ -45,6 +46,7 @@ REPORT_DIR = ROOT / "reports"
 SIGNALS_LOG = DATA_DIR / "signals_log.csv"
 PAPER_LOG = DATA_DIR / "paper_trades.csv"
 UTC = dt.timezone.utc
+USER_AGENT = "Mozilla/5.0 (stock-attention-scanner)"
 
 PAPER_COLUMNS = [
     "id", "ticker", "name", "signal_date", "score", "status",
@@ -68,6 +70,9 @@ def load_watchlist(path: Path) -> pd.DataFrame:
     if "query" not in wl.columns:
         wl["query"] = ""
     wl["query"] = wl.apply(lambda r: r["query"].strip() or r["name"], axis=1)
+    if "mfn_slug" not in wl.columns:
+        wl["mfn_slug"] = ""
+    wl["mfn_slug"] = wl["mfn_slug"].str.strip()
     return wl[wl["ticker"] != ""].reset_index(drop=True)
 
 
@@ -107,7 +112,7 @@ def fetch_news(query: str, cfg: dict) -> list[dict]:
         + f"&ceid={ncfg['country']}:{ncfg['language']}"
     )
     try:
-        feed = feedparser.parse(url, agent="Mozilla/5.0 (stock-attention-scanner)")
+        feed = feedparser.parse(url, agent=USER_AGENT)
     except Exception as exc:
         print(f"[warn] news fetch failed for {query}: {exc}", file=sys.stderr)
         return []
@@ -124,6 +129,38 @@ def fetch_news(query: str, cfg: dict) -> list[dict]:
         items.append({"title": e.get("title", ""), "link": e.get("link", ""),
                       "source": source, "ts": ts})
     return items
+
+
+def fetch_releases(slug: str, cfg: dict) -> list[dict]:
+    """Company releases from MFN's per-company feed (MFN- and Cision-distributed).
+
+    Swedish and English versions of a release share a timestamp; keep one per
+    timestamp, preferring the configured news language.
+    """
+    limit = cfg["releases"]["mfn_limit"]
+    url = f"https://mfn.se/all/a/{urllib.parse.quote(slug)}.rss?limit={limit}"
+    try:
+        feed = feedparser.parse(url, agent=USER_AGENT)
+    except Exception as exc:
+        print(f"[warn] release fetch failed for {slug}: {exc}", file=sys.stderr)
+        return []
+    if feed.get("bozo") and not feed.entries:
+        print(f"[warn] release fetch failed for {slug}: {feed.get('bozo_exception')}", file=sys.stderr)
+        return []
+    if not feed.entries:
+        print(f"[warn] no MFN releases for '{slug}' – check mfn_slug in watchlist.csv", file=sys.stderr)
+        return []
+    lang = cfg["news"]["language"]
+    by_ts = {}
+    for e in feed.entries:
+        pp = e.get("published_parsed")
+        if not pp:
+            continue
+        ts = dt.datetime(*pp[:6], tzinfo=UTC)
+        if ts not in by_ts or e.get("x_language") == lang:
+            by_ts[ts] = {"title": e.get("title", ""), "link": e.get("link", ""),
+                         "source": "MFN", "ts": ts}
+    return sorted(by_ts.values(), key=lambda i: i["ts"], reverse=True)
 
 
 # --------------------------------------------------------------------------- metrics
@@ -148,7 +185,12 @@ def price_metrics(hist: pd.DataFrame, cfg: dict) -> dict | None:
     }
 
 
-def news_metrics(items: list[dict], now: dt.datetime, cfg: dict) -> dict:
+def news_metrics(items: list[dict], now: dt.datetime, cfg: dict, releases=()) -> dict:
+    """items: Google News results. releases: direct company releases (MFN).
+
+    Releases only feed the release signal and hype check; the news-spike count
+    stays based on Google News alone.
+    """
     lookback = cfg["news"]["lookback_days"]
     t = cfg["thresholds"]
     day = dt.timedelta(hours=24)
@@ -161,8 +203,11 @@ def news_metrics(items: list[dict], now: dt.datetime, cfg: dict) -> dict:
     def is_release(i):
         return any(k in i["source"].lower() for k in release_keys)
 
-    releases_24h = [i for i in recent if is_release(i)]
-    releases_window = [i for i in dated if is_release(i)]
+    direct_24h = [r for r in releases if now - r["ts"] <= day]
+    direct_window = [r for r in releases if now - r["ts"] <= dt.timedelta(days=lookback)]
+    releases_24h = sorted([i for i in recent if is_release(i)] + direct_24h,
+                          key=lambda i: i["ts"], reverse=True)
+    releases_window = [i for i in dated if is_release(i)] + direct_window
     spike = (len(recent) >= t["news_spike_min_items"]
              and len(recent) >= t["news_spike_multiplier"] * baseline)
     return {
@@ -171,7 +216,7 @@ def news_metrics(items: list[dict], now: dt.datetime, cfg: dict) -> dict:
         "spike": spike,
         "releases_24h": releases_24h,
         "has_release_window": bool(releases_window),
-        "headlines": recent[:3],
+        "headlines": (releases_24h + [i for i in recent if not is_release(i)])[:3],
     }
 
 
@@ -494,10 +539,15 @@ def main(argv=None) -> int:
         if pm is None:
             missing.append(w["ticker"])
             continue
-        items = [] if args.no_news else fetch_news(w["query"], cfg)
+        pause = cfg["news"].get("pause_seconds", 1.0)
+        items, releases = [], []
         if not args.no_news:
-            time.sleep(cfg["news"].get("pause_seconds", 1.0))
-        nm = news_metrics(items, now, cfg)
+            items = fetch_news(w["query"], cfg)
+            time.sleep(pause)
+            if cfg.get("releases", {}).get("enabled") and w["mfn_slug"]:
+                releases = fetch_releases(w["mfn_slug"], cfg)
+                time.sleep(pause)
+        nm = news_metrics(items, now, cfg, releases)
         mcap = fetch_market_cap(w["ticker"])
         score, reasons, hype = score_stock(pm, nm, mcap, cfg)
         rows.append({

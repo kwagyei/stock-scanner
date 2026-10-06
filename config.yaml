@@ -17,8 +17,14 @@ alert_min_score: 3          # shown under "Alerts" in the digest
 # Google News source names that count as a company release (case-insensitive substring).
 # Verified 2026-10-06: Google News labels the wires "Cision News" (news.cision.com) and
 # "storage.mfn.se". Coverage of these wires in Google News is very sparse, so expect
-# most real releases to be missed until a direct MFN/Cision feed is added.
+# most real releases to be missed; the direct MFN feed below is the primary source.
 release_sources: [cision, mfn, globenewswire, inderes, nasdaq]
+
+# Company releases straight from MFN, which also carries Cision-distributed releases.
+# Per-company feed: https://mfn.se/all/a/<mfn_slug>.rss (mfn_slug column in watchlist.csv).
+releases:
+  enabled: true
+  mfn_limit: 20             # newest items per request; enough to cover news.lookback_days
 
 news:
   lookback_days: 7

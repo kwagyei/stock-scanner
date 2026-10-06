@@ -302,3 +302,77 @@ def test_main_persists_trade_lifecycle(cfg, tmp_paths, monkeypatch):
     p = pd.read_csv(scanner.PAPER_LOG, dtype=str).fillna("")
     assert len(p) == 1
     assert list(p[["status", "exit_reason", "exit_price"]].iloc[0]) == ["closed", "stop", "90.0000"]
+
+
+# --------------------------------------------------------------------------- MFN releases
+
+MFN_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel xmlns:x="https://mfn.se/schemas/rss-ns-x/"><title>MFN</title>
+<item><title>Eltel vinner ramavtal</title><link>https://mfn.se/a/eltel/sv-1</link>
+  <pubDate>Mon, 06 Oct 2026 06:00:00 +0000</pubDate><x:language>sv</x:language></item>
+<item><title>Eltel wins frame agreement</title><link>https://mfn.se/a/eltel/en-1</link>
+  <pubDate>Mon, 06 Oct 2026 06:00:00 +0000</pubDate><x:language>en</x:language></item>
+<item><title>Half-year report</title><link>https://mfn.se/cis/a/eltel/en-2</link>
+  <pubDate>Tue, 21 Jul 2026 06:00:00 +0000</pubDate><x:language>en</x:language></item>
+</channel></rss>"""
+
+EMPTY_XML = """<?xml version="1.0"?><rss version="2.0"><channel><title>MFN</title></channel></rss>"""
+
+
+def mock_feed(monkeypatch, xml):
+    real_parse, urls = scanner.feedparser.parse, []
+    monkeypatch.setattr(scanner.feedparser, "parse",
+                        lambda url, agent=None: urls.append(url) or real_parse(xml))
+    return urls
+
+
+def test_fetch_releases_dedupes_language_twins(cfg, monkeypatch):
+    urls = mock_feed(monkeypatch, MFN_XML)
+    rel = scanner.fetch_releases("eltel", cfg)
+    assert urls == ["https://mfn.se/all/a/eltel.rss?limit=20"]
+    assert [r["title"] for r in rel] == ["Eltel vinner ramavtal", "Half-year report"]
+    assert rel[0]["ts"] == dt.datetime(2026, 10, 6, 6, 0, tzinfo=UTC)
+    assert {r["source"] for r in rel} == {"MFN"}
+
+
+def test_fetch_releases_warns_on_unknown_slug(cfg, monkeypatch, capsys):
+    mock_feed(monkeypatch, EMPTY_XML)
+    assert scanner.fetch_releases("no-such-co", cfg) == []
+    assert "check mfn_slug" in capsys.readouterr().err
+
+
+def mfn(hours_ago, title="release"):
+    return {"title": title, "link": "http://mfn", "source": "MFN",
+            "ts": NOW - dt.timedelta(hours=hours_ago)}
+
+
+def test_mfn_release_scores_but_does_not_count_as_news(cfg):
+    pm = scanner.price_metrics(flat(70), cfg)
+    rels = [mfn(2, "Order"), mfn(3), mfn(4)]
+    nm = scanner.news_metrics([news("di.se", 1)], NOW, cfg, rels)
+    assert nm["n_24h"] == 1 and not nm["spike"]
+    assert nm["headlines"][0]["title"] == "Order"
+    score, reasons, _ = scanner.score_stock(pm, nm, None, cfg)
+    assert (score, reasons) == (2, ["company release <24h"])
+
+
+@pytest.mark.parametrize("hours_ago,expected_hype", [(100, False), (24 * 30, True)])
+def test_mfn_release_window_for_hype(cfg, hours_ago, expected_hype):
+    pm = scanner.price_metrics(_run_up(0.6), cfg)
+    nm = scanner.news_metrics([], NOW, cfg, [mfn(hours_ago)])
+    assert scanner.score_stock(pm, nm, None, cfg)[2] is expected_hype
+
+
+def test_main_fetches_releases_only_with_slug(cfg, tmp_paths, monkeypatch):
+    wl = tmp_paths / "watchlist.csv"
+    wl.write_text("ticker,name,query,mfn_slug\nA.ST,A,A,a-co\nB.ST,B,B,\n")
+    calls = []
+    monkeypatch.setattr(scanner, "fetch_history", lambda t, p: flat(70))
+    monkeypatch.setattr(scanner, "fetch_news", lambda q, c: [])
+    monkeypatch.setattr(scanner, "fetch_releases", lambda s, c: calls.append(s) or [])
+    monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: None)
+    monkeypatch.setattr(scanner.time, "sleep", lambda s: None)
+    scanner.main(["--no-email", "--watchlist", str(wl)])
+    assert calls == ["a-co"]
+    scanner.main(["--no-email", "--no-news", "--watchlist", str(wl)])
+    assert calls == ["a-co"]

@@ -7,12 +7,13 @@ have made money. **It never places trades.**
 ## What each run does
 
 1. Downloads daily price and volume for every stock in `watchlist.csv` (Yahoo Finance).
-2. Downloads the past week of news per company (Google News RSS, Swedish edition).
+2. Downloads the past week of news per company (Google News RSS, Swedish edition) and the
+   company's own releases from MFN (mfn.se, which also carries Cision-distributed releases).
 3. Scores each stock:
 
    | Signal | Points |
    |---|---|
-   | Company release in last 24h (Cision, MFN, Inderes, GlobeNewswire, Nasdaq) | +2 |
+   | Company release in last 24h (MFN feed, or a wire source in Google News) | +2 |
    | Volume ≥ 5x its 60-day average (≥ 3x gives +1) | +2 |
    | Price move ≥ ±10% in one day | +1 |
    | News spike: ≥ 3 items in 24h and ≥ 3x the week's daily average | +1 |
@@ -82,8 +83,13 @@ The PC must be on at those times.
 
 - **Prices:** Yahoo data is unofficial and may be delayed. The tool uses daily bars only,
   so moves inside a single day are invisible.
-- **Release detection:** based on the Google News source name. Google News can lag
-  the actual Cision/MFN release by minutes to hours.
+- **Release detection:** primarily the per-company MFN feed (`mfn_slug` in `watchlist.csv`;
+  find it in the company's URL on mfn.se). Google News rarely indexes Cision/MFN, so a
+  stock with a blank slug will almost never get the release signal. Every MFN item counts,
+  including routine ones (buyback updates, share-count notices).
+- **macOS local runs:** the python.org installer ships without CA certificates, so news and
+  release fetches fail with `CERTIFICATE_VERIFY_FAILED`. Run *Install Certificates.command*
+  in `/Applications/Python 3.x/` once.
 - **No social media yet.** X requires paid API access, and scraping it breaks its terms.
   Reddit and the Placera forum are candidates for v2.
 - **Paper fills:** these are idealised. There's no courtage, no spread, and thin small
