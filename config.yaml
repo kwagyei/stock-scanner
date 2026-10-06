@@ -71,6 +71,14 @@ universe:
   turnover_days: 60
   min_history_days: 40               # fewer bars (new listings) -> sent to review instead
 
+# evaluate.py: the judge of whether the signals beat the index after costs.
+# Also used for the one-line verdict in the evening digest.
+evaluation:
+  cost_pct: 1.0             # round-trip cost per trade, in percent (courtage + spread)
+  stake: 0.10               # share of the account per trade, for the drawdown figure
+  min_trades: 30            # closed trades needed before PASS/FAIL (otherwise NOT YET)
+  digest_after_hour: 12     # Stockholm hour from which the digest shows the verdict (evening run)
+
 weekly_summary:
   enabled: true
   weekday: 4                # 0=Mon … 4=Fri. Generated once per ISO week, on the first run

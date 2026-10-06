@@ -98,6 +98,45 @@ The PC must be on at those times.
    fit the noise. After about 30 closed paper trades, compare the average return with the
    index column. If the signals don't beat the index on paper, they won't with real money.
 
+## Judging the results (evaluate.py)
+
+`evaluate.py` decides whether the signals are worth trading with real money. It reads the
+closed trades in `data/paper_trades.csv`, takes off a round-trip cost, and compares each
+trade with the index over the same days. It never changes any data.
+
+```
+python evaluate.py                    # main paper-trade rules
+python evaluate.py --variant          # the partial-exit variant
+python evaluate.py --cost 0.5 --stake 0.05 --min-trades 50
+```
+
+Defaults (also used for the one-line verdict in the evening digest and on the dashboard)
+are under `evaluation:` in `config.yaml`: 1.0% cost per round trip, 10% of the account per
+trade, 30 closed trades before a verdict.
+
+**The verdict**
+
+- **NOT YET**: fewer than 30 closed trades. Keep the rules fixed and wait.
+- **PASS**: all four hold: enough trades; the average trade beats the index after
+  costs; it still does with the single best trade removed; and the t-statistic is above 2.
+- **FAIL**: anything else. On paper the signals don't beat simply holding the index.
+
+**Reading the numbers**
+
+| Line | What it tells you |
+|---|---|
+| Average excess over the index | The edge per trade after costs. This is the number that matters. |
+| … without the best trade / best two | Whether the result depends on one or two lucky trades. If it turns negative, it does. |
+| Win rate, average win / loss | How it makes money: many small wins, or a few big ones. |
+| Longest losing streak | How many losses in a row to expect. Can you sit through that? |
+| Worst drawdown | The biggest fall from a high point, if each trade used 10% of the account. |
+| t-statistic | How large the edge is compared with its noise. Above 2 means it is unlikely to be chance alone. |
+| Chance the true excess is above 0 | The same question asked by resampling the trades 10,000 times. 95%+ is encouraging. |
+| By exit reason | Whether targets, stops or time exits drive the result. |
+
+A PASS on paper is necessary, not sufficient: paper fills ignore slippage, and thin small
+caps rarely fill at the open price. If it passes, start small.
+
 ## Rebuilding the watchlist
 
 ```

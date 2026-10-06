@@ -42,6 +42,8 @@ import pandas as pd
 import yaml
 import yfinance as yf
 
+import evaluate as ev
+
 try:  # python.org macOS builds ship without CA certificates; use certifi's bundle
     import certifi
     os.environ.setdefault("SSL_CERT_FILE", certifi.where())
@@ -506,7 +508,7 @@ def _fmt_pct(x, digits=1):
     return "–" if x is None or (isinstance(x, float) and math.isnan(x)) else f"{x:+.{digits}f}%"
 
 
-def build_html(rows, missing, paper, summary, cfg, now_local) -> str:
+def build_html(rows, missing, paper, summary, cfg, now_local, eval_line=None) -> str:
     alert_min = cfg["alert_min_score"]
     alerts = [r for r in rows if r["score"] >= alert_min]
     hype = [r for r in rows if r["hype"]]
@@ -582,6 +584,7 @@ def build_html(rows, missing, paper, summary, cfg, now_local) -> str:
 <p><small>Up ≥ {cfg['thresholds']['hype_5d_move']:.0%} in 5 days with no company release found in the news window. Typical pump profile.</small></p>
 <div class=box><table>{head}{stock_rows(hype) or '<tr><td colspan=8>None.</td></tr>'}</table></div>
 <h2>Paper trading</h2>
+{f"<p><b>{escape(eval_line)}</b> <small>(run <code>python evaluate.py</code> for the full report)</small></p>" if eval_line else ""}
 <p>{summary_line}</p>
 <p><small>Rules: enter at next open when score ≥ {cfg['paper_trading']['min_score']}; exit at +{cfg['paper_trading']['take_profit']:.0%}, {cfg['paper_trading']['stop_loss']:.0%}, or after {cfg['paper_trading']['max_hold_days']} trading days.</small></p>
 <div class=box><table>{phead}{paper_rows(paper_open, False)}</table></div>
@@ -592,7 +595,7 @@ def build_html(rows, missing, paper, summary, cfg, now_local) -> str:
 </body></html>"""
 
 
-def build_markdown(rows, summary, cfg, now_local) -> str:
+def build_markdown(rows, summary, cfg, now_local, eval_line=None) -> str:
     alerts = [r for r in rows if r["score"] >= cfg["alert_min_score"]]
     hype = [r for r in rows if r["hype"]]
     lines = [f"## Scanner {now_local:%Y-%m-%d %H:%M}", ""]
@@ -605,6 +608,8 @@ def build_markdown(rows, summary, cfg, now_local) -> str:
                          f"| {r['vol_ratio']:.1f}x | {'; '.join(r['reasons'])} |")
     s = summary
     lines += ["", f"Paper trades: {s['n_closed']} closed, {s['n_open']} open, {s['n_pending']} pending"]
+    if eval_line:
+        lines += ["", f"**{eval_line}**"]
     if s["n_closed"]:
         lines.append(f"Win rate {s['win_rate']:.0f}%, avg {_fmt_pct(s['avg_return'])} "
                      f"vs index {_fmt_pct(s['avg_bench'])}")
@@ -961,7 +966,7 @@ def _md_paper(df: pd.DataFrame, empty="None.") -> str:
                       "Index same period", "Partial-exit variant"], rows, empty)
 
 
-def build_digest_md(rows, missing, paper, summary, cfg, now_local) -> str:
+def build_digest_md(rows, missing, paper, summary, cfg, now_local, eval_line=None) -> str:
     alerts = [r for r in rows if r["score"] >= cfg["alert_min_score"]]
     hype = [r for r in rows if r["hype"]]
     pc = cfg["paper_trading"]
@@ -977,6 +982,7 @@ def build_digest_md(rows, missing, paper, summary, cfg, now_local) -> str:
             "## Paper trading", "",
             f"Rules: enter at next open when score ≥ {pc['min_score']}; exit at +{pc['take_profit']:.0%}, "
             f"{pc['stop_loss']:.0%}, or after {pc['max_hold_days']} trading days.", "",
+            *([f"**{eval_line}** (run `python evaluate.py` for the full report)", ""] if eval_line else []),
             "### Open and pending", "", _md_paper(paper[paper["status"].isin(["open", "pending"])]),
             "### Last closed", "", _md_paper(paper[paper["status"] == "closed"].tail(15)),
             f"## Full watchlist · {len(rows)}", "", _md_stocks(rows)]
@@ -989,7 +995,7 @@ def _repo_url() -> str | None:
     return f"{server}/{repo}" if server and repo else None
 
 
-def build_dashboard(rows, missing, paper, cfg, now_local) -> str:
+def build_dashboard(rows, missing, paper, cfg, now_local, eval_line=None) -> str:
     alerts = [r for r in rows if r["score"] >= cfg["alert_min_score"]]
     hype = [r for r in rows if r["hype"]]
     notional = (cfg.get("weekly_summary") or {}).get("notional_sek", 10000)
@@ -1028,6 +1034,8 @@ def build_dashboard(rows, missing, paper, cfg, now_local) -> str:
     if pe_on:
         srows.append(srow("Partial-exit variant", wp["pe_all"], int((paper["pe_status"] == "open").sum())))
     out += ["## Paper trading (all time)", "",
+            *([f"**{eval_line}** · [how to read it](README.md#judging-the-results-evaluatepy)", ""]
+              if eval_line else []),
             _md_table(["Rules", "Open/pending", "Closed", "Win rate", "Avg return", "Avg index",
                        "Vs index", f"P&L at {_fmt_sek(notional)[1:]}/trade"], srows),
             "### Open and pending", "", _md_paper(paper[paper["status"].isin(["open", "pending"])]),
@@ -1067,6 +1075,10 @@ def build_dashboard(rows, missing, paper, cfg, now_local) -> str:
 
 # --------------------------------------------------------------------------- main
 
+def _now() -> dt.datetime:
+    return dt.datetime.now(UTC)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default=str(ROOT / "config.yaml"))
@@ -1081,7 +1093,7 @@ def main(argv=None) -> int:
     DATA_DIR.mkdir(exist_ok=True)
     REPORT_DIR.mkdir(exist_ok=True)
 
-    now = dt.datetime.now(UTC)
+    now = _now()
     try:
         from zoneinfo import ZoneInfo
         now_local = now.astimezone(ZoneInfo("Europe/Stockholm"))
@@ -1132,6 +1144,10 @@ def main(argv=None) -> int:
         paper = add_paper_signals(paper, rows, cfg, watchlist_version(Path(args.watchlist)))
         paper.to_csv(PAPER_LOG, index=False)
     summary = paper_summary(paper)
+    ec = {**ev.DEFAULTS, "digest_after_hour": 12, **(cfg.get("evaluation") or {})}
+    eval_line = ev.one_line(ev.evaluate(ev.closed_trades(paper), ec["cost_pct"], ec["stake"],
+                                        ec["min_trades"]))
+    digest_eval = eval_line if now_local.hour >= ec["digest_after_hour"] else None
 
     log_rows = [{
         "run_utc": now.isoformat(timespec="minutes"), "bar_date": r["date"],
@@ -1145,12 +1161,12 @@ def main(argv=None) -> int:
         pd.DataFrame(log_rows).to_csv(SIGNALS_LOG, mode="a", index=False,
                                       header=not SIGNALS_LOG.exists())
 
-    html = build_html(rows, missing, paper, summary, cfg, now_local)
+    html = build_html(rows, missing, paper, summary, cfg, now_local, digest_eval)
     stamp = f"{now_local:%Y-%m-%d_%H%M}"
     (REPORT_DIR / f"digest_{stamp}.html").write_text(html, encoding="utf-8")
     (REPORT_DIR / "latest.html").write_text(html, encoding="utf-8")
 
-    md = build_markdown(rows, summary, cfg, now_local)
+    md = build_markdown(rows, summary, cfg, now_local, digest_eval)
     gh_summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if gh_summary:
         with open(gh_summary, "a", encoding="utf-8") as fh:
@@ -1165,9 +1181,9 @@ def main(argv=None) -> int:
                 fh.write("\n" + weekly_md)
         print(weekly_md)
 
-    (REPORT_DIR / "latest.md").write_text(build_digest_md(rows, missing, paper, summary, cfg, now_local),
+    (REPORT_DIR / "latest.md").write_text(build_digest_md(rows, missing, paper, summary, cfg, now_local, eval_line),
                                           encoding="utf-8")
-    DASHBOARD.write_text(build_dashboard(rows, missing, paper, cfg, now_local), encoding="utf-8")
+    DASHBOARD.write_text(build_dashboard(rows, missing, paper, cfg, now_local, eval_line), encoding="utf-8")
 
     n_alerts = sum(r["score"] >= cfg["alert_min_score"] for r in rows)
     email_cfg = cfg.get("email", {})
