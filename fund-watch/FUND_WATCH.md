@@ -1,49 +1,71 @@
 # Fund risk watch
 
-Daily scan of Google News for anything that could hurt the fund in `fund_watch.yaml`
-(currently JPMorgan Funds - Taiwan Fund A (acc) USD, LU0210528419).
+Daily scan of Google News for anything that could hurt the funds in `fund_watch.yaml`:
 
-## What it searches (about 40 searches per run)
+| | Fund | ISIN | What drives its risk |
+|---|---|---|---|
+| 🇹🇼 | JPMorgan Funds - Taiwan Fund A (acc) USD | LU0210528419 | Taiwan, its chip makers and their customers |
+| 🌍 | Avanza Global | SE0011527613 | The market as a whole, US big tech, rates, the krona |
+
+Articles are fetched once (about 65 searches) and scored separately for each fund, so one
+article can be flagged for both.
+
+## What it searches
+**Taiwan fund (about 45 searches)**
 - **The fund itself:** manager changes, suspension, mergers.
 - **Holdings:** MediaTek, TSMC, Delta, Elite Material, CTBC, Hon Hai, Quanta, Accton, ASE and the Taiwanese banks.
-- **Customers:** Nvidia, Apple, AMD, Broadcom, Qualcomm, and the big cloud companies.
+- **Customers:** Nvidia, Apple, AMD, Broadcom, Qualcomm, and the big cloud companies (only together with TSMC, Taiwan, chips or orders).
 - **Suppliers:** ASML, Applied Materials, Tokyo Electron, Lam Research.
-- **Topics:**
-  - Taiwan Strait, military activity, blockade
-  - earthquakes, typhoons, power and water problems
-  - strikes
-  - export controls, tariffs, chip bans
-  - the TAIEX and the Taiwan dollar
-  - AI spending and chip demand
-  - semiconductor inventory
+- **Topics:** the Taiwan Strait, blockade and military activity; earthquakes, typhoons, power and water; strikes;
+  export controls, tariffs and chip bans; the TAIEX and the Taiwan dollar; AI spending, chip demand and inventory.
+
+**Avanza Global (about 20 searches)**
+An index fund of about 1,000 developed-market stocks, priced in SEK and not currency-hedged.
+The top 10 make up about 30%.
+- **The fund itself.**
+- **Top holdings:** Apple, Nvidia, Microsoft, Alphabet, Amazon (each 3.5–5.6%), plus Broadcom, Meta, Micron, Tesla.
+- **Dependency:** TSMC, which makes the chips for several of them. Not searched separately: the Taiwan fund's searches fetch TSMC news.
+- **Topics:** Fed and interest rates, US recession, broad sell-offs, the AI bubble and big-tech concentration,
+  big-tech antitrust, US tariffs, the Swedish krona against the dollar, global stocks.
+
+A fund only looks at articles from its own searches, plus articles from the other fund's searches
+that name its holdings, relevance words or the dependencies it doesn't search for itself. So the
+global fund's plain Google news doesn't reach the Taiwan fund just because Google is a customer.
 
 ## How it flags
-Each new article is matched against 11 risk categories:
+Each new article is matched against 12 risk categories:
 
-| Category | Severity |
-|---|---|
-| Geopolitics | HIGH |
-| Trade restrictions | HIGH |
-| Natural disaster | HIGH |
-| Fund-specific | HIGH |
-| Infrastructure | MEDIUM |
-| Labour | MEDIUM |
-| Demand and customers | MEDIUM |
-| Company results | MEDIUM |
-| Legal and regulatory | MEDIUM |
-| Cyber and operations | MEDIUM |
-| Market stress | LOW |
+| Category | Severity | Avanza Global |
+|---|---|---|
+| Geopolitics | HIGH | |
+| Trade restrictions | HIGH | |
+| Natural disaster | HIGH | |
+| Fund-specific | HIGH | |
+| Macro (recession, rate rises, krona/dollar moves) | MEDIUM | **HIGH** |
+| Infrastructure | MEDIUM | |
+| Demand and customers | MEDIUM | |
+| Company results | MEDIUM | |
+| Labour | MEDIUM | LOW |
+| Legal and regulatory | MEDIUM | LOW |
+| Cyber and operations | MEDIUM | LOW |
+| Market stress | LOW | MEDIUM |
 
-Articles with no risk words are dropped.
+The index fund has its own severities (`severity:` in its config), because single-company legal
+or labour news rarely moves a 1,000-stock fund, while rates and the krona do. Articles with no
+risk words are dropped. The publisher's name is ignored, so "Taipei Times" or "Simply Wall Street"
+don't count as Taiwan or Wall Street. Some phrases are excluded (`exclude:`), such as
+"strike a deal", "plane crash", "sell-off eases" or "apple crop".
 
 Score = severity (3/2/1), plus these bonuses:
-- +2 if a top-5 holding is named (+1 if another watched holding is named)
+- +2 if a top holding is named (weight ≥ 3%; +1 if another watched holding is named)
 - +1 if a customer or supplier is named
-- +1 if Taiwan is mentioned
+- +1 if one of the fund's relevance words is named (Taiwan, Taipei, TAIEX; or Wall Street, S&P 500,
+  Nasdaq, Fed, krona and similar)
 
-Score ≥ 3 goes under **Flagged**, but only if the article names Taiwan, the fund, a holding,
-a customer or a supplier (`require_relevance`). Everything else goes under **Watch**. Only articles not seen in
-earlier runs are shown. It's keyword-based, so expect some false positives, and read the source.
+**Flagged** = score ≥ 3 (≥ 4 for Avanza Global) and the article is tied to the fund: a relevance
+word, the fund, a holding or a dependency (`require_relevance`). Everything else goes under
+**Watch**. Only articles not seen in earlier runs are shown. It's keyword-based, so expect some
+false positives, and read the source.
 
 ## Run
 - Locally, from the `fund-watch/` folder: `python fund_watch.py` (requires
@@ -87,6 +109,8 @@ If an e-mail fails during a normal run, the run fails and the seen-store is not 
 next run reports the same items again (GitHub e-mails you about the failed run).
 
 ## Maintain
+- Each fund is one entry under `funds:` in `fund_watch.yaml`. To add a fund, copy an entry and
+  change the id, names, ISIN, holdings, dependencies, relevance words and topics.
 - Update `holdings` from the fund's monthly factsheet.
 - Add or remove keywords and topics freely.
 - Lower `flag_min_score` for more alerts; raise it for fewer.

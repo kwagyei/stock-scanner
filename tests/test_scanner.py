@@ -1111,13 +1111,21 @@ def test_weekly_page_has_direction_split(cfg):
 
 # --------------------------------------------------------------------------- fund watch on the dashboard
 
-def _fund_summary(run_utc="2026-10-07T05:13+00:00", flagged=2, high=1):
+def _fund_summary(run_utc="2026-10-07T05:13+00:00", flagged=2, high=1, single=False):
     top = [{"score": 6, "severity": "HIGH", "title": "TSMC | halts production", "link": "https://x.test/a",
             "source": "Reuters", "entities": ["TSMC"], "categories": ["infrastructure"]},
            {"score": 3, "severity": "MEDIUM", "title": "Quanta revenue falls", "link": "https://x.test/b",
             "source": "digitimes", "entities": ["Quanta Computer"], "categories": ["company_results"]}][:flagged]
-    return {"run_utc": run_utc, "run_local": "2026-10-07 07:13", "n_flagged": flagged, "n_high": high,
-            "n_watch": 4, "n_raw": 1300, "top": top}
+    tw = {"n_flagged": flagged, "n_high": high, "n_watch": 4, "top": top}
+    if single:   # the format written before several funds
+        return {"run_utc": run_utc, "run_local": "2026-10-07 07:13", "n_raw": 1300, **tw}
+    gl = {"id": "avanza_global", "short": "Global", "icon": "🌍", "name": "Avanza Global", "isin": "SE0011527613",
+          "n_flagged": 1, "n_high": 0, "n_watch": 9,
+          "top": [{"score": 4, "severity": "MEDIUM", "title": "Fed raises interest rates", "link": "https://x.test/c",
+                   "source": "Forbes", "entities": [], "categories": ["macro"]}]}
+    return {"run_utc": run_utc, "run_local": "2026-10-07 07:13", "n_raw": 1300,
+            "funds": [{"id": "jpm_taiwan", "short": "Taiwan", "icon": "🇹🇼", "name": "JPM Taiwan", **tw},
+                      gl if flagged else {**gl, "n_flagged": 0, "top": []}]}
 
 
 def _dash(cfg, now=dt.datetime(2026, 10, 7, 18, 52)):
@@ -1128,14 +1136,24 @@ def test_dashboard_fund_watch_section(cfg, tmp_paths, monkeypatch):
     monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
     scanner.FUND_SUMMARY.write_text(json.dumps(_fund_summary()))
     md = _dash(cfg)
-    assert "| 🛡️ Fund watch |" in md.splitlines()[next(i for i, l in enumerate(md.splitlines()) if l.startswith("| 🔔"))]
-    assert "**2**<br><sub>flagged · 1 high</sub>" in md
+    glance_head = next(l for l in md.splitlines() if l.startswith("| 🔔"))
+    assert "| 🛡️ Fund watch |" in glance_head
+    assert "**3**<br><sub>flagged · 1 high</sub>" in md                            # summed over both funds
     sec = md.split("## 🛡️ Fund risk watch")[1].split("## More")[0]
     assert "Last run **Wed&nbsp;7&nbsp;Oct 07:13**" in sec and "1300 articles scanned" in sec
-    assert "**1 high-severity** item(s) among 2 newly flagged" in sec
+    assert "| 🇹🇼 **Taiwan** | **2** | 1 | 4 |" in sec and "| 🌍 **Global** | **1** | 0 | 9 |" in sec
+    assert "**🇹🇼 Taiwan** · 1 high-severity" in sec and "**🌍 Global**" in sec
     assert "| 🔴&nbsp;HIGH | [TSMC \\| halts production](<https://x.test/a>) | TSMC |" in sec
-    assert "[Full fund watch (2 flagged, 4 on watch) →](fund-watch/reports/fund_watch_latest.md)" in sec
+    assert "[Fed raises interest rates](<https://x.test/c>)" in sec
+    assert "[Full fund watch →](fund-watch/reports/fund_watch_latest.md)" in sec
     assert "last ran" not in sec                                                  # fresh: no stale warning
+
+
+def test_dashboard_reads_old_single_fund_summary(cfg, tmp_paths, monkeypatch):
+    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+    scanner.FUND_SUMMARY.write_text(json.dumps(_fund_summary(single=True)))
+    md = _dash(cfg)
+    assert "**2**<br><sub>flagged · 1 high</sub>" in md and "| 🇹🇼 **Taiwan** | **2** | 1 | 4 |" in md
 
 
 def test_dashboard_fund_watch_missing_quiet_and_stale(cfg, tmp_paths, monkeypatch):

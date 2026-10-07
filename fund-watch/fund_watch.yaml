@@ -1,51 +1,107 @@
 # Fund risk news monitor – configuration
-# Edit holdings when the fund publishes a new factsheet (monthly on am.jpmorgan.com).
 
-fund:
-  name: "JPMorgan Funds - Taiwan Fund A (acc) USD"
-  isin: "LU0210528419"
-  search_names: ["JPMorgan Taiwan Fund", "JPM Taiwan Fund"]
+# Funds to watch. Each fund has its own holdings, dependencies, searches and relevance words;
+# risk keywords and scoring below are shared. Articles are fetched once and scored per fund.
+funds:
+  - id: jpm_taiwan
+    short: "Taiwan"
+    icon: "🇹🇼"
+    name: "JPMorgan Funds - Taiwan Fund A (acc) USD"
+    isin: "LU0210528419"
+    search_names: ["JPMorgan Taiwan Fund", "JPM Taiwan Fund"]
+    # Update from the monthly factsheet (am.jpmorgan.com). weight = % of fund (approximate).
+    # Holdings with weight >= top_holding_min_weight get holding_bonus; others other_holding_bonus.
+    top_holding_min_weight: 3
+    holdings:
+      - {name: "MediaTek", weight: 9.2, aliases: []}
+      - {name: "TSMC", weight: 9.1, aliases: ["Taiwan Semiconductor"]}
+      - {name: "Delta Electronics", weight: 6.8, aliases: []}
+      - {name: "Elite Material", weight: 3.4, aliases: ["Elite Material Co"]}
+      - {name: "CTBC Financial", weight: 3.4, aliases: ["CTBC"]}
+      - {name: "Hon Hai", weight: 0, aliases: ["Foxconn"]}
+      - {name: "Quanta Computer", weight: 0, aliases: ["Quanta"]}
+      - {name: "Accton Technology", weight: 0, aliases: ["Accton"]}
+      - {name: "ASE Technology", weight: 0, aliases: ["ASE Holding", "ASE Technology Holding"]}
+      - {name: "E.Sun Financial", weight: 0, aliases: []}
+      - {name: "Mega Financial", weight: 0, aliases: []}
+      - {name: "Cathay Financial", weight: 0, aliases: []}
+    # Companies the holdings depend on. search_* = extra words for their news searches
+    # (keeps them on-topic); leave out to not search for them separately.
+    dependencies:
+      customers: ["Nvidia", "Apple", "AMD", "Broadcom", "Qualcomm", "Microsoft", "Google", "Amazon", "Meta"]
+      suppliers: ["ASML", "Applied Materials", "Tokyo Electron", "Lam Research"]
+      search_customers: "(TSMC OR Taiwan OR chips OR orders)"
+      search_suppliers: "(Taiwan OR TSMC OR China OR export)"
+    # Words that tie an article to this fund (region_bonus, and needed for "flagged").
+    relevance_terms: ["Taiwan", "Taiwanese", "Taipei", "TAIEX"]
+    topics:
+      - "Taiwan Strait"
+      - "China Taiwan military"
+      - "Taiwan blockade"
+      - "Taiwan earthquake"
+      - "Taiwan typhoon"
+      - "Taiwan power outage"
+      - "Taiwan water shortage"
+      - "Taiwan strike workers"
+      - "semiconductor export controls"
+      - "chip tariffs"
+      - "US China chip ban"
+      - "TAIEX"
+      - "Taiwan dollar"
+      - "Taiwan stock market"
+      - "AI capex spending"
+      - "AI chip demand"
+      - "semiconductor inventory"
 
-# Top holdings. weight = % of fund (approximate, from latest public data).
-# aliases are extra names used in news headlines.
-holdings:
-  - {name: "MediaTek", weight: 9.2, aliases: []}
-  - {name: "TSMC", weight: 9.1, aliases: ["Taiwan Semiconductor"]}
-  - {name: "Delta Electronics", weight: 6.8, aliases: []}
-  - {name: "Elite Material", weight: 3.4, aliases: ["Elite Material Co"]}
-  - {name: "CTBC Financial", weight: 3.4, aliases: ["CTBC"]}
-  - {name: "Hon Hai", weight: 0, aliases: ["Foxconn"]}
-  - {name: "Quanta Computer", weight: 0, aliases: ["Quanta"]}
-  - {name: "Accton Technology", weight: 0, aliases: ["Accton"]}
-  - {name: "ASE Technology", weight: 0, aliases: ["ASE Holding", "ASE Technology Holding"]}
-  - {name: "E.Sun Financial", weight: 0, aliases: []}
-  - {name: "Mega Financial", weight: 0, aliases: []}
-  - {name: "Cathay Financial", weight: 0, aliases: []}
-
-# Companies the holdings depend on (customers, suppliers). Bad news here travels to Taiwan.
-dependencies:
-  customers: ["Nvidia", "Apple", "AMD", "Broadcom", "Qualcomm", "Microsoft", "Google", "Amazon", "Meta"]
-  suppliers: ["ASML", "Applied Materials", "Tokyo Electron", "Lam Research"]
-
-# Broad topic searches beyond named companies.
-topics:
-  - "Taiwan Strait"
-  - "China Taiwan military"
-  - "Taiwan blockade"
-  - "Taiwan earthquake"
-  - "Taiwan typhoon"
-  - "Taiwan power outage"
-  - "Taiwan water shortage"
-  - "Taiwan strike workers"
-  - "semiconductor export controls"
-  - "chip tariffs"
-  - "US China chip ban"
-  - "TAIEX"
-  - "Taiwan dollar"
-  - "Taiwan stock market"
-  - "AI capex spending"
-  - "AI chip demand"
-  - "semiconductor inventory"
+  - id: avanza_global
+    short: "Global"
+    icon: "🌍"
+    name: "Avanza Global"
+    isin: "SE0011527613"
+    search_names: ["Avanza Global"]
+    # Index fund (Morningstar Developed Markets TME Paris Aligned Benchmark Sustainability Select),
+    # about 1,000 developed-market stocks, priced in SEK and not currency-hedged.
+    # Top 10 = about 30% of the fund. Source: Investing.com holdings page, data from 6 Oct 2026.
+    # Check now and then against the fund page on avanza.se.
+    top_holding_min_weight: 3
+    holdings:
+      - {name: "Apple", weight: 5.6, aliases: [],
+         exclude: ["apples?\\s+(crop|crops|orchards?|harvest|growers?|farmers?|pie|cider|juice|picking)",
+                   "big apple", "apple (orchard|tree)s?"]}
+      - {name: "Nvidia", weight: 5.6, aliases: []}
+      - {name: "Microsoft", weight: 4.6, aliases: []}
+      - {name: "Alphabet", weight: 4.4, aliases: ["Google"],
+         exclude: ["preferred source on google", "add us on google", "google news", "on google play"]}
+      - {name: "Amazon", weight: 3.5, aliases: ["Amazon.com"]}
+      - {name: "Broadcom", weight: 1.6, aliases: []}
+      - {name: "Meta Platforms", weight: 1.6, aliases: ["Meta"]}
+      - {name: "Micron", weight: 1.5, aliases: []}
+      - {name: "Tesla", weight: 1.5, aliases: []}
+    # TSMC makes the chips for Nvidia, Apple, Broadcom and others. Not searched separately:
+    # the Taiwan fund's searches already fetch TSMC news, and every article is scored for both funds.
+    dependencies:
+      customers: []
+      suppliers: ["TSMC", "Taiwan Semiconductor"]
+    # A broad index moves with the market as a whole, and in SEK with the krona.
+    # Index fund: single-company legal, labour and results news rarely moves it; the market,
+    # rates and the krona do. Category severities for this fund (others as in risk_categories),
+    # and it flags from score 4.
+    severity: {legal_regulatory: 1, labour: 1, cyber_operations: 1, macro: 3, market_stress: 2}
+    flag_min_score: 4
+    relevance_terms: ["Wall Street", "S&P 500", "Nasdaq", "Dow Jones", "Federal Reserve", "Fed",
+                      "US stocks", "global stocks", "world stocks", "MSCI World", "Magnificent Seven",
+                      "krona", "Swedish krona"]
+    topics:
+      - "Federal Reserve interest rates"
+      - "US recession"
+      - "stock market selloff"
+      - "Nasdaq selloff"
+      - "AI bubble"
+      - "Magnificent Seven stocks"
+      - "big tech antitrust"
+      - "US tariffs stocks"
+      - "Swedish krona dollar"
+      - "global stocks"
 
 # Risk categories. Keywords are matched as whole words/phrases, case-insensitive.
 # severity: 3 = high, 2 = medium, 1 = low
@@ -79,12 +135,17 @@ risk_categories:
     severity: 2
     keywords: ["strike", "strikes", "walkout", "labor dispute", "labour dispute", "union protest",
                "layoffs", "job cuts", "worker shortage"]
+    # "Google, Constellation strike nuclear deal", "missile strike", "strike price" aren't labour news
+    exclude: ["strikes?\\s+(an?\\s+)?(\\S+\\s+){0,4}(deal|deals|agreement|pact|partnership)",
+              "(missile|air|drone|military|lightning)\\s+strikes?", "strike price", "strikes? back"]
   demand_and_customers:
     severity: 2
     keywords: ["cuts orders", "cut orders", "order cuts", "cancels orders", "cancelled orders",
                "pulls out of", "relocate", "relocates", "shifts production",
                "moves production", "capex cut", "cuts spending", "spending slowdown", "demand slowdown",
-               "inventory glut", "oversupply", "excess inventory", "AI bubble",
+               # "AI bubble" alone matched daily commentary ("fears overblown"); only a burst counts
+               "inventory glut", "oversupply", "excess inventory", "AI bubble bursts", "AI bubble burst",
+               "AI bubble bursting", "AI bubble pops", "AI bubble popping",
                "delays shipments", "delays orders", "delays production", "shipment delays", "delayed shipments",
                "halts construction"]
   company_results:
@@ -105,6 +166,17 @@ risk_categories:
     severity: 1
     keywords: ["sell-off", "selloff", "plunge", "plunges", "tumbles", "slumps", "crash", "rout",
                "outflows", "foreign selling", "volatility", "slide", "slides", "slump", "falls sharply"]
+    exclude: ["(plane|car|air|jet|helicopter|train|truck|bus|motorcycle|fatal|deadly|cargo)\\s+crash(es)?",
+              "crash\\s+(attorneys?|lawyers?|victims?|site|investigat\\w+|probe)",
+              "(sell-?off|selloff|slump|slide)\\s+(eases|fades|ends|eased|faded|ended)"]
+  macro:
+    severity: 2
+    # event wording only: "rate hike odds recede" or "how many hikes are left?" aren't events
+    keywords: ["recession", "raises rates", "hikes rates", "raises interest rates", "surprise hike", "stagflation",
+               "credit crunch", "bank failure", "bank run", "debt crisis", "bond rout", "yields surge",
+               "yields soar", "inflation surges", "inflation jumps", "hot inflation",
+               "krona strengthens", "krona surges", "krona rallies", "dollar slumps", "dollar tumbles",
+               "dollar weakens"]
   fund_specific:
     severity: 3
     keywords: ["manager change", "portfolio manager leaves", "fund suspended", "suspends dealing",
@@ -115,9 +187,9 @@ scoring:
   holding_bonus: 2         # headline names a top-5 holding (weight >= 3%)
   other_holding_bonus: 1   # names another watched holding
   dependency_bonus: 1      # names a customer/supplier
-  taiwan_bonus: 1          # mentions Taiwan / Taiwanese
+  region_bonus: 1          # mentions one of the fund's relevance_terms (Taiwan / Wall Street / krona ...)
   flag_min_score: 3        # items below this go to "watch" instead of "flagged"
-  require_relevance: true  # flag only if Taiwan, the fund, a holding, a customer or a supplier is named;
+  require_relevance: true  # flag only if a relevance term, the fund, a holding or a dependency is named;
                            # other keyword matches (e.g. a quake in India) go to "watch"
 
 news:

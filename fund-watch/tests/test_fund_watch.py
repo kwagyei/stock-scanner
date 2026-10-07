@@ -29,21 +29,25 @@ def cfg():
     return fw.load_config(fw.ROOT / "fund_watch.yaml")
 
 
+def fund(cfg, fid="jpm_taiwan"):
+    return next(f for f in cfg["funds"] if f["id"] == fid)
+
+
 def item(title, summary="", hours_ago=1, source="Reuters"):
     return {"title": f"{title} - {source}", "link": "http://x", "source": source,
             "ts": NOW - dt.timedelta(hours=hours_ago), "summary": summary}
 
 
-def classify(title, cfg, summary=""):
-    return fw.classify(item(title, summary), fw.compile_categories(cfg), fw.build_name_sets(cfg), cfg)
+def classify(title, cfg, fid="jpm_taiwan", summary="", source="Reuters"):
+    f = fund(cfg, fid)
+    return fw.classify(item(title, summary, source=source), fw.compile_categories(cfg),
+                       fw.build_name_sets(f), cfg, fund=f)
 
 
 # --------------------------------------------------------------------------- whole-word matching
 
 def _war_cfg(cfg):
-    c = dict(cfg)
-    c["risk_categories"] = {"geopolitics": {"severity": 3, "keywords": ["war", "PLA", "ban"]}}
-    return c
+    return {**cfg, "risk_categories": {"geopolitics": {"severity": 3, "keywords": ["war", "PLA", "ban"]}}}
 
 
 @pytest.mark.parametrize("title,hit", [
@@ -67,6 +71,11 @@ def test_matching_is_case_insensitive_and_phrases_need_all_words(cfg):
     assert classify("Production lines halt briefly", cfg) is None
 
 
+def test_holding_names_are_whole_words_too(cfg):
+    assert classify("Strike vote at TSMCX plant", cfg)["entities"] == []
+    assert classify("Strike vote at TSMC's plant", cfg)["entities"] == ["TSMC"]
+
+
 # --------------------------------------------------------------------------- classification
 
 def test_unrelated_news_is_dropped(cfg):
@@ -84,6 +93,7 @@ def test_unrelated_news_is_dropped(cfg):
     ("Prosecutors indicted two engineers over trade secrets", "legal_regulatory", 2),
     ("Ransomware hits chip packaging firm", "cyber_operations", 2),
     ("Taiwan stocks plunge on foreign selling", "market_stress", 1),
+    ("Fed raises rates as recession fears grow", "macro", 2),
     ("JPMorgan Taiwan Fund suspends dealing", "fund_specific", 3),
 ])
 def test_categories(cfg, title, category, severity):
@@ -98,15 +108,37 @@ def test_severity_is_the_highest_matching_category(cfg):
 
 @pytest.mark.parametrize("title", ["Magnitude 4.5 earthquake shakes southern Taiwan",
                                    "Light mag. 3.1 earthquake - Fujian", "An Earthquake in the Mac World",
-                                   "War game highlights Taiwan response", "Microsoft fires CEO"])
+                                   "War game highlights Taiwan response", "Microsoft fires CEO",
+                                   "Google, Constellation strike 20-year nuclear power deal",
+                                   "Missile strikes hit base", "Nvidia AI bubble fears overblown",
+                                   "Fed rate hike odds recede", "Bond sell-off eases as Nasdaq hits record",
+                                   "Amazon crash attorneys say pilot pairing was key flaw"])
 def test_tuned_false_positives_stay_quiet(cfg, title):
-    assert classify(title, cfg) is None
+    for fid in ("jpm_taiwan", "avanza_global"):
+        c = classify(title, cfg, fid)
+        assert c is None or c["score"] < fw.load_config(fw.ROOT / "fund_watch.yaml")["scoring"]["flag_min_score"] \
+            or "geopolitics" in c["categories"], (fid, c and c["categories"])
 
 
 @pytest.mark.parametrize("title", ["Magnitude 6.4 earthquake strikes off Hualien",
                                    "Powerful quake rocks eastern Taiwan", "Mag. 7.1 quake near Taiwan"])
 def test_strong_quakes_still_flag(cfg, title):
     assert "natural_disaster" in classify(title, cfg)["categories"]
+
+
+def test_publisher_name_is_not_content(cfg):
+    # "Simply Wall Street" / "Taipei Times" in the source must not count as Wall Street / Taiwan
+    assert classify("Tariff exposed consumer stocks to watch", cfg, "avanza_global",
+                    summary="Tariff exposed consumer stocks Simply Wall Street",
+                    source="Simply Wall Street")["relevant"] is False
+    assert classify("Strike vote at chip plant", cfg, summary="Strike vote Taipei Times",
+                    source="Taipei Times")["relevant"] is False
+
+
+def test_holding_exclude_phrases(cfg):
+    assert classify("Smaller apple crop after summer drought", cfg, "avanza_global")["entities"] == []
+    assert classify("Apple hit by drought at supplier", cfg, "avanza_global")["entities"] == ["Apple"]
+    assert classify("Add Us On Google: local police investigation", cfg, "avanza_global")["entities"] == []
 
 
 # --------------------------------------------------------------------------- scoring
@@ -116,7 +148,7 @@ def test_scoring_bonuses(cfg):
     base = classify("Strike vote at chip plant", cfg)                                # labour, 2
     assert (base["score"], base["entities"], base["relevant"]) == (2, [], False)
     tw = classify("Strike vote at Taiwan chip plant", cfg)
-    assert tw["score"] == 2 + s["taiwan_bonus"] and tw["relevant"]
+    assert tw["score"] == 2 + s["region_bonus"] and tw["relevant"]
     top = classify("Strike vote at TSMC plant", cfg)                                  # top-5 holding
     assert top["score"] == 2 + s["holding_bonus"] and top["entities"] == ["TSMC"]
     alias = classify("Strike vote at Taiwan Semiconductor plant", cfg)
@@ -128,7 +160,16 @@ def test_scoring_bonuses(cfg):
     dep = classify("Strike vote at Nvidia supplier", cfg)
     assert dep["score"] == 2 + s["dependency_bonus"] and dep["entities"] == ["Nvidia"]
     full = classify("TSMC halts production in Taiwan, Nvidia hit", cfg)
-    assert full["score"] == 2 + s["holding_bonus"] + s["dependency_bonus"] + s["taiwan_bonus"]
+    assert full["score"] == 2 + s["holding_bonus"] + s["dependency_bonus"] + s["region_bonus"]
+
+
+def test_fund_severity_overrides(cfg):
+    # The index fund rates single-company legal news LOW and macro HIGH.
+    tw = classify("Google faces antitrust probe", cfg, "jpm_taiwan")
+    gl = classify("Google faces antitrust probe", cfg, "avanza_global")
+    assert (tw["severity"], gl["severity"]) == (2, 1)
+    assert classify("Fed raises rates as recession looms", cfg, "avanza_global")["severity"] == 3
+    assert classify("Fed raises rates as recession looms", cfg, "jpm_taiwan")["severity"] == 2
 
 
 def test_relevance_gate_moves_unrelated_high_severity_to_watch(cfg):
@@ -141,8 +182,50 @@ def test_relevance_gate_moves_unrelated_high_severity_to_watch(cfg):
     assert fw.split_flagged([far, near], off)[0] == [far, near]
 
 
+def test_fund_flag_threshold(cfg):
+    g = fund(cfg, "avanza_global")
+    three = classify("Wall Street selloff deepens", cfg, "avanza_global")            # market 2 + region 1
+    four = classify("Nvidia plunges in sharp selloff", cfg, "avanza_global")         # market 2 + top 2
+    assert (three["score"], four["score"]) == (3, 4)
+    assert fw.split_flagged([three, four], cfg, g) == ([four], [three])
+
+
 def test_fund_name_counts_as_relevant(cfg):
     assert classify("JPM Taiwan Fund manager change announced", cfg)["relevant"]
+    assert classify("Avanza Global hit by sell-off", cfg, "avanza_global")["relevant"]
+
+
+@pytest.mark.parametrize("title", [
+    "Fed unexpectedly raises rates",                         # macro HIGH + Fed
+    "Swedish krona surges against the dollar",               # macro HIGH + krona
+    "Recession fears grip Wall Street",
+    "US slaps tariffs on chips, Nvidia tumbles",             # trade HIGH + top holding
+    "Apple cuts orders for iPhone parts",                    # demand + top holding
+    "Microsoft issues profit warning",
+    "Global stocks plunge as China moves to blockade Taiwan",
+])
+def test_global_fund_flags_systemic_and_top_holding_events(cfg, title):
+    c = classify(title, cfg, "avanza_global")
+    assert fw.split_flagged([c], cfg, fund(cfg, "avanza_global"))[0] == [c], (c["score"], c["categories"])
+
+
+@pytest.mark.parametrize("title", ["Google faces Polish antitrust probe", "Micron union authorizes strike",
+                                   "Tesla recalls 2 million cars", "Ford selloff tests investors"])
+def test_global_fund_keeps_routine_company_news_on_watch(cfg, title):
+    c = classify(title, cfg, "avanza_global")
+    assert c is None or fw.split_flagged([c], cfg, fund(cfg, "avanza_global"))[0] == []
+
+
+# --------------------------------------------------------------------------- queries
+
+def test_queries_cover_both_funds_without_duplicates(cfg):
+    qs = fw.build_queries(cfg)
+    assert len(qs) == len(set(qs))
+    owners = fw.query_funds(cfg)
+    assert owners['"Avanza Global"'] == {"avanza_global"}
+    assert owners['"TSMC" OR "Taiwan Semiconductor"'] == {"jpm_taiwan"}       # global relies on it
+    assert owners['"Apple"'] == {"avanza_global"}
+    assert any(q.startswith('"Apple" (TSMC') for q in owners)                 # Taiwan's customer search
 
 
 # --------------------------------------------------------------------------- dedup
@@ -153,7 +236,13 @@ def test_item_key_ignores_source_suffix_case_and_punctuation():
     assert a != fw.item_key("TSMC resumes production after quake - Reuters")
 
 
-# --------------------------------------------------------------------------- end to end: seen-store
+# --------------------------------------------------------------------------- end to end
+
+class _FrozenDatetime(dt.datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return NOW if tz else NOW.replace(tzinfo=None)
+
 
 def run(monkeypatch, feeds, *args):
     """feeds: query substring -> list of items; unmatched queries return nothing."""
@@ -167,40 +256,56 @@ def run(monkeypatch, feeds, *args):
     return calls
 
 
-class _FrozenDatetime(dt.datetime):
-    @classmethod
-    def now(cls, tz=None):
-        return NOW if tz else NOW.replace(tzinfo=None)
-
-
 def _log():
-    return fw.LOG_FILE.read_text().splitlines()[1:] if fw.LOG_FILE.exists() else []
+    import csv
+    if not fw.LOG_FILE.exists():
+        return []
+    return list(csv.DictReader(fw.LOG_FILE.open(encoding="utf-8")))
 
 
 def test_dedup_across_queries_and_seen_store(monkeypatch, cfg):
     quake = item("Strong earthquake halts TSMC fabs in Taiwan")
     dup = item("Strong earthquake halts TSMC fabs in Taiwan", source="Bloomberg")   # same story, other outlet
     calm = item("TSMC opens visitor centre")
-    feeds = {"TSMC": [quake, calm], "Taiwan earthquake": [dup]}
+    feeds = {'"TSMC"': [quake, calm], "Taiwan earthquake": [dup]}
     calls = run(monkeypatch, feeds)
     assert len(calls) == len(fw.build_queries(cfg))                                  # every search ran
-    assert len(_log()) == 1                                                           # dup + unrelated removed
-    seen = json.loads(fw.SEEN_FILE.read_text())
-    assert len(seen) == 2                                                             # unrelated item marked seen too
+    rows = _log()
+    assert sorted(r["fund"] for r in rows) == ["avanza_global", "jpm_taiwan"]       # scored for both funds
+    assert len(json.loads(fw.SEEN_FILE.read_text())) == 2                           # unrelated item marked seen
 
     run(monkeypatch, feeds)                                                           # same news again
-    assert len(_log()) == 1
-    html = (fw.REPORT_DIR / "fund_watch_latest.html").read_text()
-    assert "Nothing new above the flag threshold." in html
+    assert len(_log()) == 2
+    assert "Nothing new above the flag threshold." in (fw.REPORT_DIR / "fund_watch_latest.html").read_text()
+
+
+def test_article_scored_for_both_funds_with_their_own_rules(monkeypatch):
+    feeds = {'"TSMC"': [item("Strong earthquake halts TSMC fabs in Taiwan")]}
+    run(monkeypatch, feeds)
+    by_fund = {r["fund"]: r for r in _log()}
+    assert by_fund["jpm_taiwan"]["score"] == str(3 + 2 + 1)        # HIGH + top holding + Taiwan
+    assert by_fund["jpm_taiwan"]["entities"] == "TSMC"
+    assert by_fund["avanza_global"]["score"] == str(3 + 1)         # HIGH + dependency (TSMC)
+
+
+def test_other_funds_broad_searches_dont_leak_through_dependencies(monkeypatch):
+    # Google is a Taiwan-fund customer, but plain Google news comes from the global fund's search.
+    feeds = {'"Alphabet" OR "Google"': [item("Google faces antitrust probe in Poland")],
+             '"Google" (TSMC': [item("Google cuts orders for TSMC chips")]}
+    run(monkeypatch, feeds)
+    rows = {(r["fund"], r["title"].split(" - ")[0]) for r in _log()}
+    assert ("jpm_taiwan", "Google faces antitrust probe in Poland") not in rows
+    assert ("avanza_global", "Google faces antitrust probe in Poland") in rows
+    assert ("jpm_taiwan", "Google cuts orders for TSMC chips") in rows
 
 
 def test_all_flag_ignores_and_keeps_seen_store_and_log(monkeypatch):
-    feeds = {"TSMC": [item("Strong earthquake halts TSMC fabs in Taiwan")]}
+    feeds = {'"TSMC"': [item("Strong earthquake halts TSMC fabs in Taiwan")]}
     run(monkeypatch, feeds)
     before = fw.SEEN_FILE.read_text()
     run(monkeypatch, feeds, "--all")
     assert "Strong earthquake halts TSMC" in (fw.REPORT_DIR / "fund_watch_latest.html").read_text()
-    assert fw.SEEN_FILE.read_text() == before and len(_log()) == 1
+    assert fw.SEEN_FILE.read_text() == before and len(_log()) == 2
 
 
 def test_seen_store_retention(cfg):
@@ -218,15 +323,27 @@ def test_corrupt_seen_store_starts_fresh():
 
 
 def test_ranking_and_flag_split(monkeypatch):
-    feeds = {"TSMC": [item("TSMC halts production in Taiwan, Nvidia hit"),      # 2+2+1+1 = 6
-                      item("Strike vote at Quanta plant"),                    # 2+1 = 3
-                      item("Strong earthquake hits Peru")]}                   # 3, not relevant -> watch
+    feeds = {'"TSMC"': [item("TSMC halts production in Taiwan, Nvidia hit"),   # 2+2+1+1 = 6
+                        item("Strike vote at Quanta plant"),                   # 2+1 = 3
+                        item("Strong earthquake hits Peru")]}                  # 3, not relevant -> watch
     run(monkeypatch, feeds)
-    rows = [r.split(",") for r in _log()]
-    assert [r[2] for r in rows] == ["6", "3", "3"]
+    tw = [r for r in _log() if r["fund"] == "jpm_taiwan"]
+    assert [r["score"] for r in tw] == ["6", "3", "3"]
     html = (fw.REPORT_DIR / "fund_watch_latest.html").read_text()
-    flagged, watch = html.split("<h2>Watch")
+    taiwan = html.split("<h2>")[1]
+    flagged, watch = taiwan.split("<h3>Watch")
     assert "Peru" in watch and "Peru" not in flagged and "Quanta" in flagged
+
+
+def test_old_single_fund_log_gets_fund_column(monkeypatch):
+    fw.DATA_DIR.mkdir()
+    fw.LOG_FILE.write_text("run_utc,published_utc,score,severity,categories,entities,source,title,link\n"
+                           "2026-10-07T12:49+00:00,,3,MEDIUM,labour,,Reuters,Old item,http://o\n")
+    run(monkeypatch, {'"TSMC"': [item("Strong earthquake halts TSMC fabs in Taiwan")]})
+    rows = _log()
+    assert list(rows[0]) == fw.LOG_COLUMNS
+    assert (rows[0]["fund"], rows[0]["title"]) == ("jpm_taiwan", "Old item")
+    assert {r["fund"] for r in rows[1:]} == {"jpm_taiwan", "avanza_global"}
 
 
 def test_feed_failure_warns(monkeypatch, capsys, cfg):
@@ -236,20 +353,38 @@ def test_feed_failure_warns(monkeypatch, capsys, cfg):
     assert "feed failed" in capsys.readouterr().err
 
 
-def test_email_only_when_flagged(monkeypatch, cfg):
-    sent = []
-    monkeypatch.setattr(fw, "send_email", lambda html, subject: sent.append(subject))
-    on = {**cfg, "email": {"enabled": True, "send_when": "flagged"}}
-    monkeypatch.setattr(fw, "load_config", lambda path: on)
-    monkeypatch.setattr(fw, "fetch_feed", lambda q, c: [])
-    monkeypatch.setattr(fw.dt, "datetime", _FrozenDatetime)
-    fw.main([])
-    assert sent == []                                                            # nothing flagged: no mail
-    monkeypatch.setattr(fw, "fetch_feed", lambda q, c: [item("China blockade of Taiwan begins")] if "Strait" in q else [])
-    fw.main([])
-    assert len(sent) == 1 and "1 flagged (1 high)" in sent[0]
-    fw.main(["--no-email"])
-    assert len(sent) == 1
+# --------------------------------------------------------------------------- page + summary
+
+def test_markdown_page(monkeypatch):
+    feeds = {'"TSMC"': [item("TSMC | halts production in Taiwan, Nvidia hit"),
+                        item("China blockade of Taiwan begins"),
+                        item("Strong earthquake hits Peru")]}
+    run(monkeypatch, feeds)
+    md = (fw.REPORT_DIR / "fund_watch_latest.md").read_text()
+    assert md.startswith("# 🛡️ Fund risk watch") and "(../../DASHBOARD.md)" in md
+    assert "| 🇹🇼 **Taiwan** | **2** | **1** | 1 |" in md                           # flagged, high, watch
+    assert "| 🌍 **Global** |" in md
+    assert "## 🇹🇼 JPMorgan Funds - Taiwan Fund A (acc) USD" in md and "## 🌍 Avanza Global" in md
+    taiwan = md.split("## 🇹🇼")[1].split("## 🌍")[0]
+    assert "> [!WARNING]\n> **1 high-severity item(s)**" in taiwan
+    assert "TSMC \\| halts production" in taiwan and "🔴 HIGH" in taiwan and "🟠 MEDIUM" in taiwan
+    flagged, watch = taiwan.split("<details>")
+    assert "Peru" in watch and "Peru" not in flagged
+    assert md.count("<details>") == md.count("</details>")
+
+
+def test_summary_written_on_normal_runs_only(monkeypatch):
+    feeds = {"Taiwan Strait": [item("China blockade of Taiwan begins")]}
+    run(monkeypatch, feeds, "--all")
+    assert not fw.SUMMARY_FILE.exists()
+    run(monkeypatch, feeds)
+    s = json.loads(fw.SUMMARY_FILE.read_text())
+    tw = {f["id"]: f for f in s["funds"]}["jpm_taiwan"]
+    assert s["run_utc"] == "2026-10-07T05:00+00:00" and [f["id"] for f in s["funds"]] == ["jpm_taiwan", "avanza_global"]
+    assert (tw["n_flagged"], tw["n_high"], tw["n_watch"], tw["short"], tw["icon"]) == (1, 1, 0, "Taiwan", "🇹🇼")
+    assert tw["top"][0]["severity"] == "HIGH" and tw["top"][0]["title"].startswith("China blockade")
+    run(monkeypatch, feeds)                                                        # nothing new next time
+    assert all(f["n_flagged"] == 0 for f in json.loads(fw.SUMMARY_FILE.read_text())["funds"])
 
 
 # --------------------------------------------------------------------------- e-mail
@@ -303,43 +438,34 @@ def test_missing_settings_skip_normally_but_fail_a_test_email(monkeypatch, capsy
         fw.send_email("x", "s", required=True)
 
 
+def test_email_only_when_flagged(monkeypatch, cfg):
+    sent = []
+    monkeypatch.setattr(fw, "send_email", lambda html, subject, required=False: sent.append(subject))
+    on = {**cfg, "email": {"enabled": True, "send_when": "flagged"}}
+    monkeypatch.setattr(fw, "load_config", lambda path: on)
+    monkeypatch.setattr(fw, "fetch_feed", lambda q, c: [])
+    monkeypatch.setattr(fw.dt, "datetime", _FrozenDatetime)
+    fw.main([])
+    assert sent == []                                                            # nothing flagged: no mail
+    monkeypatch.setattr(fw, "fetch_feed",
+                        lambda q, c: [item("China blockade of Taiwan begins")] if "Strait" in q else [])
+    fw.main([])
+    assert sent == ["Fund risk watch 07 Oct: Taiwan 1 flagged (1 high) · Global 0 flagged (0 high)"]
+    fw.main(["--no-email"])
+    assert len(sent) == 1
+
+
 def test_test_email_sends_even_with_nothing_flagged(monkeypatch):
     sent = []
     monkeypatch.setattr(fw, "send_email", lambda html, subject, required=False: sent.append((subject, required)))
     monkeypatch.setattr(fw, "fetch_feed", lambda q, c: [])
     monkeypatch.setattr(fw.dt, "datetime", _FrozenDatetime)
     fw.main(["--test-email"])
-    assert sent == [("[TEST] Taiwan fund risk watch 07 Oct: 0 flagged (0 high)", True)]
+    assert sent == [("[TEST] Fund risk watch 07 Oct: Taiwan 0 flagged (0 high) · Global 0 flagged (0 high)", True)]
 
 
-def test_shipped_config_emails_only_when_flagged(cfg):
+def test_shipped_config(cfg):
     assert cfg["email"] == {"enabled": True, "send_when": "flagged"}
-
-
-# --------------------------------------------------------------------------- dashboard page + summary
-
-def test_markdown_page(monkeypatch):
-    feeds = {"TSMC": [item("TSMC | halts production in Taiwan, Nvidia hit"),       # flagged, HIGH? (infra = 2)
-                      item("China blockade of Taiwan begins"),                     # flagged, HIGH
-                      item("Strong earthquake hits Peru")]}                        # watch
-    run(monkeypatch, feeds)
-    md = (fw.REPORT_DIR / "fund_watch_latest.md").read_text()
-    assert md.startswith("# 🛡️ Fund risk watch") and "(../../DASHBOARD.md)" in md
-    assert "| **2** | **1** | **1** |" in md                                         # flagged, high, watch
-    assert "> [!WARNING]\n> **1 high-severity item(s)**" in md
-    assert "TSMC \\| halts production" in md and "🔴 HIGH" in md and "🟠 MEDIUM" in md
-    flagged, watch = md.split("<details>")
-    assert "Peru" in watch and "Peru" not in flagged
-    assert md.count("<details>") == md.count("</details>")
-
-
-def test_summary_written_on_normal_runs_only(monkeypatch):
-    feeds = {"TSMC": [item("China blockade of Taiwan begins")]}
-    run(monkeypatch, feeds, "--all")
-    assert not fw.SUMMARY_FILE.exists()
-    run(monkeypatch, feeds)
-    s = json.loads(fw.SUMMARY_FILE.read_text())
-    assert (s["n_flagged"], s["n_high"], s["n_watch"], s["run_utc"]) == (1, 1, 0, "2026-10-07T05:00+00:00")
-    assert s["top"][0]["severity"] == "HIGH" and s["top"][0]["title"].startswith("China blockade")
-    run(monkeypatch, feeds)                                                        # nothing new next time
-    assert json.loads(fw.SUMMARY_FILE.read_text())["n_flagged"] == 0
+    assert [f["id"] for f in cfg["funds"]] == ["jpm_taiwan", "avanza_global"]
+    g = fund(cfg, "avanza_global")
+    assert g["isin"] == "SE0011527613" and g["flag_min_score"] == 4

@@ -1243,13 +1243,25 @@ FOOTER = "\n---\n<sub>Research tool, not investment advice. Paper trades are hyp
 
 
 def load_fund_summary() -> dict | None:
+    """Latest fund-watch summary: {"run_utc", "run_local", "n_raw", "funds": [...]}.
+    An older single-fund summary is read as one fund."""
     try:
-        return json.loads(FUND_SUMMARY.read_text(encoding="utf-8"))
+        fs = json.loads(FUND_SUMMARY.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    if "funds" not in fs:   # written before the fund watch covered several funds
+        fs = {**fs, "funds": [{"id": "jpm_taiwan", "short": "Taiwan", "icon": "🇹🇼", "name": "JPMorgan Taiwan",
+                               **{k: fs[k] for k in ("n_flagged", "n_high", "n_watch", "top")}}]}
+    return fs
 
 
 FUND_SEVERITY = {"HIGH": "🔴&nbsp;HIGH", "MEDIUM": "🟠&nbsp;MEDIUM", "LOW": "🔵&nbsp;LOW"}
+
+
+def _fund_totals(fs: dict | None) -> tuple[int, int]:
+    """(flagged, high) over all funds."""
+    funds = (fs or {}).get("funds", [])
+    return sum(f["n_flagged"] for f in funds), sum(f["n_high"] for f in funds)
 
 
 def _fund_section(fs: dict | None, now_local: dt.datetime) -> list[str]:
@@ -1266,18 +1278,21 @@ def _fund_section(fs: dict | None, now_local: dt.datetime) -> list[str]:
                                        "Check its runs on the Actions tab."))
     out.append(f"<sub>Last run **{_day(fs['run_local'][:10])} {fs['run_local'][11:]}** (Stockholm) · "
                f"{fs['n_raw']} articles scanned · new articles only</sub>\n")
-    if fs["n_flagged"]:
-        if fs["n_high"]:
-            out.append(_callout("WARNING", f"**{fs['n_high']} high-severity** item(s) among "
-                                           f"{fs['n_flagged']} newly flagged."))
+    out.append(_md_table(["Fund", "Flagged", "High", "Watch"],
+                         [[f"{f['icon']} **{_md(f['short'])}**", f"**{f['n_flagged']}**", f["n_high"], f["n_watch"]]
+                          for f in fs["funds"]], align="lccc"))
+    for f in fs["funds"]:
+        if not f["n_flagged"]:
+            continue
+        out.append(f"**{f['icon']} {_md(f['short'])}**" + (f" · {f['n_high']} high-severity" if f["n_high"] else ""))
+        out.append("")
         out.append(_md_table(["Severity", "Headline", "Affects"],
                              [[FUND_SEVERITY.get(i["severity"], i["severity"]),
                                f"[{_md(i['title'])}](<{i['link']}>)", _md(", ".join(i["entities"])) or "–"]
-                              for i in fs["top"][:5]], align="lll"))
-    else:
+                              for i in f["top"][:3]], align="lll"))
+    if not _fund_totals(fs)[0]:
         out.append("✅ Nothing new flagged on the last run.\n")
-    more = f" ({fs['n_flagged']} flagged, {fs['n_watch']} on watch)" if fs["n_flagged"] or fs["n_watch"] else ""
-    return out + [f"[Full fund watch{more} →]({page})", ""]
+    return out + [f"[Full fund watch →]({page})", ""]
 
 
 def build_dashboard(rows, missing, paper, cfg, now_local, eval_res) -> str:
@@ -1298,8 +1313,8 @@ def build_dashboard(rows, missing, paper, cfg, now_local, eval_res) -> str:
                      ("⚖️ Evaluation", eval_res["verdict"],
                       f"{eval_res['n']} of {eval_res['min_trades']} trades" if eval_res["verdict"] == "NOT YET"
                       else f"{eval_res['n']} trades"),
-                     ("🛡️ Fund watch", fs["n_flagged"] if fs else "–",
-                      (f"flagged · {fs['n_high']} high" if fs else "not run yet"))]),
+                     ("🛡️ Fund watch", _fund_totals(fs)[0] if fs else "–",
+                      (f"flagged · {_fund_totals(fs)[1]} high" if fs else "not run yet"))]),
             "## 🔔 Today's alerts", "",
             _alerts_table(alerts, "✅ No alerts on this run."), _headlines(alerts)]
     if hype:

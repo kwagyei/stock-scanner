@@ -2,9 +2,11 @@
 """
 Fund risk news monitor.
 
-Scans Google News daily for anything that could hurt a fund: its holdings, their
-customers and suppliers, geopolitics, trade restrictions, natural disasters,
-infrastructure, labour, legal issues, market stress. Flags and ranks the issues.
+Scans Google News daily for anything that could hurt the funds in fund_watch.yaml: their
+holdings, the companies those depend on, geopolitics, trade restrictions, natural disasters,
+infrastructure, labour, legal issues, macro and market stress. Flags and ranks the issues
+per fund. Articles are fetched once and scored for every fund, so one article can be
+flagged for several funds.
 
 Only NEW items are reported each run (a seen-store removes repeats).
 Research and alerting only. No trading.
@@ -18,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import datetime as dt
 import hashlib
 import json
@@ -47,6 +50,8 @@ REPORT_DIR = ROOT / "reports"
 SEEN_FILE = DATA_DIR / "fund_watch_seen.json"
 LOG_FILE = DATA_DIR / "fund_watch_log.csv"
 SUMMARY_FILE = DATA_DIR / "fund_watch_latest.json"   # read by the stock scanner's dashboard
+LOG_COLUMNS = ["run_utc", "fund", "published_utc", "score", "severity", "categories",
+               "entities", "source", "title", "link"]
 UTC = dt.timezone.utc
 SEVERITY_LABEL = {3: "HIGH", 2: "MEDIUM", 1: "LOW"}
 
@@ -63,35 +68,83 @@ def holding_names(h: dict) -> list[str]:
 
 
 def build_queries(cfg: dict) -> list[tuple[str, str]]:
-    """Returns (group, query) pairs."""
+    """(group, query) pairs for all funds, without duplicates."""
+    return list(dict.fromkeys(gq for f in cfg["funds"] for gq in fund_queries(f)))
+
+
+def query_funds(cfg: dict) -> dict:
+    """query -> ids of the funds that search for it."""
+    out = {}
+    for f in cfg["funds"]:
+        for _, q in fund_queries(f):
+            out.setdefault(q, set()).add(f["id"])
+    return out
+
+
+def fund_queries(f: dict) -> list[tuple[str, str]]:
+    """(group, query) pairs for one fund."""
     q = []
-    for name in cfg["fund"]["search_names"]:
+    for name in f["search_names"]:
         q.append(("fund", f'"{name}"'))
-    for h in cfg["holdings"]:
-        names = " OR ".join(f'"{n}"' for n in holding_names(h))
-        q.append(("holding", names))
-    deps = cfg["dependencies"]
-    # Customers/suppliers only matter in a Taiwan/chip context; keep queries focused.
-    for c in deps["customers"]:
-        q.append(("customer", f'"{c}" (TSMC OR Taiwan OR chips OR orders)'))
-    for s in deps["suppliers"]:
-        q.append(("supplier", f'"{s}" (Taiwan OR TSMC OR China OR export)'))
-    for t in cfg["topics"]:
-        q.append(("topic", t))
+    for h in f["holdings"]:
+        q.append(("holding", " OR ".join(f'"{n}"' for n in holding_names(h))))
+    deps = f.get("dependencies") or {}
+    for group in ("customers", "suppliers"):
+        context = deps.get(f"search_{group}")
+        if context:   # dependencies without search words are not searched separately
+            q += [(group[:-1], f'"{c}" {context}') for c in deps.get(group, [])]
+    q += [("topic", t) for t in f.get("topics", [])]
     return q
 
 
 def compile_categories(cfg: dict) -> dict:
+    """{category: (severity, keywords, keyword patterns, exclude patterns)}.
+
+    exclude = regular expressions; text matching one is ignored for that category
+    (e.g. "strike ... deal" for labour).
+    """
     out = {}
     for cat, spec in cfg["risk_categories"].items():
         pats = [re.compile(r"(?<![\w-])" + re.escape(k) + r"(?![\w-])", re.IGNORECASE)
                 for k in spec["keywords"]]
-        out[cat] = (spec["severity"], spec["keywords"], pats)
+        excl = [re.compile(x, re.IGNORECASE) for x in spec.get("exclude", [])]
+        out[cat] = (spec["severity"], spec["keywords"], pats, excl)
     return out
 
 
 def compile_names(names: list[str]) -> list[re.Pattern]:
     return [re.compile(r"(?<!\w)" + re.escape(n) + r"(?!\w)", re.IGNORECASE) for n in names]
+
+
+class _Name:
+    """A company name pattern that ignores text matching its exclude phrases ("apple crop")."""
+
+    def __init__(self, name: str, exclude=()):
+        self.pattern = compile_names([name])[0]
+        self.exclude = [re.compile(x, re.IGNORECASE) for x in exclude]
+
+    def search(self, text: str):
+        for x in self.exclude:
+            text = x.sub(" ", text)
+        return self.pattern.search(text)
+
+
+def build_name_sets(fund: dict) -> dict:
+    """Patterns for one fund: top / other holdings, dependencies, relevance terms, fund names."""
+    top, other = [], []
+    cut = fund.get("top_holding_min_weight", 3)
+    for h in fund["holdings"]:
+        for n in holding_names(h):
+            (top if h.get("weight", 0) >= cut else other).append((h["name"], _Name(n, h.get("exclude", []))))
+    deps = fund.get("dependencies") or {}
+    dep_names = deps.get("customers", []) + deps.get("suppliers", [])
+    # Dependencies the fund doesn't search for itself: it relies on other funds' searches for them.
+    unsearched = [d for g in ("customers", "suppliers") if not deps.get(f"search_{g}") for d in deps.get(g, [])]
+    return {"top": top, "other": other,
+            "deps": [(d, _Name(d)) for d in dep_names],
+            "deps_unsearched": [(d, _Name(d)) for d in unsearched],
+            "region": compile_names(fund.get("relevance_terms", [])),
+            "fund": compile_names(fund["search_names"])}
 
 
 # --------------------------------------------------------------------------- fetching
@@ -133,20 +186,41 @@ def item_key(title: str) -> str:
 
 # --------------------------------------------------------------------------- classification
 
-def classify(item: dict, cats: dict, name_sets: dict, cfg: dict) -> dict | None:
+def article_text(item: dict) -> str:
+    """Headline + summary without the publisher's name, which Google News adds to both
+    ("... - Taipei Times", "Simply Wall Street"): it says nothing about the story."""
     text = f"{item['title']} {item['summary']}"
-    hits, max_sev = {}, 0
-    for cat, (sev, kws, pats) in cats.items():
-        matched = [kw for kw, p in zip(kws, pats) if p.search(text)]
+    src = (item.get("source") or "").strip()
+    return text.replace(src, " ") if src else text
+
+
+def match_categories(item: dict, cats: dict) -> dict:
+    """Risk keywords found in the article: {category: [keywords]}. Fund-independent."""
+    text = article_text(item)
+    hits = {}
+    for cat, (sev, kws, pats, excl) in cats.items():
+        t = text
+        for x in excl:
+            t = x.sub(" ", t)
+        matched = [kw for kw, p in zip(kws, pats) if p.search(t)]
         if matched:
             hits[cat] = matched
-            max_sev = max(max_sev, sev)
+    return hits
+
+
+def classify(item: dict, cats: dict, name_sets: dict, cfg: dict, matched=None, fund: dict | None = None) -> dict | None:
+    """Score an article for one fund (name_sets from build_name_sets). None if no risk keyword.
+
+    fund: its `severity` overrides per category apply (e.g. legal news is LOW for an index fund).
+    """
+    hits = matched if matched is not None else match_categories(item, cats)
     if not hits:
         return None
-
+    overrides = (fund or {}).get("severity") or {}
+    max_sev = max(overrides.get(c, cats[c][0]) for c in hits)
+    text = article_text(item)
     s = cfg["scoring"]
-    score = max_sev
-    tags = []
+    score, tags = max_sev, []
     top = [n for n, p in name_sets["top"] if p.search(text)]
     other = [n for n, p in name_sets["other"] if p.search(text)]
     deps = [n for n, p in name_sets["deps"] if p.search(text)]
@@ -159,33 +233,49 @@ def classify(item: dict, cats: dict, name_sets: dict, cfg: dict) -> dict | None:
     if deps:
         score += s["dependency_bonus"]
         tags += deps
-    taiwan = bool(name_sets["taiwan"].search(text))
-    if taiwan:
-        score += s["taiwan_bonus"]
-    fund = any(p.search(text) for p in name_sets.get("fund", []))
+    region = any(p.search(text) for p in name_sets["region"])
+    if region:
+        score += s["region_bonus"]
+    named = any(p.search(text) for p in name_sets["fund"])
     return {**item, "categories": hits, "severity": max_sev, "score": score,
-            "entities": sorted(set(tags)), "relevant": bool(tags or taiwan or fund)}
+            "entities": sorted(set(tags)), "relevant": bool(tags or region or named)}
 
 
-def build_name_sets(cfg: dict) -> dict:
-    top, other = [], []
-    for h in cfg["holdings"]:
-        for n in holding_names(h):
-            p = compile_names([n])[0]
-            (top if h.get("weight", 0) >= 3 else other).append((h["name"], p))
-    deps_all = cfg["dependencies"]["customers"] + cfg["dependencies"]["suppliers"]
-    deps = [(d, compile_names([d])[0]) for d in deps_all]
-    taiwan = re.compile(r"\btaiwan(ese)?\b|\btaipei\b|\bTAIEX\b", re.IGNORECASE)
-    fund = compile_names(cfg["fund"]["search_names"])
-    return {"top": top, "other": other, "deps": deps, "taiwan": taiwan, "fund": fund}
-
-
-def split_flagged(classified: list[dict], cfg: dict) -> tuple[list[dict], list[dict]]:
-    """Flagged = score >= flag_min_score (and, if require_relevance, names Taiwan/fund/holding/dependency)."""
+def split_flagged(classified: list[dict], cfg: dict, fund: dict | None = None) -> tuple[list[dict], list[dict]]:
+    """Flagged = score >= flag_min_score (the fund's own, if set) and, if require_relevance, tied to the fund."""
     s = cfg["scoring"]
     need = s.get("require_relevance", False)
-    ok = lambda c: c["score"] >= s["flag_min_score"] and (c.get("relevant", True) or not need)
+    min_score = (fund or {}).get("flag_min_score", s["flag_min_score"])
+    ok = lambda c: c["score"] >= min_score and (c.get("relevant", True) or not need)
     return [c for c in classified if ok(c)], [c for c in classified if not ok(c)]
+
+
+def _considered(item: dict, fund: dict, names: dict) -> bool:
+    """A fund looks at articles from its own searches, plus articles from other funds' searches
+    that name one of its holdings, relevance words, or dependencies it doesn't search for itself
+    (the global fund's TSMC). A dependency the fund does search for (with its own context words)
+    doesn't pull in other funds' broad news, e.g. all Google news into the Taiwan fund.
+    item["funds"] = ids of the funds whose searches found the article."""
+    if fund["id"] in item.get("funds", (fund["id"],)):
+        return True
+    text = article_text(item)
+    return any(p.search(text) for _, p in names["top"] + names["other"] + names["deps_unsearched"]) or \
+        any(p.search(text) for p in names["region"] + names["fund"])
+
+
+def classify_funds(items: list[dict], cfg: dict, now: dt.datetime) -> list[dict]:
+    """Per fund: {"fund", "flagged", "watch"}, each list ranked by score."""
+    cats = compile_categories(cfg)
+    matched = [(it, match_categories(it, cats)) for it in items]
+    results = []
+    for f in cfg["funds"]:
+        names = build_name_sets(f)
+        cl = [c for it, m in matched
+              if m and _considered(it, f, names) and (c := classify(it, cats, names, cfg, m, f))]
+        cl.sort(key=lambda x: (x["score"], x["severity"], x["ts"] or now), reverse=True)
+        flagged, watch = split_flagged(cl, cfg, f)
+        results.append({"fund": f, "flagged": flagged, "watch": watch})
+    return results
 
 
 # --------------------------------------------------------------------------- seen-store
@@ -211,7 +301,11 @@ def cat_label(cat: str) -> str:
     return cat.replace("_", " ").capitalize()
 
 
-def build_html(flagged, watch, cfg, now_local, n_queries, n_raw) -> str:
+def _n_high(items) -> int:
+    return sum(1 for i in items if i["severity"] == 3)
+
+
+def build_html(results, now_local, n_queries, n_raw) -> str:
     def rows(items):
         out = []
         for i in items:
@@ -228,13 +322,20 @@ def build_html(flagged, watch, cfg, now_local, n_queries, n_raw) -> str:
         return "\n".join(out)
 
     head = "<tr><th>Score</th><th>Severity</th><th>Headline</th><th>Affects</th><th>Why flagged</th></tr>"
-    f = cfg["fund"]
+    sections = "\n".join(
+        f"""<h2>{escape(r['fund']['icon'])} {escape(r['fund']['name'])} <small>ISIN {escape(r['fund']['isin'])}</small></h2>
+<h3>Flagged · {len(r['flagged'])}</h3>
+<div class=box><table>{head}{rows(r['flagged']) or '<tr><td colspan=5>Nothing new above the flag threshold.</td></tr>'}</table></div>
+<h3>Watch (lower score) · {len(r['watch'])}</h3>
+<div class=box><table>{head}{rows(r['watch']) or '<tr><td colspan=5>None.</td></tr>'}</table></div>"""
+        for r in results)
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Fund risk watch {now_local:%Y-%m-%d}</title>
 <style>
 body{{font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:16px;color:#1d1d1f;max-width:1100px}}
-h1{{font-size:20px}} h2{{font-size:16px;margin-top:28px;border-bottom:1px solid #ddd;padding-bottom:4px}}
+h1{{font-size:20px}} h2{{font-size:17px;margin-top:32px;border-bottom:2px solid #ddd;padding-bottom:4px}}
+h3{{font-size:14px;margin-top:18px}}
 table{{border-collapse:collapse;width:100%;font-size:13px}} .box{{overflow-x:auto}}
 th,td{{border-bottom:1px solid #eee;padding:6px;text-align:left;vertical-align:top}}
 td.n{{text-align:right}} small{{color:#666}}
@@ -242,13 +343,10 @@ td.n{{text-align:right}} small{{color:#666}}
 tr.s3 .sev{{background:#fde2e1;color:#a4000f}} tr.s2 .sev{{background:#fff1d6;color:#8a5300}}
 tr.s1 .sev{{background:#e8eef7;color:#24476b}}
 </style></head><body>
-<h1>Risk watch · {escape(f['name'])}</h1>
-<p><small>ISIN {escape(f['isin'])} · {now_local:%a %d %b %Y, %H:%M} · {n_queries} searches,
-{n_raw} articles scanned, new items only. Keyword-based flagging: expect some false positives; read the source.</small></p>
-<h2>Flagged · {len(flagged)}</h2>
-<div class=box><table>{head}{rows(flagged) or '<tr><td colspan=5>Nothing new above the flag threshold.</td></tr>'}</table></div>
-<h2>Watch (lower score) · {len(watch)}</h2>
-<div class=box><table>{head}{rows(watch) or '<tr><td colspan=5>None.</td></tr>'}</table></div>
+<h1>Fund risk watch · {now_local:%a %d %b %Y, %H:%M}</h1>
+<p><small>{n_queries} searches, {n_raw} articles scanned, new items only. Keyword-based flagging: expect some
+false positives; read the source.</small></p>
+{sections}
 <p><small>Not investment advice.</small></p>
 </body></html>"""
 
@@ -272,66 +370,87 @@ def _md_items(items, empty: str) -> str:
     return "\n".join(out) + "\n"
 
 
-def build_page_md(flagged, watch, cfg, now_local, n_queries, n_raw) -> str:
+def build_page_md(results, now_local, n_queries, n_raw) -> str:
     """The report as a Markdown page (GitHub shows Markdown, not HTML, in a private repo)."""
-    high = sum(1 for f in flagged if f["severity"] == 3)
     back = ("[![Dashboard](https://img.shields.io/badge/Dashboard-24292f?style=for-the-badge)]"
             "(../../DASHBOARD.md)")
-    glance = ("| 🚩 Flagged | 🔴 High | 👀 Watch | 📰 Articles scanned |\n|:---:|:---:|:---:|:---:|\n"
-              f"| **{len(flagged)}** | **{high}** | **{len(watch)}** | **{n_raw}**<br><sub>{n_queries} searches</sub> |\n")
-    note = ("> [!WARNING]\n> **{} high-severity item(s)** among the new articles. Read the sources.\n".format(high)
-            if high else "")
-    return "\n".join([
-        f"# 🛡️ Fund risk watch", "", back, "",
-        f"<sub>**{_md(cfg['fund']['name'])}** · ISIN {cfg['fund']['isin']} · updated "
-        f"**{now_local:%a %d %b %Y, %H:%M}** (Stockholm) · new articles only</sub>", "",
-        glance, note,
-        "## 🚩 Flagged", "",
-        "<sub>Score = severity (HIGH 3, MEDIUM 2, LOW 1) + 2 for a top-5 holding (+1 another holding) "
-        "+ 1 customer or supplier + 1 Taiwan. Flagged = score 3 or more and names Taiwan, the fund, a holding, "
-        "a customer or a supplier. Keyword-based: read the source before acting.</sub>", "",
-        _md_items(flagged, "✅ Nothing new above the flag threshold."),
-        f"<details><summary>👀 Watch: lower score or not clearly linked to the fund ({len(watch)})</summary>", "",
-        _md_items(watch, "None."), "</details>", "",
-        "---", "<sub>Research and alerting only. Not investment advice.</sub>", ""])
+    glance = (["| Fund | 🚩 Flagged | 🔴 High | 👀 Watch |", "|:---|:---:|:---:|:---:|"]
+              + [f"| {r['fund']['icon']} **{_md(r['fund']['short'])}** | **{len(r['flagged'])}** | "
+                 f"**{_n_high(r['flagged'])}** | {len(r['watch'])} |" for r in results])
+    out = ["# 🛡️ Fund risk watch", "", back, "",
+           f"<sub>Updated **{now_local:%a %d %b %Y, %H:%M}** (Stockholm) · {n_raw} articles from "
+           f"{n_queries} searches · new articles only · each article is scored for every fund</sub>", "",
+           "\n".join(glance), "",
+           "<sub>Score = severity (HIGH 3, MEDIUM 2, LOW 1) + 2 for a top holding (+1 another holding) "
+           "+ 1 dependency + 1 relevance word (e.g. Taiwan, Wall Street, krona). Flagged = score 3 or more "
+           "and tied to the fund (a relevance word, the fund, a holding or a dependency). Keyword-based: "
+           "read the source before acting.</sub>", ""]
+    for r in results:
+        f, high = r["fund"], _n_high(r["flagged"])
+        out += [f"## {f['icon']} {_md(f['name'])}", "", f"<sub>ISIN {f['isin']}</sub>", ""]
+        if high:
+            out += [f"> [!WARNING]\n> **{high} high-severity item(s)** among the new articles. Read the sources.", ""]
+        out += [_md_items(r["flagged"], "✅ Nothing new above the flag threshold."),
+                f"<details><summary>👀 Watch: lower score or not clearly linked to the fund "
+                f"({len(r['watch'])})</summary>", "", _md_items(r["watch"], "None."), "</details>", ""]
+    return "\n".join(out + ["---", "<sub>Research and alerting only. Not investment advice.</sub>", ""])
 
 
-def write_summary(flagged, watch, now, now_local, n_raw) -> None:
+def write_summary(results, now, now_local, n_raw) -> None:
     """Small JSON summary of the latest run for the stock scanner's dashboard."""
-    top = [{"score": i["score"], "severity": SEVERITY_LABEL[i["severity"]], "title": i["title"],
-            "link": i["link"], "source": i["source"], "entities": i["entities"],
-            "categories": list(i["categories"])} for i in flagged[:10]]
+    funds = [{"id": r["fund"]["id"], "short": r["fund"]["short"], "icon": r["fund"]["icon"],
+              "name": r["fund"]["name"], "isin": r["fund"]["isin"],
+              "n_flagged": len(r["flagged"]), "n_high": _n_high(r["flagged"]), "n_watch": len(r["watch"]),
+              "top": [{"score": i["score"], "severity": SEVERITY_LABEL[i["severity"]], "title": i["title"],
+                       "link": i["link"], "source": i["source"], "entities": i["entities"],
+                       "categories": list(i["categories"])} for i in r["flagged"][:10]]}
+             for r in results]
     SUMMARY_FILE.write_text(json.dumps({
         "run_utc": now.isoformat(timespec="minutes"), "run_local": f"{now_local:%Y-%m-%d %H:%M}",
-        "n_flagged": len(flagged), "n_high": sum(1 for f in flagged if f["severity"] == 3),
-        "n_watch": len(watch), "n_raw": n_raw, "top": top}, indent=1, ensure_ascii=False), encoding="utf-8")
+        "n_raw": n_raw, "funds": funds}, indent=1, ensure_ascii=False), encoding="utf-8")
 
 
-def build_markdown(flagged, watch, cfg, now_local) -> str:
-    lines = [f"## Risk watch {now_local:%Y-%m-%d} · {cfg['fund']['name']}", "",
-             f"**Flagged:** {len(flagged)} · **Watch:** {len(watch)}", ""]
-    if flagged:
-        lines += ["| Score | Severity | Headline | Affects | Categories |", "|---|---|---|---|---|"]
-        for i in flagged[:25]:
-            t = i["title"].replace("|", "/")
-            lines.append(f"| {i['score']} | {SEVERITY_LABEL[i['severity']]} | [{t}]({i['link']}) "
-                         f"| {', '.join(i['entities']) or '–'} | {', '.join(map(cat_label, i['categories']))} |")
+def build_markdown(results, now_local) -> str:
+    """Short version for the GitHub job summary."""
+    lines = [f"## Fund risk watch {now_local:%Y-%m-%d}", ""]
+    for r in results:
+        f = r["fund"]
+        lines += [f"### {f['icon']} {f['name']}", "",
+                  f"**Flagged:** {len(r['flagged'])} · **Watch:** {len(r['watch'])}", ""]
+        if r["flagged"]:
+            lines += ["| Score | Severity | Headline | Affects | Categories |", "|---|---|---|---|---|"]
+            for i in r["flagged"][:25]:
+                t = i["title"].replace("|", "/")
+                lines.append(f"| {i['score']} | {SEVERITY_LABEL[i['severity']]} | [{t}]({i['link']}) "
+                             f"| {', '.join(i['entities']) or '–'} | {', '.join(map(cat_label, i['categories']))} |")
+            lines.append("")
     return "\n".join(lines) + "\n"
 
 
-def append_log(items, now) -> None:
-    import csv
+def append_log(results, now) -> None:
+    """One row per (fund, item). Older single-fund logs get a fund column (the Taiwan fund)."""
+    if LOG_FILE.exists():
+        with open(LOG_FILE, newline="", encoding="utf-8") as fh:
+            rows = list(csv.reader(fh))
+        if rows and "fund" not in rows[0]:
+            old_head = rows[0]
+            with open(LOG_FILE, "w", newline="", encoding="utf-8") as fh:
+                w = csv.writer(fh)
+                w.writerow(LOG_COLUMNS)
+                for r in rows[1:]:
+                    rec = dict(zip(old_head, r), fund="jpm_taiwan")
+                    w.writerow([rec.get(c, "") for c in LOG_COLUMNS])
     new = not LOG_FILE.exists()
     with open(LOG_FILE, "a", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         if new:
-            w.writerow(["run_utc", "published_utc", "score", "severity", "categories",
-                        "entities", "source", "title", "link"])
-        for i in items:
-            w.writerow([now.isoformat(timespec="minutes"),
-                        i["ts"].isoformat(timespec="minutes") if i["ts"] else "",
-                        i["score"], SEVERITY_LABEL[i["severity"]], ";".join(i["categories"]),
-                        ";".join(i["entities"]), i["source"], i["title"], i["link"]])
+            w.writerow(LOG_COLUMNS)
+        for r in results:
+            for i in r["flagged"] + r["watch"]:
+                w.writerow([now.isoformat(timespec="minutes"), r["fund"]["id"],
+                            i["ts"].isoformat(timespec="minutes") if i["ts"] else "",
+                            i["score"], SEVERITY_LABEL[i["severity"]], ";".join(i["categories"]),
+                            ";".join(i["entities"]), i["source"], i["title"], i["link"]])
 
 
 def send_email(html: str, subject: str, required: bool = False) -> None:
@@ -356,6 +475,11 @@ def send_email(html: str, subject: str, required: bool = False) -> None:
     print(f"[info] e-mailed to {to}")
 
 
+def email_subject(results, now_local) -> str:
+    parts = [f"{r['fund']['short']} {len(r['flagged'])} flagged ({_n_high(r['flagged'])} high)" for r in results]
+    return f"Fund risk watch {now_local:%d %b}: " + " · ".join(parts)
+
+
 # --------------------------------------------------------------------------- main
 
 def main(argv=None) -> int:
@@ -376,9 +500,8 @@ def main(argv=None) -> int:
     except Exception:
         now_local = now
 
-    cats = compile_categories(cfg)
-    names = build_name_sets(cfg)
     queries = build_queries(cfg)
+    owners = query_funds(cfg)
     seen = {} if args.all else load_seen()
 
     raw, unique = 0, {}
@@ -387,45 +510,42 @@ def main(argv=None) -> int:
         raw += len(items)
         for it in items:
             k = item_key(it["title"])
-            if k in seen or k in unique:
+            if k in seen:
                 continue
-            unique[k] = it
+            if k in unique:     # same story from another search: remember which funds found it
+                unique[k]["funds"] |= owners[q]
+                continue
+            unique[k] = {**it, "funds": set(owners[q])}
         if i < len(queries) - 1:
             time.sleep(cfg["news"]["pause_seconds"])
 
-    classified = []
-    for k, it in unique.items():
-        c = classify(it, cats, names, cfg)
-        if c:
-            classified.append(c)
+    results = classify_funds(list(unique.values()), cfg, now)
+    for k in unique:
         seen[k] = now.isoformat()   # mark every new item as seen, flagged or not
-    min_score = cfg["scoring"]["flag_min_score"]
-    classified.sort(key=lambda x: (x["score"], x["severity"], x["ts"] or now), reverse=True)
-    flagged, watch = split_flagged(classified, cfg)
 
     if not args.all:  # --all is a look-around run: don't touch the seen-store, log or summary
         save_seen(seen, cfg["news"]["seen_retention_days"], now)
-        append_log(flagged + watch, now)
-        write_summary(flagged, watch, now, now_local, raw)
+        append_log(results, now)
+        write_summary(results, now, now_local, raw)
 
-    html = build_html(flagged, watch, cfg, now_local, len(queries), raw)
+    html = build_html(results, now_local, len(queries), raw)
     (REPORT_DIR / f"fund_watch_{now_local:%Y-%m-%d_%H%M}.html").write_text(html, encoding="utf-8")
     (REPORT_DIR / "fund_watch_latest.html").write_text(html, encoding="utf-8")
-    (REPORT_DIR / "fund_watch_latest.md").write_text(
-        build_page_md(flagged, watch, cfg, now_local, len(queries), raw), encoding="utf-8")
+    (REPORT_DIR / "fund_watch_latest.md").write_text(build_page_md(results, now_local, len(queries), raw),
+                                                    encoding="utf-8")
 
-    md = build_markdown(flagged, watch, cfg, now_local)
+    md = build_markdown(results, now_local)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
             fh.write(md)
     print(md)
 
     e = cfg.get("email", {})
-    high = sum(1 for f in flagged if f["severity"] == 3)
-    subject = f"Taiwan fund risk watch {now_local:%d %b}: {len(flagged)} flagged ({high} high)"
+    any_flagged = any(r["flagged"] for r in results)
+    subject = email_subject(results, now_local)
     if args.test_email:
         send_email(html, "[TEST] " + subject, required=True)
-    elif e.get("enabled") and not args.no_email and (flagged or e.get("send_when") == "always"):
+    elif e.get("enabled") and not args.no_email and (any_flagged or e.get("send_when") == "always"):
         send_email(html, subject)
     return 0
 
