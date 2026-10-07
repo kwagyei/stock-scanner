@@ -271,7 +271,7 @@ def test_paper_csv_round_trip(cfg, tmp_paths):
 
     df.to_csv(scanner.PAPER_LOG, index=False)
     back = scanner.load_paper()
-    pd.testing.assert_frame_equal(back, df.astype(str), check_dtype=False)
+    pd.testing.assert_frame_equal(back, df.astype(str).assign(strategy="v0"), check_dtype=False)
     assert list(back["status"]) == ["open", "closed", "pending"]
 
     # Re-running the update on loaded string data is idempotent for closed trades.
@@ -293,7 +293,7 @@ def test_main_persists_trade_lifecycle(cfg, tmp_paths, monkeypatch):
     wl.write_text("ticker,name,query\nX.ST,X,X\n")
     h = flat(70)
     h.iloc[-1] = (100, 112, 100, 111, 6000)          # +11%, 6x vol, small cap → 4
-    data = {"X.ST": h, "^OMX": flat(70, px=1000)}
+    data = {"X.ST": h, "^OMX": flat(70, px=1000), "nasdaq:IX3364": flat(70, px=500)}
     monkeypatch.setattr(scanner, "fetch_history", lambda t, p: data[t])
     monkeypatch.setattr(scanner, "fetch_news", lambda q, c: [])
     monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: 1e9)
@@ -309,6 +309,8 @@ def test_main_persists_trade_lifecycle(cfg, tmp_paths, monkeypatch):
     data["^OMX"] = flat(72, px=1000)
     scanner.main(["--no-email", "--watchlist", str(wl)])
     p = pd.read_csv(scanner.PAPER_LOG, dtype=str).fillna("")
+    assert sorted(p["strategy"]) == ["v0", "v0b", "v1_v1"]      # no release: all three books agree
+    p = p[p["strategy"] == "v0"]
     assert len(p) == 1
     assert list(p[["status", "exit_reason", "exit_price"]].iloc[0]) == ["closed", "stop", "90.0000"]
 
@@ -1279,3 +1281,102 @@ def test_bench_symbol_primary_and_secondary(cfg):
     assert scanner.bench_symbol(cfg, "primary") == "nasdaq:IX3364"
     assert scanner.bench_symbol(cfg) == "^OMX"
     assert scanner.bench_symbol({"benchmark": "^OMX"}, "secondary") == "^OMX"
+
+
+# --------------------------------------------------------------------------- strategies in the paper book
+
+OLD_PAPER_HEADER = ("id,ticker,name,signal_date,score,status,entry_date,entry_price,bench_entry,exit_date,"
+                    "exit_price,exit_reason,bench_exit,last_price,return_pct,bench_return_pct,universe,pe_status,"
+                    "pe_partial_date,pe_partial_price,pe_exit_date,pe_exit_price,pe_exit_reason,pe_return_pct,"
+                    "pe_bench_return_pct,signal_move")
+
+
+def test_paper_migration_marks_existing_rows_v0(tmp_paths):
+    scanner.DATA_DIR.mkdir()
+    scanner.PAPER_LOG.write_text(OLD_PAPER_HEADER + "\nELTEL.ST-2026-10-06,ELTEL.ST,Eltel,2026-10-06,4,open,"
+                                 "2026-10-07,18.0000,2500,,,,,18.0000,0.00,,v2,open,,,,,,0.00,,-0.1200\n")
+    p = scanner.load_paper()
+    assert list(p.columns) == scanner.PAPER_COLUMNS
+    assert p.iloc[0]["strategy"] == "v0" and p.iloc[0]["id"] == "ELTEL.ST-2026-10-06"
+    assert p.iloc[0]["bench_primary_entry"] == ""
+    assert len(scanner.book(p, "v0")) == 1 and scanner.book(p, "v0b").empty
+
+
+def strat_row(ticker="X.ST", score=4, v0b=4, v1=5, block=False):
+    return {"ticker": ticker, "name": ticker, "date": "2026-10-08", "score": score, "chg_1d": 0.05,
+            "score_v0b": v0b, "score_v1": v1, "block_buy": block}
+
+
+def test_three_books_are_independent_and_v1_blocks(cfg, tmp_paths):
+    paper = scanner.load_paper()
+    rows = [strat_row("A.ST", 4, 2, 2), strat_row("B.ST", 1, 4, 6), strat_row("C.ST", 4, 4, 4, block=True)]
+    for s in ("v0", "v0b", "v1_v1"):
+        paper = scanner.add_paper_signals(paper, rows, cfg, "v2", strategy=s)
+    got = {s: sorted(scanner.book(paper, s)["ticker"]) for s in ("v0", "v0b", "v1_v1")}
+    assert got == {"v0": ["A.ST", "C.ST"], "v0b": ["B.ST", "C.ST"], "v1_v1": ["B.ST"]}
+    assert set(scanner.book(paper, "v0")["id"]) == {"A.ST-2026-10-08", "C.ST-2026-10-08"}
+    assert scanner.book(paper, "v1_v1").iloc[0]["id"] == "v1_v1:B.ST-2026-10-08"
+    assert scanner.book(paper, "v1_v1").iloc[0]["score"] == "6"
+    # an open v0 trade doesn't stop v0b from opening the same stock
+    again = scanner.add_paper_signals(paper, [strat_row("A.ST", 4, 4, 4)], cfg, "v2", strategy="v0b")
+    assert len(scanner.book(again, "v0b")) == 3 and len(scanner.book(again, "v0")) == 2
+
+
+def test_primary_benchmark_return_on_trades(cfg):
+    p = scanner.update_paper(pending_trade("O.ST"), {"O.ST": flat(3)}, flat(3, px=1000), cfg,
+                             bench_primary=flat(3, px=500))
+    r = p.iloc[0]
+    assert r["status"] == "open" and r["bench_primary_entry"] == "500.0000"
+    assert r["bench_primary_return_pct"] == "0.00"
+
+
+BLOCK_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:x="https://mfn.se/schemas/rss-ns-x/"><channel>
+<item><title>X AB utf\xc3\xa4rdar vinstvarning</title><link>https://mfn.se/a/x/warn</link>
+<pubDate>Thu, 08 Oct 2026 08:00:00 +0000</pubDate><x:language>sv</x:language>
+<x:content type="text">R\xc3\xb6relseresultatet blir betydligt l\xc3\xa4gre \xc3\xa4n v\xc3\xa4ntat.</x:content></item>
+</channel></rss>"""
+
+
+def test_main_end_to_end_llm_blocks_v1_but_not_v0b(cfg, tmp_paths, monkeypatch):
+    import llm_score as ls
+    from types import SimpleNamespace
+    wl = tmp_paths / "watchlist.csv"
+    wl.write_text("ticker,name,query,mfn_slug\nX.ST,X,X,x\n")
+    start = pd.bdate_range(end="2026-10-08", periods=70)[0]
+    h = flat(70, start=start)
+    h.iloc[-1] = (100, 101, 85, 88, 6000)               # -12%, 6x volume, small cap
+    data = {"X.ST": h, "^OMX": flat(70, px=1000, start=start), "nasdaq:IX3364": flat(70, px=500, start=start)}
+    monkeypatch.setattr(scanner, "fetch_history", lambda t, p: data[t])
+    monkeypatch.setattr(scanner, "fetch_news", lambda q, c: [])
+    monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: 1e9)
+    monkeypatch.setattr(scanner.time, "sleep", lambda s: None)
+    monkeypatch.setattr(scanner.ns, "fetch_mfn_xml", lambda s, n: BLOCK_XML)
+    monkeypatch.setattr(scanner, "_now", lambda: dt.datetime(2026, 10, 8, 16, 52, tzinfo=UTC))
+    answer = {"event_type": "guidance", "direction": -2, "surprise": 3, "material": True,
+              "confidence": 0.9, "rationale": "Profit warning well below expectations."}
+    calls = []
+
+    class Client:
+        class messages:
+            @staticmethod
+            def create(**kw):
+                calls.append(kw)
+                return SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text=json.dumps(answer))],
+                                       usage=SimpleNamespace(input_tokens=900, output_tokens=60))
+    monkeypatch.setattr(ls, "make_client", lambda: Client)
+
+    scanner.main(["--no-email", "--watchlist", str(wl)])
+    assert len(calls) == 1 and "vinstvarning" in calls[0]["messages"][0]["content"]
+    scores = ls.load_scores(scanner.LLM_SCORES_LOG)
+    assert list(scores[["status", "direction", "is_backfill"]].iloc[0]) == ["ok", "-2", "false"]
+    p = pd.read_csv(scanner.PAPER_LOG, dtype=str).fillna("")
+    # v0: release 2 (MFN) + volume 2 + price 1 + small cap 1 = 6; v0b same; v1: release 0 -> 4 but blocked
+    assert sorted(p["strategy"]) == ["v0", "v0b"]
+    sig = pd.read_csv(scanner.SIGNALS_LOG, dtype=str).fillna("")
+    r = sig.iloc[0]
+    assert (r["score_v0"], r["score_v0b"], r["score_v1"], r["block_buy"]) == ("6", "6", "4", "True")
+    assert r["llm_prompt_version"] == "v1" and r["block_if_direction_lte"] == "-2" and r["release_ids"]
+    # a second run doesn't call the LLM again
+    scanner.main(["--no-email", "--watchlist", str(wl)])
+    assert len(calls) == 1

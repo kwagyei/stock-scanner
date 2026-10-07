@@ -48,6 +48,7 @@ import yfinance as yf
 import evaluate as ev
 import llm_score as ls
 import news_sources as ns
+import strategies as st
 
 try:  # python.org macOS builds ship without CA certificates; use certifi's bundle
     import certifi
@@ -78,6 +79,9 @@ PAPER_COLUMNS = [
     "pe_status", "pe_partial_date", "pe_partial_price",
     "pe_exit_date", "pe_exit_price", "pe_exit_reason", "pe_return_pct", "pe_bench_return_pct",
     "signal_move",   # 1-day price move on the signal day (fraction), for the drop / jump / flat split
+    # LLM experiment: which paper book (v0 / v0b / v1_<prompt>); index returns vs the primary
+    # (small-cap) benchmark. bench_* above stay on the secondary (OMXS30) for v0's reports.
+    "strategy", "bench_primary_entry", "bench_primary_exit", "bench_primary_return_pct",
 ]
 DEFAULT_UNIVERSE = "v1"   # trades from before watchlist versioning (the hand-picked list)
 
@@ -401,6 +405,7 @@ def load_paper() -> pd.DataFrame:
             if c not in df.columns:
                 df[c] = ""
         df["universe"] = df["universe"].replace("", DEFAULT_UNIVERSE)
+        df["strategy"] = df["strategy"].replace("", st.V0)     # rows from before the experiment
         return df[PAPER_COLUMNS]
     return pd.DataFrame(columns=PAPER_COLUMNS, dtype=str)
 
@@ -414,7 +419,13 @@ def _price_on(hist: pd.DataFrame, date: pd.Timestamp, field: str) -> float | Non
     return float(sub.iloc[-1][field])
 
 
-def update_paper(paper: pd.DataFrame, histories: dict, bench: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+def book(paper: pd.DataFrame, strategy: str = st.V0) -> pd.DataFrame:
+    """One strategy's paper trades (v0's reports use only the v0 book)."""
+    return paper[paper["strategy"].replace("", st.V0) == strategy]
+
+
+def update_paper(paper: pd.DataFrame, histories: dict, bench: pd.DataFrame, cfg: dict,
+                 bench_primary: pd.DataFrame | None = None) -> pd.DataFrame:
     pc = cfg["paper_trading"]
     pe_enabled = (pc.get("partial_exit") or {}).get("enabled", False)
     for idx, row in paper.iterrows():
@@ -427,6 +438,7 @@ def update_paper(paper: pd.DataFrame, histories: dict, bench: pd.DataFrame, cfg:
             continue
         if main_todo:
             _update_main(paper, idx, row, h, bench, pc)
+            _update_primary_bench(paper, idx, h, bench_primary)
         row = paper.loc[idx]
         if pe_enabled and row["entry_date"] and row["pe_status"] != "closed":
             _update_partial(paper, idx, row, h, bench, pc)
@@ -483,6 +495,25 @@ def _update_main(paper, idx, row, h, bench, pc) -> None:
     if bx and bench_entry:
         paper.at[idx, "bench_exit"] = f"{bx:.4f}"
         paper.at[idx, "bench_return_pct"] = f"{(bx / bench_entry - 1) * 100:.2f}"
+
+
+def _update_primary_bench(paper, idx, h, bench_primary) -> None:
+    """Primary-benchmark return over the same days as the main trade (entry open to exit close)."""
+    row = paper.loc[idx]
+    if bench_primary is None or bench_primary.empty or not row["entry_date"]:
+        return
+    entry_day = pd.Timestamp(row["entry_date"])
+    if not row["bench_primary_entry"]:
+        b0 = _price_on(bench_primary, entry_day, "Open") if entry_day in bench_primary.index else None
+        if not b0:
+            return
+        paper.at[idx, "bench_primary_entry"] = f"{b0:.4f}"
+    b0 = float(paper.at[idx, "bench_primary_entry"])
+    end = pd.Timestamp(row["exit_date"]) if row["exit_date"] else h.index[-1]
+    bx = _price_on(bench_primary, end, "Close")
+    if bx:
+        paper.at[idx, "bench_primary_exit"] = f"{bx:.4f}"
+        paper.at[idx, "bench_primary_return_pct"] = f"{(bx / b0 - 1) * 100:.2f}"
 
 
 def simulate_partial(bars: pd.DataFrame, entry: float, pc: dict) -> dict:
@@ -548,18 +579,25 @@ def _update_partial(paper, idx, row, h, bench, pc) -> None:
 
 
 def add_paper_signals(paper: pd.DataFrame, rows: list[dict], cfg: dict,
-                      universe: str = DEFAULT_UNIVERSE) -> pd.DataFrame:
+                      universe: str = DEFAULT_UNIVERSE, strategy: str = st.V0) -> pd.DataFrame:
+    """New pending trades for one strategy's book. v0 uses r["score"]; v0b and v1 use
+    r["score_v0b"] / r["score_v1"], and v1 skips rows with block_buy."""
     pc = cfg["paper_trading"]
-    active = set(paper.loc[paper["status"].isin(["pending", "open"]), "ticker"])
+    mine = book(paper, strategy)
+    active = set(mine.loc[mine["status"].isin(["pending", "open"]), "ticker"])
+    key = {st.V0: "score", st.V0B: "score_v0b"}.get(strategy, "score_v1")
     new = []
     for r in rows:
-        if r["score"] >= pc["min_score"] and r["ticker"] not in active:
+        if key not in r or (strategy not in (st.V0, st.V0B) and r.get("block_buy")):
+            continue
+        if r[key] >= pc["min_score"] and r["ticker"] not in active:
             rec = {c: "" for c in PAPER_COLUMNS}
             rec.update({
-                "id": f"{r['ticker']}-{r['date']}",
+                "id": f"{r['ticker']}-{r['date']}" if strategy == st.V0 else f"{strategy}:{r['ticker']}-{r['date']}",
                 "ticker": r["ticker"], "name": r["name"],
-                "signal_date": r["date"], "score": str(r["score"]),
+                "signal_date": r["date"], "score": str(r[key]),
                 "status": "pending", "universe": universe, "signal_move": "" if r.get("chg_1d") is None else f"{r['chg_1d']:.4f}",
+                "strategy": strategy,
             })
             new.append(rec)
             active.add(r["ticker"])
@@ -605,7 +643,7 @@ def last_logged_bars() -> dict:
     return log.groupby("ticker")["bar_date"].max().to_dict()
 
 
-def score_log_rows(rows, missing, wl, now, universe, news_checked=True, stale=()) -> list[dict]:
+def score_log_rows(rows, missing, wl, now, universe, news_checked=True, stale=(), cfg=None) -> list[dict]:
     """One row per watchlist stock for this run, scored or not; stocks without price data too."""
     run = now.isoformat(timespec="minutes")
     out = []
@@ -621,6 +659,7 @@ def score_log_rows(rows, missing, wl, now, universe, news_checked=True, stale=()
             "news_24h": r["n_24h"] if news_checked else "", "releases_24h": r["n_releases"] if news_checked else "",
             "market_cap_msek": "" if not mc else round(mc / 1e6), "universe": universe,
             "reasons": "; ".join(r["reasons"]),
+            **(strategy_log_fields(r, cfg) if cfg else {}),
         })
     names = dict(zip(wl["ticker"], wl["name"]))
     blank = {c: "" for c in ["bar_date", "score", *(f"pts_{k}" for k in SCORE_COMPONENTS), "hype", "close",
@@ -1657,9 +1696,21 @@ def pages_only(cfg: dict) -> int:
         run_local = run.astimezone(ZoneInfo("Europe/Stockholm"))
     except Exception:
         run_local = run
-    write_pages(rows, missing, load_paper(), cfg, run_local)
+    write_pages(rows, missing, book(load_paper()), cfg, run_local)
     print(f"[info] pages rebuilt from the scan at {run_local:%Y-%m-%d %H:%M} (Stockholm); nothing fetched")
     return 0
+
+
+def strategy_log_fields(r: dict, cfg: dict) -> dict:
+    """The LLM-experiment columns of signals_log / scores_log for one row."""
+    llm = cfg.get("llm") or {}
+    if "score_v0b" not in r:
+        return {}
+    return {"score_v0": r["score_v0"], "score_v0b": r["score_v0b"], "score_v1": r["score_v1"],
+            "block_buy": r["block_buy"], "release_ids": " ".join(r["release_ids"]),
+            "llm_release_ids": " ".join(r["llm_release_ids"]), "llm_model": llm.get("model", ""),
+            "llm_prompt_version": llm.get("prompt_version", ""),
+            "block_if_direction_lte": llm.get("block_if_direction_lte", "")}
 
 
 def score_releases(releases: pd.DataFrame, wl: pd.DataFrame, cfg: dict,
@@ -1725,16 +1776,23 @@ def main(argv=None) -> int:
     print(f"[info] fetching prices for {len(tickers)} tickers …")
     histories = {t: fetch_history(t, cfg["history_period"]) for t in tickers}
     bench = fetch_history(bench_symbol(cfg), cfg["history_period"])
+    bench_primary = fetch_history(bench_symbol(cfg, "primary"), cfg["history_period"])
     if not today_bar_complete(now_local, cfg):
         print(f"[info] before {cfg.get('complete_bar_after', '18:00')} Stockholm time: "
               "ignoring today's still-forming daily bar")
         histories = {t: completed_bars(h, now_local) for t, h in histories.items()}
         bench = completed_bars(bench, now_local)
+        bench_primary = completed_bars(bench_primary, now_local)
     if bench.empty:
         print(f"[warn] no benchmark data for {bench_symbol(cfg)}", file=sys.stderr)
+    run_warnings = []   # LLM-experiment problems, shown in the reports
+    if bench_primary.empty:
+        msg = f"no primary benchmark data for {bench_symbol(cfg, 'primary')}"
+        print(f"[warn] {msg}", file=sys.stderr)
+        run_warnings.append(msg)
 
     rows, missing, stale = [], [], []
-    release_rows, release_warnings = [], []
+    release_rows = []
     stored_releases = ns.load_releases(RELEASES_LOG)
     seen = last_logged_bars()
     for _, w in wl.iterrows():
@@ -1765,7 +1823,7 @@ def main(argv=None) -> int:
                     gap = ns.coverage_gaps(stored_releases, primary, w["ticker"], limit)
                     if gap:
                         print(f"[warn] {gap}", file=sys.stderr)
-                        release_warnings.append(gap)
+                        run_warnings.append(gap)
                     release_rows += primary
                 time.sleep(pause)
         nm = news_metrics(items, now, cfg, releases)
@@ -1784,13 +1842,19 @@ def main(argv=None) -> int:
         stored_releases, added = ns.merge_releases(stored_releases, release_rows)
         ns.save_releases(stored_releases, RELEASES_LOG)
         print(f"[info] releases.csv: {len(added)} new release(s)")
-    llm_scores, llm_new = score_releases(stored_releases, wl, cfg, release_warnings)
+    llm_scores, llm_new = score_releases(stored_releases, wl, cfg, run_warnings)
+    usable = ls.usable_scores(llm_scores, cfg["llm"]["prompt_version"]) if cfg.get("llm") else llm_scores.iloc[0:0]
+    complete_today = today_bar_complete(now_local, cfg)
+    for r in rows:
+        r.update(st.strategy_scores(r, stored_releases, usable, cfg, now, complete_today))
 
     if cfg["paper_trading"]["enabled"]:
         paper = backfill_signal_moves(paper, histories)
-        paper = update_paper(paper, histories, bench, cfg)
-        paper = add_paper_signals(paper, rows, cfg, watchlist_version(Path(args.watchlist)))
+        paper = update_paper(paper, histories, bench, cfg, bench_primary)
+        for strategy in st.strategy_labels(cfg) if cfg.get("llm") else [st.V0]:
+            paper = add_paper_signals(paper, rows, cfg, watchlist_version(Path(args.watchlist)), strategy)
         paper.to_csv(PAPER_LOG, index=False)
+    all_books, paper = paper, book(paper)          # v0's reports below use the v0 book only
     summary = paper_summary(paper)
     ec, eval_res, pe_res = evaluations(paper, cfg)
     eval_line = ev.one_line(eval_res)
@@ -1803,12 +1867,12 @@ def main(argv=None) -> int:
         "chg_5d": round(r["chg_5d"], 4),
         "vol_ratio": round(r["vol_ratio"], 2) if not math.isnan(r["vol_ratio"]) else "",
         "news_24h": r["n_24h"], "hype": r["hype"], "reasons": "; ".join(r["reasons"]),
-    } for r in rows if r["score"] > 0 or r["hype"]]
-    if log_rows:
-        pd.DataFrame(log_rows).to_csv(SIGNALS_LOG, mode="a", index=False,
-                                      header=not SIGNALS_LOG.exists())
+        **strategy_log_fields(r, cfg),
+    } for r in rows if r["score"] > 0 or r["hype"] or r.get("score_v0b", 0) > 0 or r.get("score_v1", 0) > 0
+        or r.get("block_buy")]
+    append_csv(SIGNALS_LOG, log_rows)
     append_csv(SCORES_LOG, score_log_rows(rows, missing, wl, now, watchlist_version(Path(args.watchlist)),
-                                          news_checked=not args.no_news, stale=stale))
+                                          news_checked=not args.no_news, stale=stale, cfg=cfg))
     missing = missing + [f"{t} (stale)" for t in stale]   # shown in the reports' warnings
 
     html = build_html(rows, missing, paper, summary, cfg, now_local, digest_eval)
