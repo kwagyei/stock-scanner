@@ -88,6 +88,7 @@ evaluation:
 # LLM release scoring experiment: v0 (current rules), v0b (MFN/Cision releases only),
 # v1_<prompt_version> (v0b with LLM points instead of the flat +2, and blocking).
 llm:
+  enabled: false              # true = score releases with Claude (paid API, ANTHROPIC_API_KEY); false = free, no v1 book
   model: "claude-sonnet-5-5"
   prompt_version: "v1"        # prompts/score_<version>.md; never edit a used prompt, add a new version
   effort: "medium"            # fixed per prompt version (changing it needs a new version)

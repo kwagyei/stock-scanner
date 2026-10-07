@@ -270,6 +270,9 @@ def main(argv=None) -> int:
                     help="also score releases before llm.score_from_date (is_backfill=true)")
     args = ap.parse_args(argv)
     cfg = yaml.safe_load(open(args.config, encoding="utf-8"))
+    if not (cfg.get("llm") or {}).get("enabled", True):
+        print("[info] llm.enabled is false in config.yaml: nothing scored, no API calls")
+        return 0
     releases = ns.load_releases(DATA_DIR / "releases.csv")
     scores, new, warnings = run(cfg, releases, load_scores(), backfill=args.backfill)
     if new:

@@ -310,7 +310,7 @@ def test_main_persists_trade_lifecycle(cfg, tmp_paths, monkeypatch):
     data["^OMX"] = flat(72, px=1000)
     scanner.main(["--no-email", "--watchlist", str(wl)])
     p = pd.read_csv(scanner.PAPER_LOG, dtype=str).fillna("")
-    assert sorted(p["strategy"]) == ["v0", "v0b", "v1_v1"]      # no release: all three books agree
+    assert sorted(p["strategy"]) == ["v0", "v0b"]               # default config: LLM off, no v1 book
     p = p[p["strategy"] == "v0"]
     assert len(p) == 1
     assert list(p[["status", "exit_reason", "exit_price"]].iloc[0]) == ["closed", "stop", "90.0000"]
@@ -1339,9 +1339,15 @@ BLOCK_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
 </channel></rss>"""
 
 
+def with_llm(cfg):
+    return {**cfg, "llm": {**cfg["llm"], "enabled": True}}
+
+
 def test_main_end_to_end_llm_blocks_v1_but_not_v0b(cfg, tmp_paths, monkeypatch):
     import llm_score as ls
     from types import SimpleNamespace
+    real_load = scanner.load_config
+    monkeypatch.setattr(scanner, "load_config", lambda p: with_llm(real_load(p)))
     wl = tmp_paths / "watchlist.csv"
     wl.write_text("ticker,name,query,mfn_slug\nX.ST,X,X,x\n")
     start = pd.bdate_range(end="2026-10-08", periods=70)[0]
@@ -1419,9 +1425,26 @@ def test_llm_failure_becomes_a_report_warning(cfg, tmp_paths, monkeypatch):
     rel = scanner.ns.load_releases(scanner.RELEASES_LOG)
     rel.loc[0] = ["r", "X.ST", "mfn", "primary", "2026-10-09T07:00:00Z", "t", "u", "sv", "", ""]
     warnings = []
-    scores, new = scanner.score_releases(rel, pd.DataFrame({"ticker": ["X.ST"], "name": ["X"]}), cfg, warnings)
+    scores, new = scanner.score_releases(rel, pd.DataFrame({"ticker": ["X.ST"], "name": ["X"]}), with_llm(cfg), warnings)
     assert new == [] and warnings == ["LLM scoring failed: prompt v1 changed after it was used live"]
-    html = scanner.build_llm_html([], [], rel, None, warnings, cfg)
+    html = scanner.build_llm_html([], [], rel, None, warnings, with_llm(cfg))
     assert "LLM scoring failed" in html and "class=warn" in html
     md = scanner.build_evaluation_md(scanner.ev.evaluate(None), None, cfg, NOW, {"strategies": {}, "events": scanner.ev.event_study(None)}, warnings)
     assert "[!WARNING]" in md and "LLM scoring failed" in md
+
+
+def test_llm_off_by_default_makes_no_api_call(cfg, tmp_paths, monkeypatch):
+    """The default config is the free setup: no client is ever created, even with a key set."""
+    assert cfg["llm"]["enabled"] is False
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-not-a-real-key")
+    def no_client():
+        raise AssertionError("LLM client created while llm.enabled is false")
+    monkeypatch.setattr(scanner.ls, "make_client", no_client)
+    scanner.DATA_DIR.mkdir()
+    rel = scanner.ns.load_releases(scanner.RELEASES_LOG)
+    rel.loc[0] = ["r", "X.ST", "mfn", "primary", "2026-10-09T07:00:00Z", "Order", "u", "sv", "", ""]
+    warnings = []
+    scores, new = scanner.score_releases(rel, pd.DataFrame({"ticker": ["X.ST"], "name": ["X"]}), cfg, warnings)
+    assert new == [] and warnings == []
+    html = scanner.build_llm_html([], [], rel, None, [], cfg)
+    assert "LLM scoring is off" in html and "Blocked v1 buys" not in html

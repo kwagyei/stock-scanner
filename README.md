@@ -155,7 +155,12 @@ caps rarely fill at the open price. If it passes, start small.
 ## LLM release scoring
 
 An experiment: does Claude reading the company's own press release add anything to the
-rules? Three paper books run in parallel, with the same exits, costs and benchmark:
+rules? Three paper books run in parallel, with the same exits, costs and benchmark.
+
+**Off by default, so it costs nothing.** With `llm.enabled: false` (the default) nothing is
+sent to Claude and no API key is needed; v0 and v0b still run (both free) and there is no
+v1 book. Set `llm.enabled: true` and add the API key (below) to start v1. The Anthropic API
+is billed per use (roughly $3–10 a month here), separately from any Claude subscription.
 
 | Strategy | Score |
 |---|---|
@@ -197,9 +202,10 @@ paper trade buys at the next open as usual. The event study uses the same entry 
 *Settings → Secrets and variables → Actions → New repository secret*, name
 `ANTHROPIC_API_KEY`. The workflow passes it to the scan step only; the SDK reads it from the
 environment and it is never printed or written to a file. Locally, `export ANTHROPIC_API_KEY=…`
-in your terminal before `python scanner.py`. Without a key the scan still runs; the report
-says how many releases were not scored. Expected cost with Sonnet 5.5: roughly $10–25 a month
-at 50 calls per run at most.
+in your terminal before `python scanner.py`. Without a key (and `llm.enabled: true`) the scan still
+runs; the report says how many releases were not scored. Expected cost with Sonnet 5.5: about
+$0.01–0.03 per release, roughly $3–10 a month, at most 50 calls per run. Set a monthly spend
+limit in the console.
 
 **Reading the comparison** (`python evaluate.py --compare`, and the *Evaluation* page). One
 column per strategy, each with its own verdict (same four checks as above, against small

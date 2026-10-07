@@ -136,7 +136,10 @@ def test_routine_releases_do_not_count(cfg):
 
 
 def test_strategy_labels(cfg):
-    assert st.strategy_labels(cfg) == ["v0", "v0b", "v1_v1"]
+    assert st.strategy_labels(cfg) == ["v0", "v0b"]                       # llm.enabled: false (free)
+    on = {**cfg, "llm": {**cfg["llm"], "enabled": True}}
+    assert st.strategy_labels(on) == ["v0", "v0b", "v1_v1"]
+    assert st.llm_enabled(on) and not st.llm_enabled(cfg) and not st.llm_enabled({})
 
 
 # --------------------------------------------------------------------------- v0 unchanged (golden)

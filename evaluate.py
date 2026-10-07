@@ -338,12 +338,14 @@ def compare(paper: pd.DataFrame | None, events: pd.DataFrame | None, strategies:
 
 def strategy_labels(paper: pd.DataFrame | None, prompt_version: str | None = None) -> list[str]:
     """v0, v0b, v1_<prompt> in that order: from config, plus any other book in the paper log."""
+    enabled = True
     if prompt_version is None:
         try:
-            prompt_version = (yaml.safe_load((ROOT / "config.yaml").read_text()) or {})["llm"]["prompt_version"]
+            llm = (yaml.safe_load((ROOT / "config.yaml").read_text()) or {})["llm"]
+            prompt_version, enabled = llm["prompt_version"], llm.get("enabled", True)
         except (OSError, KeyError, TypeError, yaml.YAMLError):
             prompt_version = "v1"
-    labels = ["v0", "v0b", f"v1_{prompt_version}"]
+    labels = ["v0", "v0b"] + ([f"v1_{prompt_version}"] if enabled else [])
     if paper is not None and "strategy" in paper.columns:
         labels += sorted(set(paper["strategy"]) - set(labels) - {""})
     return labels

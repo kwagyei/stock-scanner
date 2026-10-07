@@ -31,8 +31,13 @@ def v1_label(cfg: dict) -> str:
     return f"v1_{cfg['llm']['prompt_version']}"
 
 
+def llm_enabled(cfg: dict) -> bool:
+    """llm.enabled (default true). Off: no API calls at all, and no v1 book; v0 and v0b still run."""
+    return bool(cfg.get("llm")) and bool(cfg["llm"].get("enabled", True))
+
+
 def strategy_labels(cfg: dict) -> list[str]:
-    return [V0, V0B, v1_label(cfg)]
+    return [V0, V0B, v1_label(cfg)] if llm_enabled(cfg) else [V0, V0B]
 
 
 # --------------------------------------------------------------------------- timing

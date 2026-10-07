@@ -766,6 +766,7 @@ def build_llm_html(rows, new_scores: list[dict], releases: pd.DataFrame, cmp: di
     the v0 / v0b / v1 summary and any problems."""
     if not cfg.get("llm"):
         return ""
+    on = st.llm_enabled(cfg)
     titles = dict(zip(releases["release_id"], releases["title"])) if not releases.empty else {}
     urls = dict(zip(releases["release_id"], releases["url"])) if not releases.empty else {}
     def scored_row(r):
@@ -800,6 +801,12 @@ def build_llm_html(rows, new_scores: list[dict], releases: pd.DataFrame, cmp: di
                    f"{cmp['events']['min_events']} events with a {cmp['events']['focus']}-day outcome. "
                    "Full report: <code>python evaluate.py --compare</code>.</small></p>")
     warn = ("<p class=warn>" + "<br>".join(escape(w) for w in warnings) + "</p>") if warnings else ""
+    if not on:
+        return f"""<h2>Strategies v0 / v0b</h2>
+{warn}
+<p><small>LLM scoring is off (<code>llm.enabled: false</code>): no API calls, no cost, no v1 book.</small></p>
+{summary}
+"""
     return f"""<h2>LLM release scoring · {cfg['llm']['model']} · prompt {cfg['llm']['prompt_version']}</h2>
 {warn}
 <p><small>Releases scored this run (primary MFN/Cision releases only).</small></p>
@@ -1857,7 +1864,7 @@ def score_releases(releases: pd.DataFrame, wl: pd.DataFrame, cfg: dict,
     """Run the LLM on new primary releases (llm_score.py). Problems are added to `warnings`
     (shown in the reports) instead of stopping the scan."""
     scores = ls.load_scores(LLM_SCORES_LOG)
-    if not cfg.get("llm") or releases.empty:
+    if not st.llm_enabled(cfg) or releases.empty:
         return scores, []
     try:
         scores, new, warn = ls.run(cfg, releases, scores, names=dict(zip(wl["ticker"], wl["name"])), now=_now())
