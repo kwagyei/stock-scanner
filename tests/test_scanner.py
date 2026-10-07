@@ -1056,3 +1056,52 @@ def test_completed_bars_keeps_entry_day_open_for_pending_trades(cfg):
     assert p.iloc[0]["status"] == "pending"
     p = scanner.update_paper(p, {"X.ST": h}, h, cfg)
     assert (p.iloc[0]["status"], p.iloc[0]["entry_price"]) == ("open", "102.0000")
+
+
+# --------------------------------------------------------------------------- direction split (scanner)
+
+def test_new_trade_records_signal_move(cfg):
+    p = scanner.add_paper_signals(pd.DataFrame(columns=scanner.PAPER_COLUMNS),
+                                  [{"ticker": "E.ST", "name": "E", "date": "2026-10-06", "score": 4, "chg_1d": -0.1117}], cfg)
+    assert p.iloc[0]["signal_move"] == "-0.1117"
+
+
+def test_backfill_signal_moves_from_logs_then_history(tmp_paths):
+    scanner.DATA_DIR.mkdir()
+    scanner.SIGNALS_LOG.write_text("run_utc,bar_date,ticker,name,score,chg_1d\nx,2026-10-06,A.ST,A,4,-0.1117\n")
+    scanner.SCORES_LOG.write_text("run_utc,bar_date,ticker,status,chg_1d\nx,2026-10-06,B.ST,ok,0.1049\n")
+    trades = [pending_trade("A.ST", "2026-10-06"), pending_trade("B.ST", "2026-10-06"),
+              pending_trade("C.ST", "2026-06-02"), pending_trade("D.ST", "2026-06-02")]
+    paper = pd.concat(trades, ignore_index=True)
+    paper.loc[3, "signal_move"] = "0.0500"                             # already known: untouched
+    hist = bars([(100, 100, 100, 100, 1), (90, 90, 90, 90, 1)])        # C: -10% on 2026-06-02
+    out = scanner.backfill_signal_moves(paper, {"C.ST": hist, "D.ST": hist})
+    assert out["signal_move"].tolist() == ["-0.1117", "0.1049", "-0.1000", "0.0500"]
+
+
+def test_direction_rate_table(cfg):
+    o = pd.DataFrame({"score": [3, 4, 3], "move": ["-0.12", "0.15", "0.01"],
+                      "ret_5d": [0.10, -0.05, 0.02], "excess_5d": [0.08, -0.06, -0.01]})
+    t = {r["score"]: r for r in scanner.direction_rate_table(o, [5], 0.10)}
+    assert list(t) == ["▼ Drop", "▲ Jump", "– No big move"]
+    assert (t["▼ Drop"]["hit_5d"], t["▲ Jump"]["hit_5d"], t["– No big move"]["signals"]) == (100.0, 0.0, 1)
+
+
+def test_paper_page_shows_signal_day_and_split(cfg):
+    paper = _paper_fixture()
+    paper.loc[paper["ticker"] == "C.ST", "signal_move"] = "-0.1117"
+    paper.loc[paper["ticker"] == "O.ST", "signal_move"] = "0.0300"
+    md = scanner.build_paper_md(paper, cfg, dt.datetime(2026, 10, 7, 18, 45), ev.evaluate(ev.closed_trades(paper)))
+    assert "| Stock | Signal day |" in md and "▼&nbsp;11.2%" in md and "▲&nbsp;3.0%" in md
+    assert "### By signal-day move" in md and "| ▼ Drop | 1 | 100% |" in md
+
+
+def test_weekly_page_has_direction_split(cfg):
+    o = pd.DataFrame({"ticker": ["A"], "name": ["A"], "bar_date": ["2026-09-01"], "score": [4], "reasons": [""],
+                      "move": ["-0.12"], "ret_1d": [0.01], "excess_1d": [0.01], "ret_5d": [0.02],
+                      "excess_5d": [0.02], "ret_20d": [None], "excess_20d": [None]})
+    table = scanner.hit_rate_table(o, [1, 5, 20], 5)
+    wp = scanner.weekly_paper(pd.DataFrame(columns=scanner.PAPER_COLUMNS), dt.date(2026, 10, 5), 10000)
+    md = scanner.build_weekly_md(o, table, wp, cfg, FRI_EVE)
+    assert "Split by signal-day move" in md and "| ▼ Drop | 1 |" in md
+    assert md.count("<details>") == md.count("</details>")

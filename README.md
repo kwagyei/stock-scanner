@@ -113,6 +113,7 @@ trade with the index over the same days. It never changes any data.
 python evaluate.py                    # main paper-trade rules
 python evaluate.py --variant          # the partial-exit variant
 python evaluate.py --cost 0.5 --stake 0.05 --min-trades 50
+python evaluate.py --direction drop      # only trades that followed a big drop (or: jump, flat)
 ```
 
 Defaults (also used for the one-line verdict in the evening digest and on the dashboard)
@@ -138,6 +139,7 @@ trade, 30 closed trades before a verdict.
 | t-statistic | How large the edge is compared with its noise. Above 2 means it is unlikely to be chance alone. |
 | Chance the true excess is above 0 | The same question asked by resampling the trades 10,000 times. 95%+ is encouraging. |
 | By exit reason | Whether targets, stops or time exits drive the result. |
+| By signal-day move | The scanner buys after big drops as well as big jumps (a ±10% move both score). This shows whether buying after a **drop**, a **jump** or **no big move** works. Also in the weekly summary (hit rates) and on the Paper trades page. |
 
 A PASS on paper is necessary, not sufficient: paper fills ignore slippage, and thin small
 caps rarely fill at the open price. If it passes, start small.

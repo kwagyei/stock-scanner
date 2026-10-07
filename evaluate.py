@@ -18,6 +18,7 @@ Verdict:
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from pathlib import Path
 
@@ -28,6 +29,21 @@ import yaml
 ROOT = Path(__file__).resolve().parent
 PAPER_LOG = ROOT / "data" / "paper_trades.csv"
 DEFAULTS = {"cost_pct": 1.0, "stake": 0.10, "min_trades": 30}
+DIRECTIONS = {"drop": "▼ Drop", "jump": "▲ Jump", "flat": "– No big move", "unknown": "? Unknown"}
+
+
+def direction(move, threshold: float = 0.10) -> str:
+    """Signal-day price move (a fraction: -0.112 = -11.2%) -> drop / jump / flat / unknown.
+
+    Uses the same threshold as the score's price component (thresholds.price_move_1d).
+    """
+    try:
+        m = float(move)
+    except (TypeError, ValueError):
+        return "unknown"
+    if math.isnan(m):
+        return "unknown"
+    return "drop" if m <= -threshold else "jump" if m >= threshold else "flat"
 RESAMPLES = 10_000
 SEED = 42
 
@@ -37,14 +53,15 @@ def defaults_from_config(path: Path = ROOT / "config.yaml") -> dict:
         cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError):
         cfg = {}
-    return {**DEFAULTS, **(cfg.get("evaluation") or {})}
+    move = ((cfg.get("thresholds") or {}).get("price_move_1d")) or 0.10
+    return {**DEFAULTS, "move_threshold": move, **(cfg.get("evaluation") or {})}
 
 
 def closed_trades(paper: pd.DataFrame, variant: bool = False) -> pd.DataFrame:
     """Closed trades as numbers: ret, bench (missing -> 0), reason, exit_date (oldest first)."""
     p = "pe_" if variant else ""
     if paper is None or paper.empty or f"{p}status" not in paper.columns:
-        return pd.DataFrame(columns=["ticker", "ret", "bench", "reason", "exit_date"])
+        return pd.DataFrame(columns=["ticker", "ret", "bench", "reason", "exit_date", "move"])
     c = paper[paper[f"{p}status"] == "closed"]
 
     def col(name):
@@ -56,6 +73,7 @@ def closed_trades(paper: pd.DataFrame, variant: bool = False) -> pd.DataFrame:
         "bench": pd.to_numeric(col(f"{p}bench_return_pct"), errors="coerce").fillna(0.0),
         "reason": col(f"{p}exit_reason").replace("", "unknown"),
         "exit_date": col(f"{p}exit_date"),
+        "move": pd.to_numeric(col("signal_move"), errors="coerce"),   # same signal for both rule sets
     }).dropna(subset=["ret"])
     return out.sort_values(["exit_date"], kind="stable").reset_index(drop=True)
 
@@ -85,7 +103,7 @@ def _max_drawdown(net: pd.Series, stake: float) -> float:
 
 def evaluate(trades: pd.DataFrame | None, cost: float = DEFAULTS["cost_pct"],
              stake: float = DEFAULTS["stake"], min_trades: int = DEFAULTS["min_trades"],
-             resamples: int = RESAMPLES, seed: int = SEED) -> dict:
+             resamples: int = RESAMPLES, seed: int = SEED, move_threshold: float = 0.10) -> dict:
     """All statistics plus the verdict. Percent values are in percent (2.5 = 2.5%)."""
     res = {"n": 0, "cost": cost, "stake": stake, "min_trades": min_trades,
            "file_missing": trades is None}
@@ -110,6 +128,11 @@ def evaluate(trades: pd.DataFrame | None, cost: float = DEFAULTS["cost_pct"],
                  .groupby("reason").agg(trades=("net", "size"), avg_net=("net", "mean"),
                                         avg_excess=("excess", "mean"))
                  .sort_values("trades", ascending=False))
+    dirs = trades["move"].map(lambda m: direction(m, move_threshold)) if "move" in trades else "unknown"
+    by_direction = (pd.DataFrame({"direction": dirs, "net": net, "excess": excess})
+                    .groupby("direction").agg(trades=("net", "size"), win_rate=("net", lambda x: (x > 0).mean() * 100),
+                                              avg_net=("net", "mean"), avg_excess=("excess", "mean"))
+                    .reindex([d for d in DIRECTIONS if d in set(dirs)]))
     res.update({
         "n": n,
         "avg_net": float(net.mean()), "avg_bench": float(trades["bench"].mean()),
@@ -121,7 +144,7 @@ def evaluate(trades: pd.DataFrame | None, cost: float = DEFAULTS["cost_pct"],
         "losing_streak": _longest_losing_streak(net),
         "max_drawdown": _max_drawdown(net, stake),
         "t_stat": t, "p_positive": p_pos,
-        "by_reason": by_reason,
+        "by_reason": by_reason, "by_direction": by_direction, "move_threshold": move_threshold,
     })
     checks = {
         "enough trades": n >= min_trades,
@@ -195,6 +218,12 @@ def format_markdown(res: dict) -> str:
     ]), "", "### By exit reason", "", "| Exit | Trades | Avg return | Avg vs index |", "|:---|:---:|---:|---:|"]
     out += [f"| {reason} | {int(r['trades'])} | {r['avg_net']:+.1f}% | {r['avg_excess']:+.1f}% |"
             for reason, r in res["by_reason"].iterrows()]
+    out += ["", "### By signal-day move", "",
+            f"<sub>Did the trade follow a big drop, a big jump ({res['move_threshold']:.0%} or more) or no big move "
+            "on the signal day?</sub>", "",
+            "| Signal day | Trades | Win rate | Avg return | Avg vs index |", "|:---|:---:|:---:|---:|---:|"]
+    out += [f"| {DIRECTIONS[d]} | {int(r['trades'])} | {r['win_rate']:.0f}% | {r['avg_net']:+.1f}% | "
+            f"{r['avg_excess']:+.1f}% |" for d, r in res["by_direction"].iterrows()]
     return "\n".join(out) + "\n"
 
 
@@ -256,6 +285,10 @@ def format_report(res: dict, source: str = "data/paper_trades.csv", label: str =
     for reason, r in res["by_reason"].iterrows():
         lines.append(f"  {reason:<16} {int(r['trades']):>3} trade(s)   avg {r['avg_net']:+6.1f}%   "
                      f"vs index {r['avg_excess']:+6.1f}%")
+    lines += ["", f"By signal-day move (big = {res['move_threshold']:.0%} or more)"]
+    for d, r in res["by_direction"].iterrows():
+        lines.append(f"  {DIRECTIONS[d]:<16} {int(r['trades']):>3} trade(s)   win {r['win_rate']:3.0f}%   "
+                     f"avg {r['avg_net']:+6.1f}%   vs index {r['avg_excess']:+6.1f}%")
     lines += ["", "Paper results ignore spread and slippage beyond the cost above. Not investment advice."]
     return "\n".join(lines) + "\n"
 
@@ -271,11 +304,16 @@ def main(argv=None) -> int:
     ap.add_argument("--min-trades", type=int, default=d["min_trades"],
                     help=f"closed trades needed before a verdict (default {d['min_trades']})")
     ap.add_argument("--variant", action="store_true", help="evaluate the partial-exit variant")
+    ap.add_argument("--direction", choices=["drop", "jump", "flat"],
+                    help="only trades whose signal day had a big drop / big jump / no big move")
     args = ap.parse_args(argv)
 
     trades = load_trades(Path(args.file), args.variant)
-    res = evaluate(trades, args.cost, args.stake, args.min_trades)
-    label = "partial-exit variant" if args.variant else "main rules"
+    if trades is not None and args.direction:
+        trades = trades[trades["move"].map(lambda m: direction(m, d["move_threshold"])) == args.direction]
+    res = evaluate(trades, args.cost, args.stake, args.min_trades, move_threshold=d["move_threshold"])
+    label = ("partial-exit variant" if args.variant else "main rules") + (
+        f", signal day: {DIRECTIONS[args.direction]}" if args.direction else "")
     path = Path(args.file).resolve()
     source = str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path)
     sys.stdout.write(format_report(res, source, label))

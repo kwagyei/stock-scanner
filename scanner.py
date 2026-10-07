@@ -69,6 +69,7 @@ PAPER_COLUMNS = [
     # partial-exit variant (paper_trading.partial_exit); same entry as the main trade
     "pe_status", "pe_partial_date", "pe_partial_price",
     "pe_exit_date", "pe_exit_price", "pe_exit_reason", "pe_return_pct", "pe_bench_return_pct",
+    "signal_move",   # 1-day price move on the signal day (fraction), for the drop / jump / flat split
 ]
 DEFAULT_UNIVERSE = "v1"   # trades from before watchlist versioning (the hand-picked list)
 
@@ -482,12 +483,38 @@ def add_paper_signals(paper: pd.DataFrame, rows: list[dict], cfg: dict,
                 "id": f"{r['ticker']}-{r['date']}",
                 "ticker": r["ticker"], "name": r["name"],
                 "signal_date": r["date"], "score": str(r["score"]),
-                "status": "pending", "universe": universe,
+                "status": "pending", "universe": universe, "signal_move": "" if r.get("chg_1d") is None else f"{r['chg_1d']:.4f}",
             })
             new.append(rec)
             active.add(r["ticker"])
     if new:
         paper = pd.concat([paper, pd.DataFrame(new, columns=PAPER_COLUMNS)], ignore_index=True)
+    return paper
+
+
+def backfill_signal_moves(paper: pd.DataFrame, histories: dict) -> pd.DataFrame:
+    """Fill signal_move for trades created before it was recorded: from the signals log,
+    else the score log, else the price history."""
+    todo = paper["signal_move"] == ""
+    if not todo.any():
+        return paper
+    known = {}
+    for log in (SCORES_LOG, SIGNALS_LOG):          # later sources overwrite earlier ones
+        if log.exists():
+            df = pd.read_csv(log, dtype=str).fillna("")
+            if {"ticker", "bar_date", "chg_1d"} <= set(df.columns):
+                df = df[df["chg_1d"] != ""]
+                known.update({(t, d): m for t, d, m in zip(df["ticker"], df["bar_date"], df["chg_1d"])})
+    for idx in paper.index[todo]:
+        t, d = paper.at[idx, "ticker"], paper.at[idx, "signal_date"]
+        move = known.get((t, d))
+        h = histories.get(t)
+        if move is None and h is not None and not h.empty and pd.Timestamp(d) in h.index:
+            pos = h.index.get_loc(pd.Timestamp(d))
+            if pos > 0:
+                move = float(h["Close"].iloc[pos] / h["Close"].iloc[pos - 1] - 1)
+        if move is not None:
+            paper.at[idx, "signal_move"] = f"{float(move):.4f}"
     return paper
 
 
@@ -754,7 +781,7 @@ def signal_outcomes(signals: pd.DataFrame, histories: dict, bench: pd.DataFrame,
     out = []
     for _, s in signals.iterrows():
         rec = {"ticker": s["ticker"], "name": s["name"], "bar_date": s["bar_date"],
-               "score": int(s["score"]), "reasons": s.get("reasons", "")}
+               "score": int(s["score"]), "reasons": s.get("reasons", ""), "move": s.get("chg_1d", "")}
         h, day = histories.get(s["ticker"]), pd.Timestamp(s["bar_date"])
         if h is not None and not h.empty and day in h.index:
             pos = h.index.get_loc(day)
@@ -767,7 +794,7 @@ def signal_outcomes(signals: pd.DataFrame, histories: dict, bench: pd.DataFrame,
                 rec[f"ret_{n}d"] = r
                 rec[f"excess_{n}d"] = r - (b1 / b0 - 1) if b0 and b1 else float("nan")
         out.append(rec)
-    columns = ["ticker", "name", "bar_date", "score", "reasons"] + cols
+    columns = ["ticker", "name", "bar_date", "score", "reasons", "move"] + cols
     if not out:  # keep text columns as text so date comparisons work on an empty window
         return pd.DataFrame(columns=columns, dtype=object)
     return pd.DataFrame(out).reindex(columns=columns)
@@ -779,20 +806,29 @@ def hit_rate_table(outcomes: pd.DataFrame, horizons: list[int], top_score: int) 
         return []
     o = outcomes.copy()
     o["bucket"] = o["score"].clip(upper=top_score).map(lambda s: f"{s}+" if s == top_score else str(s))
-    rows = []
-    for label, g in [("all", o)] + sorted(o.groupby("bucket")):
-        row = {"score": label, "signals": len(g)}
-        for n in horizons:
-            ex, r = g[f"excess_{n}d"].dropna(), g[f"ret_{n}d"].dropna()
-            row[f"n_{n}d"] = len(ex)
-            row[f"hit_{n}d"] = float((ex > 0).mean() * 100) if len(ex) else None
-            row[f"avg_{n}d"] = float(r.mean() * 100) if len(r) else None
-            row[f"excess_{n}d"] = float(ex.mean() * 100) if len(ex) else None
-        rows.append(row)
-    return rows
+    return [_rate_row(label, g, horizons) for label, g in [("all", o)] + sorted(o.groupby("bucket"))]
 
 
-def weekly_paper(paper: pd.DataFrame, week_start: dt.date, notional: float) -> dict:
+def direction_rate_table(outcomes: pd.DataFrame, horizons: list[int], threshold: float) -> list[dict]:
+    """Like hit_rate_table, split by the signal-day move: drop / jump / flat (see evaluate.direction)."""
+    if outcomes.empty:
+        return []
+    dirs = outcomes["move"].map(lambda m: ev.direction(m, threshold))
+    return [_rate_row(ev.DIRECTIONS[d], outcomes[dirs == d], horizons) for d in ev.DIRECTIONS if (dirs == d).any()]
+
+
+def _rate_row(label, g: pd.DataFrame, horizons: list[int]) -> dict:
+    row = {"score": label, "signals": len(g)}
+    for n in horizons:
+        ex, r = g[f"excess_{n}d"].dropna(), g[f"ret_{n}d"].dropna()
+        row[f"n_{n}d"] = len(ex)
+        row[f"hit_{n}d"] = float((ex > 0).mean() * 100) if len(ex) else None
+        row[f"avg_{n}d"] = float(r.mean() * 100) if len(r) else None
+        row[f"excess_{n}d"] = float(ex.mean() * 100) if len(ex) else None
+    return row
+
+
+def weekly_paper(paper: pd.DataFrame, week_start: dt.date, notional: float, move_threshold: float = 0.10) -> dict:
     closed = paper[paper["status"] == "closed"]
 
     def stats(df):
@@ -813,10 +849,12 @@ def weekly_paper(paper: pd.DataFrame, week_start: dt.date, notional: float) -> d
     opened = paper[paper["status"] == "open"]
     unreal = pd.to_numeric(opened["return_pct"], errors="coerce").dropna()
     by_universe = {u: stats(g) for u, g in closed.groupby("universe", sort=True)}
+    dirs = closed["signal_move"].map(lambda m: ev.direction(m, move_threshold))
+    by_direction = {ev.DIRECTIONS[d]: stats(closed[dirs == d]) for d in ev.DIRECTIONS if (dirs == d).any()}
     pe = paper[paper["pe_status"] == "closed"].assign(
         return_pct=lambda d: d["pe_return_pct"], bench_return_pct=lambda d: d["pe_bench_return_pct"])
     pe_week = pe[pe["pe_exit_date"] >= week_start.isoformat()]
-    return {"week": stats(week), "all": stats(closed), "by_universe": by_universe,
+    return {"week": stats(week), "all": stats(closed), "by_universe": by_universe, "by_direction": by_direction,
             "pe_week": stats(pe_week), "pe_all": stats(pe), "week_trades": week,
             "open": opened, "unrealised_sek": float(unreal.sum() / 100 * notional)}
 
@@ -940,7 +978,7 @@ def run_weekly(paper, histories, bench, cfg, now_local) -> tuple[str, str]:
                       & (signals["bar_date"] >= window_start.isoformat())]
     outcomes = signal_outcomes(signals, histories, bench, wc["horizons"])
     table = hit_rate_table(outcomes, wc["horizons"], cfg["paper_trading"]["min_score"] + 1)
-    wp = weekly_paper(paper, week_start, wc["notional_sek"])
+    wp = weekly_paper(paper, week_start, wc["notional_sek"], cfg["thresholds"]["price_move_1d"])
     html, md, row = build_weekly(signals, outcomes, table, wp, cfg, now_local)
 
     (REPORT_DIR / f"weekly_{row['week']}.html").write_text(html, encoding="utf-8")
@@ -1144,7 +1182,7 @@ def _open_table(paper: pd.DataFrame, cfg: dict, today: dt.date) -> str:
     for _, p in paper[paper["status"] == "open"].iterrows():
         entry, ret, bench = _num(p["entry_price"]), _num(p["return_pct"]), _num(p["bench_return_pct"])
         day = min(len(pd.bdate_range(p["entry_date"], today)), pc["max_hold_days"])
-        row = [_stock(p["name"], p["ticker"]), p["entry_date"],
+        row = [_stock(p["name"], p["ticker"]), _signal_cell(p), p["entry_date"],
                f"{entry:.2f} → {_num(p['last_price']) or entry:.2f}", _arrow(ret),
                _arrow(None if ret is None else ret - (bench or 0)),
                f"🎯 {entry * (1 + pc['take_profit']):.2f}<br>🛑 {entry * (1 + pc['stop_loss']):.2f}",
@@ -1152,8 +1190,15 @@ def _open_table(paper: pd.DataFrame, cfg: dict, today: dt.date) -> str:
         if pe_on:
             row.append(f"half sold {p['pe_partial_date']}" if p["pe_partial_date"] else "–")
         rows.append(row)
-    head = ["Stock", "Bought", "Price", "Return", "vs index", "Exit at", "Day"] + (["Partial-exit"] if pe_on else [])
-    return _md_table(head, rows, "No open positions.", "llcrrlc" + ("l" if pe_on else ""))
+    head = ["Stock", "Signal day", "Bought", "Price", "Return", "vs index", "Exit at", "Day"] + (
+        ["Partial-exit"] if pe_on else [])
+    return _md_table(head, rows, "No open positions.", "lrlcrrlc" + ("l" if pe_on else ""))
+
+
+def _signal_cell(p) -> str:
+    """Signal-day move of a paper trade, e.g. '▼ 11.2%'."""
+    m = _num(p.get("signal_move", ""))
+    return "–" if m is None else _arrow(m * 100).replace(" ", "&nbsp;")
 
 
 def _pending_table(paper: pd.DataFrame) -> str:
@@ -1167,7 +1212,7 @@ def _closed_table(df: pd.DataFrame, pe_on: bool, empty="No closed trades yet.") 
     rows = []
     for _, p in df.iloc[::-1].iterrows():
         ret, bench = _num(p["return_pct"]), _num(p["bench_return_pct"])
-        row = [_stock(p["name"], p["ticker"]), f"{p['entry_date']} → {p['exit_date']}",
+        row = [_stock(p["name"], p["ticker"]), _signal_cell(p), f"{p['entry_date']} → {p['exit_date']}",
                EXIT_LABELS.get(p["exit_reason"], p["exit_reason"]), _arrow(ret), _arrow(bench),
                _arrow(None if ret is None else ret - (bench or 0))]
         if pe_on:
@@ -1176,8 +1221,8 @@ def _closed_table(df: pd.DataFrame, pe_on: bool, empty="No closed trades yet.") 
                        f"{_arrow(pe)}<br><sub>{EXIT_LABELS.get(p['pe_exit_reason'], p['pe_exit_reason'])}</sub>"
                        if p["pe_status"] == "closed" else "–")
         rows.append(row)
-    head = ["Stock", "Held", "Sold at", "Return", "Index", "vs index"] + (["Partial-exit"] if pe_on else [])
-    return _md_table(head, rows, empty, "lllrrr" + ("r" if pe_on else ""))
+    head = ["Stock", "Signal day", "Held", "Sold at", "Return", "Index", "vs index"] + (["Partial-exit"] if pe_on else [])
+    return _md_table(head, rows, empty, "lrllrrr" + ("r" if pe_on else ""))
 
 
 def _updated(now_local, rows=None) -> str:
@@ -1287,7 +1332,7 @@ def build_paper_md(paper, cfg, now_local, eval_res) -> str:
     pc = cfg["paper_trading"]
     pe = pc.get("partial_exit") or {}
     wp = weekly_paper(paper, now_local.date() - dt.timedelta(days=now_local.weekday()),
-                      cfg["weekly_summary"]["notional_sek"])
+                      cfg["weekly_summary"]["notional_sek"], cfg["thresholds"]["price_move_1d"])
     scopes = [("**Main rules**", wp["all"], int(paper["status"].isin(["open", "pending"]).sum()))]
     if pe.get("enabled"):
         scopes.append(("**Partial-exit variant**", wp["pe_all"], int((paper["pe_status"] == "open").sum())))
@@ -1301,6 +1346,14 @@ def build_paper_md(paper, cfg, now_local, eval_res) -> str:
            f"## Open ({int((paper['status'] == 'open').sum())})", "", _open_table(paper, cfg, now_local.date()),
            f"## Waiting to buy ({int((paper['status'] == 'pending').sum())})", "", _pending_table(paper),
            f"## Closed ({len(closed)})", "", _closed_table(closed, pe.get("enabled"))]
+    if wp["by_direction"]:
+        out += ["### By signal-day move", "",
+                f"<sub>Closed trades split by the stock's move on the signal day: a big drop, a big jump "
+                f"({cfg['thresholds']['price_move_1d']:.0%} or more) or no big move. Main rules.</sub>", "",
+                _md_table(["Signal day", "Closed", "Win rate", "Avg return", "Avg vs index", "Profit / loss"],
+                          [[label, st["n"], _fmt_rate(st["win_rate"]), _arrow(st["avg_return"]),
+                            _arrow(st["avg_excess"]), _fmt_sek(st["pnl_sek"])]
+                           for label, st in wp["by_direction"].items()], align="lccrrr")]
     if len(wp["by_universe"]) > 1:
         out += ["<details><summary>By watchlist version</summary>", "",
                 _md_table(["Version", "Closed", "Win rate", "Avg return", "Avg vs index", "Profit / loss"],
@@ -1361,6 +1414,14 @@ def build_weekly_md(outcomes, table, wp, cfg, now_local, here: str | None = None
                           [[r["score"], r["signals"]] + [
                               f"{_fmt_rate(r[f'hit_{n}d'])} <sub>{_arrow(r[f'excess_{n}d'])} · {r[f'n_{n}d']} measured</sub>"
                               for n in horizons] for r in table[1:]], align="cc" + "c" * len(horizons)),
+                "</details>", ""]
+    dir_table = direction_rate_table(outcomes, horizons, cfg["thresholds"]["price_move_1d"])
+    if dir_table:
+        out += ["<details><summary>Split by signal-day move (drop / jump / no big move)</summary>", "",
+                _md_table(["Signal day", "Signals"] + [f"Beat index after {days(n)}" for n in horizons],
+                          [[r["score"], r["signals"]] + [
+                              f"{_fmt_rate(r[f'hit_{n}d'])} <sub>{_arrow(r[f'excess_{n}d'])} · {r[f'n_{n}d']} measured</sub>"
+                              for n in horizons] for r in dir_table], align="lc" + "c" * len(horizons)),
                 "</details>", ""]
     out += [f"## 🗓️ This week's signals ({len(this_week)})", "",
             _md_table(["Stock", "Date", "Score"] + [f"After {days(n)}" for n in horizons] + ["Why"],
@@ -1470,6 +1531,7 @@ def main(argv=None) -> int:
               reverse=True)
 
     if cfg["paper_trading"]["enabled"]:
+        paper = backfill_signal_moves(paper, histories)
         paper = update_paper(paper, histories, bench, cfg)
         paper = add_paper_signals(paper, rows, cfg, watchlist_version(Path(args.watchlist)))
         paper.to_csv(PAPER_LOG, index=False)

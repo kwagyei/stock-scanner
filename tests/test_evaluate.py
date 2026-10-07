@@ -177,3 +177,40 @@ def test_verdict_line_in_evening_digest(scan_env, monkeypatch, utc_hour, in_dige
     assert (line in (tmp / "reports" / "latest.html").read_text()) is in_digest
     assert (line in summary.read_text()) is in_digest
     assert line in (tmp / "DASHBOARD.md").read_text()            # dashboard always shows it
+
+
+# --------------------------------------------------------------------------- direction split
+
+@pytest.mark.parametrize("move,d", [(-0.112, "drop"), (-0.10, "drop"), (-0.0999, "flat"), (0.0, "flat"),
+                                    (0.10, "jump"), (0.25, "jump"), ("", "unknown"), (None, "unknown"),
+                                    (float("nan"), "unknown"), ("-0.15", "drop")])
+def test_direction(move, d):
+    assert ev.direction(move, 0.10) == d
+
+
+def _moves_log(tmp_path):
+    # (return, signal move): two drops (one win), one jump (win), one flat (loss), one unknown
+    rows = [(11, "-0.12"), (-9, "-0.15"), (21, "0.11"), (-4, "0.03"), (6, "")]
+    df = pd.DataFrame([{"ticker": f"T{i}", "status": "closed", "return_pct": r, "bench_return_pct": 0,
+                        "exit_reason": "time", "exit_date": f"2026-01-0{i + 1}", "signal_move": m}
+                       for i, (r, m) in enumerate(rows)])
+    path = tmp_path / "p.csv"
+    df.to_csv(path, index=False)
+    return path
+
+
+def test_by_direction_breakdown(tmp_path):
+    r = ev.evaluate(ev.load_trades(_moves_log(tmp_path)), cost=1.0)
+    bd = r["by_direction"]
+    assert list(bd.index) == ["drop", "jump", "flat", "unknown"]
+    assert (bd.loc["drop", "trades"], bd.loc["drop", "win_rate"], bd.loc["drop", "avg_net"]) == (2, 50.0, 0.0)
+    assert (bd.loc["jump", "avg_net"], bd.loc["flat", "win_rate"]) == (20.0, 0.0)
+    assert "By signal-day move" in ev.format_report(r) and "▼ Drop" in ev.format_report(r)
+    md = ev.format_markdown(r)
+    assert "### By signal-day move" in md and "| ▲ Jump | 1 | 100% | +20.0% | +20.0% |" in md
+
+
+def test_cli_direction_filter(tmp_path, capsys):
+    ev.main(["--file", str(_moves_log(tmp_path)), "--direction", "drop", "--min-trades", "1"])
+    out = capsys.readouterr().out
+    assert "signal day: ▼ Drop" in out and "Per trade, after costs (2 closed trades)" in out
