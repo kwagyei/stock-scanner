@@ -113,7 +113,8 @@ def test_severity_is_the_highest_matching_category(cfg):
                                    "Google, Constellation strike 20-year nuclear power deal",
                                    "Missile strikes hit base", "Nvidia AI bubble fears overblown",
                                    "Fed rate hike odds recede", "Bond sell-off eases as Nasdaq hits record",
-                                   "Amazon crash attorneys say pilot pairing was key flaw"])
+                                   "Amazon crash attorneys say pilot pairing was key flaw",
+                                   "Chopper 7 over major crash involving Amazon truck"])
 def test_tuned_false_positives_stay_quiet(cfg, title):
     for fid in ("jpm_taiwan", "avanza_global"):
         c = classify(title, cfg, fid)
@@ -687,3 +688,9 @@ def test_memory_starts_from_the_log(monkeypatch):
     tw = run_on(monkeypatch, d2, _feed(DAY2_SAME, d2))["jpm_taiwan"]
     assert (tw["n_flagged"], tw["n_developing"]) == (0, 1)                          # known from the log
     assert fw.STORIES_FILE.exists()
+
+
+@pytest.mark.parametrize("title", ["Stock market crash wipes out tech gains on Wall Street",
+                                   "Nvidia shares crash after export ban", "Flash crash hits Nasdaq"])
+def test_market_crashes_still_count(cfg, title):
+    assert "market_stress" in classify(title, cfg, "avanza_global")["categories"]

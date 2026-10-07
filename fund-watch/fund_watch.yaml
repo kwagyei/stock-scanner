@@ -164,7 +164,9 @@ risk_categories:
                "defect", "recall", "yield problems", "yield issues"]
   market_stress:
     severity: 1
-    keywords: ["sell-off", "selloff", "plunge", "plunges", "tumbles", "slumps", "crash", "rout",
+    # bare "crash" matched traffic accidents ("major crash involving Amazon truck")
+    keywords: ["sell-off", "selloff", "plunge", "plunges", "tumbles", "slumps", "rout", "market crash",
+               "stock market crash", "stocks crash", "shares crash", "flash crash", "crash in stocks",
                "outflows", "foreign selling", "volatility", "slide", "slides", "slump", "falls sharply"]
     exclude: ["(plane|car|air|jet|helicopter|train|truck|bus|motorcycle|fatal|deadly|cargo)\\s+crash(es)?",
               "crash\\s+(attorneys?|lawyers?|victims?|site|investigat\\w+|probe)",
