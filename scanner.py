@@ -84,6 +84,14 @@ def load_config(path: Path) -> dict:
         return yaml.safe_load(fh)
 
 
+def bench_symbol(cfg: dict, which: str = "secondary") -> str:
+    """Benchmark ticker. which: "primary" (small caps, used to judge strategies) or
+    "secondary" (OMX Stockholm 30, the original benchmark kept in bench_* columns).
+    An older config with a single `benchmark: "^OMX"` string counts as the secondary."""
+    b = cfg["benchmark"]
+    return b if isinstance(b, str) else b[which]
+
+
 def load_watchlist(path: Path) -> pd.DataFrame:
     wl = pd.read_csv(path, comment="#", dtype=str).fillna("")
     wl["ticker"] = wl["ticker"].str.strip()
@@ -930,7 +938,7 @@ def build_weekly(signals, outcomes, table, wp, cfg, now_local) -> tuple[str, str
 <title>Scanner weekly {label}</title>
 <style>{STYLE}</style></head><body>
 <h1>Attention scanner · weekly summary {label}</h1>
-<p><small>Generated {now_local:%a %d %b %Y, %H:%M}. Research tool, not advice. Benchmark {escape(cfg['benchmark'])}.</small></p>
+<p><small>Generated {now_local:%a %d %b %Y, %H:%M}. Research tool, not advice. Benchmark {escape(bench_symbol(cfg))}.</small></p>
 <h2>Signal hit rate · last {wc['lookback_weeks']} weeks</h2>
 <p><small>Signals = score ≥ {cfg['alert_min_score']}, one per stock and bar date. Return is measured from the
 signal-day close. A hit = the stock beat the index over the same days. n counts signals old enough to measure.</small></p>
@@ -1438,7 +1446,7 @@ def build_paper_md(paper, cfg, now_local, eval_res) -> str:
 
 def build_evaluation_md(res, pe_res, cfg, now_local) -> str:
     out = ["# ⚖️ Evaluation", "", _nav("reports/evaluation.md"), _updated(now_local),
-           f"<sub>Do the closed paper trades beat {cfg['benchmark']} (OMX Stockholm 30) over the same days, "
+           f"<sub>Do the closed paper trades beat {bench_symbol(cfg)} (OMX Stockholm 30) over the same days, "
            f"after {res['cost']:.1f}% cost per trade, by enough that it's unlikely to be luck? "
            "[How to read this](../README.md#judging-the-results-evaluatepy)</sub>", "",
            "## Main rules", "", _eval_callout(res), ev.format_markdown(res)]
@@ -1466,7 +1474,7 @@ def build_weekly_md(outcomes, table, wp, cfg, now_local, here: str | None = None
     if here:
         out.append(_nav(here))
     out += [f"<sub>Generated **{now_local:%a %d %b %Y, %H:%M}** (Stockholm) · compared with "
-            f"{cfg['benchmark']} (OMX Stockholm 30)</sub>", "",
+            f"{bench_symbol(cfg)} (OMX Stockholm 30)</sub>", "",
             _glance([("🗓️ Signals this week", len(this_week), f"score ≥ {cfg['alert_min_score']}"),
                      ("💼 Paper trades closed", wp["week"]["n"], "this week"),
                      ("💰 Profit / loss", _fmt_sek(wp["week"]["pnl_sek"]), "this week")]
@@ -1627,14 +1635,14 @@ def main(argv=None) -> int:
 
     print(f"[info] fetching prices for {len(tickers)} tickers …")
     histories = {t: fetch_history(t, cfg["history_period"]) for t in tickers}
-    bench = fetch_history(cfg["benchmark"], cfg["history_period"])
+    bench = fetch_history(bench_symbol(cfg), cfg["history_period"])
     if not today_bar_complete(now_local, cfg):
         print(f"[info] before {cfg.get('complete_bar_after', '18:00')} Stockholm time: "
               "ignoring today's still-forming daily bar")
         histories = {t: completed_bars(h, now_local) for t, h in histories.items()}
         bench = completed_bars(bench, now_local)
     if bench.empty:
-        print(f"[warn] no benchmark data for {cfg['benchmark']}", file=sys.stderr)
+        print(f"[warn] no benchmark data for {bench_symbol(cfg)}", file=sys.stderr)
 
     rows, missing, stale = [], [], []
     seen = last_logged_bars()
