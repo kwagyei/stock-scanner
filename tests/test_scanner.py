@@ -1154,3 +1154,35 @@ def test_fund_watch_button_on_every_page():
     assert "(fund-watch/reports/fund_watch_latest.md)" in scanner._nav("DASHBOARD.md")
     assert "(../fund-watch/reports/fund_watch_latest.md)" in scanner._nav("reports/latest.md")
     assert "badge/Fund%20watch-" in scanner._nav("reports/evaluation.md")
+
+
+def test_pages_only_rebuilds_from_logs_without_fetching(cfg, tmp_paths, monkeypatch):
+    wl = tmp_paths / "watchlist.csv"
+    wl.write_text("ticker,name,query\nHOT.ST,Hot,Hot\nGONE.ST,Gone,Gone\n")
+    hot = flat(70)
+    hot.iloc[-1] = (100, 112, 100, 111, 6000)
+    monkeypatch.setattr(scanner, "fetch_history", lambda t, p: hot if t == "HOT.ST" else pd.DataFrame())
+    monkeypatch.setattr(scanner, "fetch_news", lambda q, c: [])
+    monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: 1.5e9)
+    monkeypatch.setattr(scanner.time, "sleep", lambda s: None)
+    monkeypatch.setattr(scanner, "today_bar_complete", lambda now, cfg: True)
+    scanner.main(["--no-email", "--watchlist", str(wl)])
+    full = scanner.DASHBOARD.read_text()
+    logs = {p: p.read_text() for p in scanner.DATA_DIR.iterdir()}
+
+    def boom(*a, **k):
+        raise AssertionError("pages-only must not fetch")
+    for name in ("fetch_history", "fetch_news", "fetch_market_cap", "fetch_releases"):
+        monkeypatch.setattr(scanner, name, boom)
+    scanner.DASHBOARD.unlink()
+    assert scanner.main(["--pages-only"]) == 0
+    rebuilt = scanner.DASHBOARD.read_text()
+    assert {p: p.read_text() for p in scanner.DATA_DIR.iterdir()} == logs          # no log touched
+    alerts = lambda md: md.split("## 🔔 Today's alerts")[1].split("## 💼")[0]
+    assert alerts(rebuilt) == alerts(full)                                          # same alert table
+    assert "No price data for: GONE.ST" in rebuilt and "badge/Fund%20watch" in rebuilt
+
+
+def test_pages_only_without_logs_fails_clearly(cfg, tmp_paths):
+    with pytest.raises(SystemExit, match="no score log yet"):
+        scanner.main(["--pages-only"])

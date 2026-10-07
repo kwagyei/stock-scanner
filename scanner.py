@@ -20,6 +20,7 @@ Usage:
   python scanner.py --no-news       # skip news and release fetching (price/volume only)
   python scanner.py --no-email      # never send e-mail on this run
   python scanner.py --weekly        # also build the weekly summary now (otherwise Friday evening)
+  python scanner.py --pages-only    # rebuild the Markdown pages from the logs (no fetching)
 """
 from __future__ import annotations
 
@@ -1498,6 +1499,71 @@ def build_weekly_md(outcomes, table, wp, cfg, now_local, here: str | None = None
 
 # --------------------------------------------------------------------------- main
 
+def evaluations(paper: pd.DataFrame, cfg: dict):
+    """(evaluation settings, main-rules result, partial-exit result or None), via evaluate.py."""
+    ec = {**ev.DEFAULTS, "digest_after_hour": 12, **(cfg.get("evaluation") or {})}
+    args = (ec["cost_pct"], ec["stake"], ec["min_trades"])
+    kw = {"move_threshold": cfg["thresholds"]["price_move_1d"]}
+    eval_res = ev.evaluate(ev.closed_trades(paper), *args, **kw)
+    pe_res = (ev.evaluate(ev.closed_trades(paper, variant=True), *args, **kw)
+              if (cfg["paper_trading"].get("partial_exit") or {}).get("enabled") else None)
+    return ec, eval_res, pe_res
+
+
+def write_pages(rows, missing, paper, cfg, now_local) -> None:
+    """The Markdown pages GitHub shows: dashboard, today, paper trades, evaluation."""
+    _, eval_res, pe_res = evaluations(paper, cfg)
+    pages = {REPORT_DIR / "latest.md": build_digest_md(rows, missing, cfg, now_local),
+             REPORT_DIR / "paper_trades.md": build_paper_md(paper, cfg, now_local, eval_res),
+             REPORT_DIR / "evaluation.md": build_evaluation_md(eval_res, pe_res, cfg, now_local),
+             DASHBOARD: build_dashboard(rows, missing, paper, cfg, now_local, eval_res)}
+    for path, text in pages.items():
+        path.write_text(text, encoding="utf-8")
+
+
+def rows_from_score_log():
+    """The stocks as scored on the latest logged run: (rows, missing, run time in UTC).
+
+    Lets the pages be rebuilt without fetching anything. Headlines aren't logged, so the
+    rebuilt pages have none.
+    """
+    log = pd.read_csv(SCORES_LOG, dtype=str).fillna("")
+    run_utc = log["run_utc"].max()
+    rows, missing = [], []
+    for _, r in log[log["run_utc"] == run_utc].iterrows():
+        if r["status"] != "ok":
+            missing.append(r["ticker"] + (" (stale)" if r["status"].startswith("stale") else ""))
+            continue
+        num = lambda c: float(r[c]) if r.get(c, "") != "" else float("nan")
+        rows.append({
+            "ticker": r["ticker"], "name": r["name"], "date": r["bar_date"], "close": num("close"),
+            "chg_1d": num("chg_1d"), "chg_5d": num("chg_5d"), "vol_ratio": num("vol_ratio"),
+            "turnover_sek": float("nan"), "volume": float("nan"),
+            "n_24h": int(num("news_24h")) if r["news_24h"] else 0,
+            "n_releases": int(num("releases_24h")) if r["releases_24h"] else 0,
+            "market_cap": num("market_cap_msek") * 1e6 if r["market_cap_msek"] else None,
+            "score": int(r["score"]), "points": {k: int(r[f"pts_{k}"] or 0) for k in SCORE_COMPONENTS},
+            "reasons": [x.strip() for x in r["reasons"].split(";") if x.strip()],
+            "hype": r["hype"] == "True", "headlines": []})
+    rows.sort(key=lambda r: (r["score"], r["vol_ratio"] if not math.isnan(r["vol_ratio"]) else 0), reverse=True)
+    return rows, missing, dt.datetime.fromisoformat(run_utc)
+
+
+def pages_only(cfg: dict) -> int:
+    """Rebuild the Markdown pages from the logs: no data fetched, no logs written."""
+    if not SCORES_LOG.exists():
+        sys.exit("[error] no score log yet: run a normal scan first")
+    rows, missing, run = rows_from_score_log()
+    try:
+        from zoneinfo import ZoneInfo
+        run_local = run.astimezone(ZoneInfo("Europe/Stockholm"))
+    except Exception:
+        run_local = run
+    write_pages(rows, missing, load_paper(), cfg, run_local)
+    print(f"[info] pages rebuilt from the scan at {run_local:%Y-%m-%d %H:%M} (Stockholm); nothing fetched")
+    return 0
+
+
 def _now() -> dt.datetime:
     return dt.datetime.now(UTC)
 
@@ -1509,9 +1575,13 @@ def main(argv=None) -> int:
     ap.add_argument("--no-news", action="store_true")
     ap.add_argument("--no-email", action="store_true")
     ap.add_argument("--weekly", action="store_true", help="build the weekly summary on this run")
+    ap.add_argument("--pages-only", action="store_true",
+                    help="rebuild the Markdown pages from the logs; fetch nothing, write no logs")
     args = ap.parse_args(argv)
 
     cfg = load_config(Path(args.config))
+    if args.pages_only:
+        return pages_only(cfg)
     wl = load_watchlist(Path(args.watchlist))
     DATA_DIR.mkdir(exist_ok=True)
     REPORT_DIR.mkdir(exist_ok=True)
@@ -1582,10 +1652,7 @@ def main(argv=None) -> int:
         paper = add_paper_signals(paper, rows, cfg, watchlist_version(Path(args.watchlist)))
         paper.to_csv(PAPER_LOG, index=False)
     summary = paper_summary(paper)
-    ec = {**ev.DEFAULTS, "digest_after_hour": 12, **(cfg.get("evaluation") or {})}
-    eval_res = ev.evaluate(ev.closed_trades(paper), ec["cost_pct"], ec["stake"], ec["min_trades"])
-    pe_res = (ev.evaluate(ev.closed_trades(paper, variant=True), ec["cost_pct"], ec["stake"], ec["min_trades"])
-              if (cfg["paper_trading"].get("partial_exit") or {}).get("enabled") else None)
+    ec, eval_res, pe_res = evaluations(paper, cfg)
     eval_line = ev.one_line(eval_res)
     digest_eval = eval_line if now_local.hour >= ec["digest_after_hour"] else None
 
@@ -1624,12 +1691,7 @@ def main(argv=None) -> int:
                 fh.write("\n" + weekly_md)
         print(weekly_md)
 
-    pages = {REPORT_DIR / "latest.md": build_digest_md(rows, missing, cfg, now_local),
-             REPORT_DIR / "paper_trades.md": build_paper_md(paper, cfg, now_local, eval_res),
-             REPORT_DIR / "evaluation.md": build_evaluation_md(eval_res, pe_res, cfg, now_local),
-             DASHBOARD: build_dashboard(rows, missing, paper, cfg, now_local, eval_res)}
-    for path, text in pages.items():
-        path.write_text(text, encoding="utf-8")
+    write_pages(rows, missing, paper, cfg, now_local)
 
     n_alerts = sum(r["score"] >= cfg["alert_min_score"] for r in rows)
     email_cfg = cfg.get("email", {})
