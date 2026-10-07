@@ -35,6 +35,7 @@ import ssl
 import sys
 import time
 import urllib.parse
+import urllib.request
 from email.message import EmailMessage
 from html import escape
 from pathlib import Path
@@ -119,8 +120,67 @@ def watchlist_version(path: Path) -> str:
 
 # --------------------------------------------------------------------------- data
 
+NASDAQ_CHART_URL = ("https://api.nasdaq.com/api/nordic/instruments/{id}/chart"
+                    "?assetClass=INDEXES&fromDate={start}&toDate={end}")
+
+
+def _period_days(period: str) -> int:
+    m = re.fullmatch(r"(\d+)(d|wk|mo|y)", period.strip())
+    if not m:
+        return 183
+    n, unit = int(m.group(1)), m.group(2)
+    return n * {"d": 1, "wk": 7, "mo": 31, "y": 366}[unit]
+
+
+def _nasdaq_number(v) -> float | None:
+    if v in (None, "", "-"):
+        return None
+    try:
+        return float(str(v).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def parse_nasdaq_chart(payload: dict) -> pd.DataFrame:
+    """Nasdaq Nordic /chart JSON -> OHLC frame shaped like fetch_history's (date index)."""
+    rows = []
+    for p in ((payload or {}).get("data") or {}).get("CP") or []:
+        z = p.get("z") or {}
+        close = _nasdaq_number(z.get("close"))
+        if close is None or not z.get("dateTime"):
+            continue
+        rows.append({"date": pd.Timestamp(z["dateTime"]).normalize(),
+                     "Open": _nasdaq_number(z.get("open")), "High": _nasdaq_number(z.get("high")),
+                     "Low": _nasdaq_number(z.get("low")), "Close": close})
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows).drop_duplicates("date", keep="last").set_index("date").sort_index()
+    df.index.name = None
+    return df
+
+
+def fetch_nasdaq_index(orderbook_id: str, period: str, today: dt.date | None = None) -> pd.DataFrame:
+    """Daily OHLC for a Nasdaq Nordic index (e.g. IX3364 = OMX Stockholm Small Cap PI), from
+    Nasdaq's public chart endpoint. Yahoo has no usable history for the small-cap index."""
+    end = today or _now().date()
+    start = end - dt.timedelta(days=_period_days(period))
+    url = NASDAQ_CHART_URL.format(id=urllib.parse.quote(orderbook_id), start=start, end=end)
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (stock-attention-scanner)",
+                                               "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            payload = json.loads(resp.read())
+    except Exception as exc:
+        print(f"[warn] Nasdaq index fetch failed for {orderbook_id}: {exc}", file=sys.stderr)
+        return pd.DataFrame()
+    return parse_nasdaq_chart(payload)
+
+
 def fetch_history(ticker: str, period: str) -> pd.DataFrame:
-    """Daily OHLCV. Index = tz-naive dates in exchange local time."""
+    """Daily OHLCV. Index = tz-naive dates in exchange local time.
+    A "nasdaq:<orderbook id>" symbol is fetched from Nasdaq Nordic instead of Yahoo."""
+    if ticker.startswith("nasdaq:"):
+        return fetch_nasdaq_index(ticker.split(":", 1)[1], period)
     try:
         hist = yf.Ticker(ticker).history(period=period, interval="1d", auto_adjust=False)
     except Exception as exc:  # network / symbol errors

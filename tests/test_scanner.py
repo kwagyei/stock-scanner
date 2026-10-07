@@ -1212,3 +1212,53 @@ def test_pages_only_rebuilds_from_logs_without_fetching(cfg, tmp_paths, monkeypa
 def test_pages_only_without_logs_fails_clearly(cfg, tmp_paths):
     with pytest.raises(SystemExit, match="no score log yet"):
         scanner.main(["--pages-only"])
+
+
+# --------------------------------------------------------------------------- primary benchmark (Nasdaq)
+
+NASDAQ_PAYLOAD = {"data": {"CP": [
+    {"z": {"dateTime": "2026-10-06", "open": "1,230.10", "high": "1,240.00", "low": "1,225.00", "close": "1,238.50"}},
+    {"z": {"dateTime": "2026-10-07", "open": "1,242.15", "high": "1,245.00", "low": "1,230.00", "close": "1,235.22"}},
+    {"z": {"dateTime": "2026-10-08", "open": "-", "high": "", "low": None, "close": ""}},
+]}}
+
+
+def test_parse_nasdaq_chart_handles_comma_numbers_and_blank_rows():
+    df = scanner.parse_nasdaq_chart(NASDAQ_PAYLOAD)
+    assert list(df.index) == [pd.Timestamp("2026-10-06"), pd.Timestamp("2026-10-07")]
+    assert df.loc["2026-10-07", "Open"] == 1242.15
+    assert df.loc["2026-10-07", "Close"] == 1235.22
+    assert scanner.parse_nasdaq_chart({}).empty
+
+
+def test_fetch_history_routes_nasdaq_symbols(monkeypatch):
+    seen = {}
+
+    class Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return json.dumps(NASDAQ_PAYLOAD).encode()
+
+    def fake_urlopen(req, timeout):
+        seen["url"] = req.full_url
+        return Resp()
+
+    monkeypatch.setattr(scanner.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(scanner, "_now", lambda: NOW)
+    df = scanner.fetch_history("nasdaq:IX3364", "6mo")
+    assert len(df) == 2
+    assert "/instruments/IX3364/chart" in seen["url"] and "toDate=2026-10-06" in seen["url"]
+
+
+def test_fetch_nasdaq_index_failure_warns_and_returns_empty(monkeypatch, capsys):
+    def boom(*a, **k):
+        raise OSError("down")
+    monkeypatch.setattr(scanner.urllib.request, "urlopen", boom)
+    assert scanner.fetch_nasdaq_index("IX3364", "6mo", today=dt.date(2026, 10, 7)).empty
+    assert "Nasdaq index fetch failed" in capsys.readouterr().err
+
+
+def test_bench_symbol_primary_and_secondary(cfg):
+    assert scanner.bench_symbol(cfg, "primary") == "nasdaq:IX3364"
+    assert scanner.bench_symbol(cfg) == "^OMX"
+    assert scanner.bench_symbol({"benchmark": "^OMX"}, "secondary") == "^OMX"

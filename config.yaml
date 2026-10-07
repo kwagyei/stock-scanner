@@ -2,7 +2,7 @@
 # primary one; the secondary (OMX Stockholm 30) is shown for reference and stays in the
 # paper log's original bench_* columns, so v0's log is unchanged.
 benchmark:
-  primary: "^OMXSSCPI"      # Stockholm small-cap index; see README "Benchmark" for the source used
+  primary: "nasdaq:IX3364"  # OMX Stockholm Small Cap PI via Nasdaq Nordic (Yahoo has no history); see README "Benchmark"
   secondary: "^OMX"         # OMX Stockholm 30
 history_period: "6mo"
 # Daily bars are only complete after the close (17:30). Runs before this Stockholm time ignore
