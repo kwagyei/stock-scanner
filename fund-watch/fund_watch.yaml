@@ -9,18 +9,27 @@ funds:
     name: "JPMorgan Funds - Taiwan Fund A (acc) USD"
     isin: "LU0210528419"
     search_names: ["JPMorgan Taiwan Fund", "JPM Taiwan Fund"]
-    # Update from the monthly factsheet (am.jpmorgan.com). weight = % of fund (approximate).
-    # Holdings with weight >= top_holding_min_weight get holding_bonus; others other_holding_bonus.
+    # Top 10 from the JPMorgan factsheet "as at end August 2026" (published 21 Sep 2026):
+    # am.jpmorgan.com/content/dam/jpm-am-aem/asiapacific/hk/en/literature/fact-sheet/jpmf-taiwan_e.pdf
+    # (JPMorgan Funds - Taiwan Fund, share classes incl. A (acc) USD LU0210528419). Fund size USD 1,290m;
+    # IT 74.6%, financials 14.8%, cash 5.8%. Single holdings are capped at 10% of the fund.
+    # Update monthly. weight = % of fund; >= top_holding_min_weight gets holding_bonus.
     top_holding_min_weight: 3
     holdings:
-      - {name: "MediaTek", weight: 9.2, aliases: []}
-      - {name: "TSMC", weight: 9.1, aliases: ["Taiwan Semiconductor"]}
-      - {name: "Delta Electronics", weight: 6.8, aliases: []}
-      - {name: "Elite Material", weight: 3.4, aliases: ["Elite Material Co"]}
-      - {name: "CTBC Financial", weight: 3.4, aliases: ["CTBC"]}
-      - {name: "Hon Hai", weight: 0, aliases: ["Foxconn"]}
+      - {name: "TSMC", weight: 8.5, aliases: ["Taiwan Semiconductor"]}
+      - {name: "MediaTek", weight: 7.8, aliases: []}
+      - {name: "Largan Precision", weight: 4.6, aliases: ["Largan"]}
+      - {name: "Delta Electronics", weight: 4.5, aliases: []}
+      - {name: "Accton Technology", weight: 3.2, aliases: ["Accton"]}
+      - {name: "King Slide Works", weight: 2.9, aliases: ["King Slide"]}
+      - {name: "Hon Hai", weight: 2.7, aliases: ["Hon Hai Precision", "Foxconn"]}
+      - {name: "Fubon Financial", weight: 2.7, aliases: ["Fubon"]}
+      - {name: "SinoPac Financial", weight: 2.4, aliases: ["SinoPac"]}
+      - {name: "KGI Financial", weight: 2.4, aliases: ["KGI Financial Holding"]}
+      # Not in the August top 10 (so below 2.4% if still held); still watched.
+      - {name: "Elite Material", weight: 0, aliases: ["Elite Material Co"]}
+      - {name: "CTBC Financial", weight: 0, aliases: ["CTBC"]}
       - {name: "Quanta Computer", weight: 0, aliases: ["Quanta"]}
-      - {name: "Accton Technology", weight: 0, aliases: ["Accton"]}
       - {name: "ASE Technology", weight: 0, aliases: ["ASE Holding", "ASE Technology Holding"]}
       - {name: "E.Sun Financial", weight: 0, aliases: []}
       - {name: "Mega Financial", weight: 0, aliases: []}

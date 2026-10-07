@@ -7,13 +7,15 @@ Daily scan of Google News for anything that could hurt the funds in `fund_watch.
 | 🇹🇼 | JPMorgan Funds - Taiwan Fund A (acc) USD | LU0210528419 | Taiwan, its chip makers and their customers |
 | 🌍 | Avanza Global | SE0011527613 | The market as a whole, US big tech, rates, the krona |
 
-Articles are fetched once (about 65 searches) and scored separately for each fund, so one
+Articles are fetched once (about 70 searches) and scored separately for each fund, so one
 article can be flagged for both.
 
 ## What it searches
-**Taiwan fund (about 45 searches)**
+**Taiwan fund (about 50 searches)**
 - **The fund itself:** manager changes, suspension, mergers.
-- **Holdings:** MediaTek, TSMC, Delta, Elite Material, CTBC, Hon Hai, Quanta, Accton, ASE and the Taiwanese banks.
+- **Holdings** (top 10 from the factsheet of end August 2026): TSMC 8.5%, MediaTek 7.8%, Largan 4.6%,
+  Delta 4.5%, Accton 3.2% (these five get the top-holding bonus), King Slide 2.9%, Hon Hai 2.7%,
+  Fubon 2.7%, SinoPac 2.4%, KGI 2.4%. Also watched: Elite Material, CTBC, Quanta, ASE, E.Sun, Mega, Cathay.
 - **Customers:** Nvidia, Apple, AMD, Broadcom, Qualcomm, and the big cloud companies (only together with TSMC, Taiwan, chips or orders).
 - **Suppliers:** ASML, Applied Materials, Tokyo Electron, Lam Research.
 - **Topics:** the Taiwan Strait, blockade and military activity; earthquakes, typhoons, power and water; strikes;

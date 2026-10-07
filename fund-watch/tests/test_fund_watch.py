@@ -694,3 +694,15 @@ def test_memory_starts_from_the_log(monkeypatch):
                                    "Nvidia shares crash after export ban", "Flash crash hits Nasdaq"])
 def test_market_crashes_still_count(cfg, title):
     assert "market_stress" in classify(title, cfg, "avanza_global")["categories"]
+
+
+@pytest.mark.parametrize("title,entity,bonus", [
+    ("Largan cuts guidance on weak lens demand", "Largan Precision", "holding_bonus"),      # new top-5
+    ("Accton cuts guidance on switch orders", "Accton Technology", "holding_bonus"),        # now top-5
+    ("King Slide misses estimates", "King Slide Works", "other_holding_bonus"),
+    ("Fubon fined by regulator", "Fubon Financial", "other_holding_bonus"),
+    ("SinoPac fined over compliance lapses", "SinoPac Financial", "other_holding_bonus"),
+])
+def test_august_2026_holdings(cfg, title, entity, bonus):
+    c = classify(title, cfg)
+    assert c["entities"] == [entity] and c["score"] == 2 + cfg["scoring"][bonus]
