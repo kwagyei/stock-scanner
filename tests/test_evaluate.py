@@ -155,6 +155,7 @@ def scan_env(tmp_path, monkeypatch):
                     ("WEEKLY_LOG", "weekly_summary.csv"), ("SCORES_LOG", "scores_log.csv")]:
         monkeypatch.setattr(scanner, name, tmp_path / "data" / f)
     monkeypatch.setattr(scanner, "DASHBOARD", tmp_path / "DASHBOARD.md")
+    monkeypatch.setattr(scanner, "FUND_SUMMARY", tmp_path / "fund_watch_latest.json")
     flat = pd.DataFrame([(10, 10, 10, 10, 1000)] * 70, index=pd.bdate_range("2026-06-01", periods=70),
                         columns=["Open", "High", "Low", "Close", "Volume"])
     monkeypatch.setattr(scanner, "fetch_history", lambda t, p: flat)

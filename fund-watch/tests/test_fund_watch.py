@@ -21,6 +21,7 @@ def offline(monkeypatch, tmp_path):
     monkeypatch.setattr(fw, "REPORT_DIR", tmp_path / "reports")
     monkeypatch.setattr(fw, "SEEN_FILE", tmp_path / "data" / "fund_watch_seen.json")
     monkeypatch.setattr(fw, "LOG_FILE", tmp_path / "data" / "fund_watch_log.csv")
+    monkeypatch.setattr(fw, "SUMMARY_FILE", tmp_path / "data" / "fund_watch_latest.json")
 
 
 @pytest.fixture
@@ -313,3 +314,32 @@ def test_test_email_sends_even_with_nothing_flagged(monkeypatch):
 
 def test_shipped_config_emails_only_when_flagged(cfg):
     assert cfg["email"] == {"enabled": True, "send_when": "flagged"}
+
+
+# --------------------------------------------------------------------------- dashboard page + summary
+
+def test_markdown_page(monkeypatch):
+    feeds = {"TSMC": [item("TSMC | halts production in Taiwan, Nvidia hit"),       # flagged, HIGH? (infra = 2)
+                      item("China blockade of Taiwan begins"),                     # flagged, HIGH
+                      item("Strong earthquake hits Peru")]}                        # watch
+    run(monkeypatch, feeds)
+    md = (fw.REPORT_DIR / "fund_watch_latest.md").read_text()
+    assert md.startswith("# 🛡️ Fund risk watch") and "(../../DASHBOARD.md)" in md
+    assert "| **2** | **1** | **1** |" in md                                         # flagged, high, watch
+    assert "> [!WARNING]\n> **1 high-severity item(s)**" in md
+    assert "TSMC \\| halts production" in md and "🔴 HIGH" in md and "🟠 MEDIUM" in md
+    flagged, watch = md.split("<details>")
+    assert "Peru" in watch and "Peru" not in flagged
+    assert md.count("<details>") == md.count("</details>")
+
+
+def test_summary_written_on_normal_runs_only(monkeypatch):
+    feeds = {"TSMC": [item("China blockade of Taiwan begins")]}
+    run(monkeypatch, feeds, "--all")
+    assert not fw.SUMMARY_FILE.exists()
+    run(monkeypatch, feeds)
+    s = json.loads(fw.SUMMARY_FILE.read_text())
+    assert (s["n_flagged"], s["n_high"], s["n_watch"], s["run_utc"]) == (1, 1, 0, "2026-10-07T05:00+00:00")
+    assert s["top"][0]["severity"] == "HIGH" and s["top"][0]["title"].startswith("China blockade")
+    run(monkeypatch, feeds)                                                        # nothing new next time
+    assert json.loads(fw.SUMMARY_FILE.read_text())["n_flagged"] == 0

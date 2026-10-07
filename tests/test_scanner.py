@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import socket
 
 import pandas as pd
@@ -38,6 +39,7 @@ def tmp_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(scanner, "WEEKLY_LOG", tmp_path / "data" / "weekly_summary.csv")
     monkeypatch.setattr(scanner, "SCORES_LOG", tmp_path / "data" / "scores_log.csv")
     monkeypatch.setattr(scanner, "DASHBOARD", tmp_path / "DASHBOARD.md")
+    monkeypatch.setattr(scanner, "FUND_SUMMARY", tmp_path / "fund_watch_latest.json")
     return tmp_path
 
 
@@ -1105,3 +1107,50 @@ def test_weekly_page_has_direction_split(cfg):
     md = scanner.build_weekly_md(o, table, wp, cfg, FRI_EVE)
     assert "Split by signal-day move" in md and "| ▼ Drop | 1 |" in md
     assert md.count("<details>") == md.count("</details>")
+
+
+# --------------------------------------------------------------------------- fund watch on the dashboard
+
+def _fund_summary(run_utc="2026-10-07T05:13+00:00", flagged=2, high=1):
+    top = [{"score": 6, "severity": "HIGH", "title": "TSMC | halts production", "link": "https://x.test/a",
+            "source": "Reuters", "entities": ["TSMC"], "categories": ["infrastructure"]},
+           {"score": 3, "severity": "MEDIUM", "title": "Quanta revenue falls", "link": "https://x.test/b",
+            "source": "digitimes", "entities": ["Quanta Computer"], "categories": ["company_results"]}][:flagged]
+    return {"run_utc": run_utc, "run_local": "2026-10-07 07:13", "n_flagged": flagged, "n_high": high,
+            "n_watch": 4, "n_raw": 1300, "top": top}
+
+
+def _dash(cfg, now=dt.datetime(2026, 10, 7, 18, 52)):
+    return scanner.build_dashboard([], [], pd.DataFrame(columns=scanner.PAPER_COLUMNS), cfg, now, ev.evaluate(None))
+
+
+def test_dashboard_fund_watch_section(cfg, tmp_paths, monkeypatch):
+    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+    scanner.FUND_SUMMARY.write_text(json.dumps(_fund_summary()))
+    md = _dash(cfg)
+    assert "| 🛡️ Fund watch |" in md.splitlines()[next(i for i, l in enumerate(md.splitlines()) if l.startswith("| 🔔"))]
+    assert "**2**<br><sub>flagged · 1 high</sub>" in md
+    sec = md.split("## 🛡️ Fund risk watch")[1].split("## More")[0]
+    assert "Last run **Wed&nbsp;7&nbsp;Oct 07:13**" in sec and "1300 articles scanned" in sec
+    assert "**1 high-severity** item(s) among 2 newly flagged" in sec
+    assert "| 🔴&nbsp;HIGH | [TSMC \\| halts production](<https://x.test/a>) | TSMC |" in sec
+    assert "[Full fund watch (2 flagged, 4 on watch) →](fund-watch/reports/fund_watch_latest.md)" in sec
+    assert "last ran" not in sec                                                  # fresh: no stale warning
+
+
+def test_dashboard_fund_watch_missing_quiet_and_stale(cfg, tmp_paths, monkeypatch):
+    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+    md = _dash(cfg)
+    assert "hasn't run yet" in md and "**–**<br><sub>not run yet</sub>" in md
+    scanner.FUND_SUMMARY.write_text(json.dumps(_fund_summary(flagged=0, high=0)))
+    assert "✅ Nothing new flagged on the last run." in _dash(cfg)
+    stale = _dash(cfg, now=dt.datetime(2026, 10, 10, 9, 0))
+    assert "The fund watch last ran 3 day(s) ago" in stale
+    scanner.FUND_SUMMARY.write_text("{broken")
+    assert "hasn't run yet" in _dash(cfg)
+
+
+def test_fund_watch_button_on_every_page():
+    assert "(fund-watch/reports/fund_watch_latest.md)" in scanner._nav("DASHBOARD.md")
+    assert "(../fund-watch/reports/fund_watch_latest.md)" in scanner._nav("reports/latest.md")
+    assert "badge/Fund%20watch-" in scanner._nav("reports/evaluation.md")

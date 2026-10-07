@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import math
 import os
 import re
@@ -58,6 +59,7 @@ SCORES_LOG = DATA_DIR / "scores_log.csv"    # every stock, every run, with each 
 PAPER_LOG = DATA_DIR / "paper_trades.csv"
 WEEKLY_LOG = DATA_DIR / "weekly_summary.csv"
 DASHBOARD = ROOT / "DASHBOARD.md"
+FUND_SUMMARY = ROOT / "fund-watch" / "data" / "fund_watch_latest.json"   # written by fund-watch/fund_watch.py
 UTC = dt.timezone.utc
 USER_AGENT = "Mozilla/5.0 (stock-attention-scanner)"
 
@@ -1004,6 +1006,7 @@ PAGES = [  # button label, colour, path from the repo root
     ("Weekly", "8250df", "reports/weekly_latest.md"),
     ("Paper trades", "1a7f37", "reports/paper_trades.md"),
     ("Evaluation", "9a6700", "reports/evaluation.md"),
+    ("Fund watch", "cf222e", "fund-watch/reports/fund_watch_latest.md"),
 ]
 EXIT_LABELS = {"target": "🎯 Target", "stop": "🛑 Stop", "time": "⏱️ Time limit",
                "remainder stop": "🛑 Breakeven stop"}
@@ -1238,12 +1241,51 @@ def _updated(now_local, rows=None) -> str:
 FOOTER = "\n---\n<sub>Research tool, not investment advice. Paper trades are hypothetical.</sub>\n"
 
 
+def load_fund_summary() -> dict | None:
+    try:
+        return json.loads(FUND_SUMMARY.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+FUND_SEVERITY = {"HIGH": "🔴&nbsp;HIGH", "MEDIUM": "🟠&nbsp;MEDIUM", "LOW": "🔵&nbsp;LOW"}
+
+
+def _fund_section(fs: dict | None, now_local: dt.datetime) -> list[str]:
+    """Dashboard section for the separate fund risk watch (latest run's summary)."""
+    page = "fund-watch/reports/fund_watch_latest.md"
+    out = ["## 🛡️ Fund risk watch", ""]
+    if not fs:
+        return out + ["_The fund watch hasn't run yet (daily at 07:13 Stockholm time)._", ""]
+    run = dt.datetime.fromisoformat(fs["run_utc"])
+    now = now_local if now_local.tzinfo else now_local.replace(tzinfo=UTC)   # naive = UTC
+    age_h = (now - run).total_seconds() / 3600
+    if age_h > 36:
+        out.append(_callout("WARNING", f"The fund watch last ran {age_h / 24:.0f} day(s) ago. "
+                                       "Check its runs on the Actions tab."))
+    out.append(f"<sub>Last run **{_day(fs['run_local'][:10])} {fs['run_local'][11:]}** (Stockholm) · "
+               f"{fs['n_raw']} articles scanned · new articles only</sub>\n")
+    if fs["n_flagged"]:
+        if fs["n_high"]:
+            out.append(_callout("WARNING", f"**{fs['n_high']} high-severity** item(s) among "
+                                           f"{fs['n_flagged']} newly flagged."))
+        out.append(_md_table(["Severity", "Headline", "Affects"],
+                             [[FUND_SEVERITY.get(i["severity"], i["severity"]),
+                               f"[{_md(i['title'])}](<{i['link']}>)", _md(", ".join(i["entities"])) or "–"]
+                              for i in fs["top"][:5]], align="lll"))
+    else:
+        out.append("✅ Nothing new flagged on the last run.\n")
+    more = f" ({fs['n_flagged']} flagged, {fs['n_watch']} on watch)" if fs["n_flagged"] or fs["n_watch"] else ""
+    return out + [f"[Full fund watch{more} →]({page})", ""]
+
+
 def build_dashboard(rows, missing, paper, cfg, now_local, eval_res) -> str:
     alerts = [r for r in rows if r["score"] >= cfg["alert_min_score"]]
     hype = [r for r in rows if r["hype"]]
     pe_on = (cfg["paper_trading"].get("partial_exit") or {}).get("enabled")
     n_open, n_pend = int((paper["status"] == "open").sum()), int((paper["status"] == "pending").sum())
     n_closed = int((paper["status"] == "closed").sum())
+    fs = load_fund_summary()
 
     out = ["# 📊 Attention scanner", "", _nav("DASHBOARD.md"), _updated(now_local, rows)]
     if missing:
@@ -1254,7 +1296,9 @@ def build_dashboard(rows, missing, paper, cfg, now_local, eval_res) -> str:
                      ("✅ Closed trades", n_closed, ""),
                      ("⚖️ Evaluation", eval_res["verdict"],
                       f"{eval_res['n']} of {eval_res['min_trades']} trades" if eval_res["verdict"] == "NOT YET"
-                      else f"{eval_res['n']} trades")]),
+                      else f"{eval_res['n']} trades"),
+                     ("🛡️ Fund watch", fs["n_flagged"] if fs else "–",
+                      (f"flagged · {fs['n_high']} high" if fs else "not run yet"))]),
             "## 🔔 Today's alerts", "",
             _alerts_table(alerts, "✅ No alerts on this run."), _headlines(alerts)]
     if hype:
@@ -1267,7 +1311,9 @@ def build_dashboard(rows, missing, paper, cfg, now_local, eval_res) -> str:
         out += ["**Waiting to buy**", "", _pending_table(paper)]
     out += ["[All paper trades →](reports/paper_trades.md)", "", _eval_callout(eval_res),
             "[Full evaluation →](reports/evaluation.md) · "
-            "[How to read it](README.md#judging-the-results-evaluatepy)", "", "## More", ""]
+            "[How to read it](README.md#judging-the-results-evaluatepy)", ""]
+    out += _fund_section(fs, now_local)
+    out += ["## More", ""]
 
     sig = load_signals()
     sig = sig[sig["score"] >= cfg["alert_min_score"]]

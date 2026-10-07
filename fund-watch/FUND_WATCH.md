@@ -56,6 +56,12 @@ earlier runs are shown. It's keyword-based, so expect some false positives, and 
   five repository secrets (see below). The stock scanner uses the same secrets, but its own
   e-mail stays off (`email.enabled: false` in the root `config.yaml`).
 
+## On the dashboard
+Each run also writes `reports/fund_watch_latest.md` (a page GitHub can show) and
+`data/fund_watch_latest.json` (a short summary). The stock scanner's dashboard reads that summary
+on its own runs: a **Fund watch** button on every page, a count in the at-a-glance row, and the
+top flagged items with a link to the full page. It warns if the fund watch hasn't run for 36 hours.
+
 ## E-mail setup (Gmail)
 1. Use a Gmail account as the sender. A separate account is safest; your own works too
    (it can send to itself).

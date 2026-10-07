@@ -46,6 +46,7 @@ DATA_DIR = ROOT / "data"
 REPORT_DIR = ROOT / "reports"
 SEEN_FILE = DATA_DIR / "fund_watch_seen.json"
 LOG_FILE = DATA_DIR / "fund_watch_log.csv"
+SUMMARY_FILE = DATA_DIR / "fund_watch_latest.json"   # read by the stock scanner's dashboard
 UTC = dt.timezone.utc
 SEVERITY_LABEL = {3: "HIGH", 2: "MEDIUM", 1: "LOW"}
 
@@ -252,6 +253,60 @@ tr.s1 .sev{{background:#e8eef7;color:#24476b}}
 </body></html>"""
 
 
+SEVERITY_ICON = {3: "🔴 HIGH", 2: "🟠 MEDIUM", 1: "🔵 LOW"}
+
+
+def _md(text) -> str:
+    return str(text).replace("|", "\\|").replace("\n", " ")
+
+
+def _md_items(items, empty: str) -> str:
+    if not items:
+        return f"_{empty}_\n"
+    out = ["| Score | Severity | Headline | Affects | Why flagged |", "|:---:|:---|:---|:---|:---|"]
+    for i in items:
+        when = i["ts"].strftime("%d %b %H:%M") if i["ts"] else ""
+        why = "<br>".join(f"**{cat_label(c)}:** {_md(', '.join(k))}" for c, k in i["categories"].items())
+        out.append(f"| **{i['score']}** | {SEVERITY_ICON[i['severity']]} | [{_md(i['title'])}](<{i['link']}>)"
+                   f"<br><sub>{_md(i['source'])} · {when} UTC</sub> | {_md(', '.join(i['entities'])) or '–'} | {why} |")
+    return "\n".join(out) + "\n"
+
+
+def build_page_md(flagged, watch, cfg, now_local, n_queries, n_raw) -> str:
+    """The report as a Markdown page (GitHub shows Markdown, not HTML, in a private repo)."""
+    high = sum(1 for f in flagged if f["severity"] == 3)
+    back = ("[![Dashboard](https://img.shields.io/badge/Dashboard-24292f?style=for-the-badge)]"
+            "(../../DASHBOARD.md)")
+    glance = ("| 🚩 Flagged | 🔴 High | 👀 Watch | 📰 Articles scanned |\n|:---:|:---:|:---:|:---:|\n"
+              f"| **{len(flagged)}** | **{high}** | **{len(watch)}** | **{n_raw}**<br><sub>{n_queries} searches</sub> |\n")
+    note = ("> [!WARNING]\n> **{} high-severity item(s)** among the new articles. Read the sources.\n".format(high)
+            if high else "")
+    return "\n".join([
+        f"# 🛡️ Fund risk watch", "", back, "",
+        f"<sub>**{_md(cfg['fund']['name'])}** · ISIN {cfg['fund']['isin']} · updated "
+        f"**{now_local:%a %d %b %Y, %H:%M}** (Stockholm) · new articles only</sub>", "",
+        glance, note,
+        "## 🚩 Flagged", "",
+        "<sub>Score = severity (HIGH 3, MEDIUM 2, LOW 1) + 2 for a top-5 holding (+1 another holding) "
+        "+ 1 customer or supplier + 1 Taiwan. Flagged = score 3 or more and names Taiwan, the fund, a holding, "
+        "a customer or a supplier. Keyword-based: read the source before acting.</sub>", "",
+        _md_items(flagged, "✅ Nothing new above the flag threshold."),
+        f"<details><summary>👀 Watch: lower score or not clearly linked to the fund ({len(watch)})</summary>", "",
+        _md_items(watch, "None."), "</details>", "",
+        "---", "<sub>Research and alerting only. Not investment advice.</sub>", ""])
+
+
+def write_summary(flagged, watch, now, now_local, n_raw) -> None:
+    """Small JSON summary of the latest run for the stock scanner's dashboard."""
+    top = [{"score": i["score"], "severity": SEVERITY_LABEL[i["severity"]], "title": i["title"],
+            "link": i["link"], "source": i["source"], "entities": i["entities"],
+            "categories": list(i["categories"])} for i in flagged[:10]]
+    SUMMARY_FILE.write_text(json.dumps({
+        "run_utc": now.isoformat(timespec="minutes"), "run_local": f"{now_local:%Y-%m-%d %H:%M}",
+        "n_flagged": len(flagged), "n_high": sum(1 for f in flagged if f["severity"] == 3),
+        "n_watch": len(watch), "n_raw": n_raw, "top": top}, indent=1, ensure_ascii=False), encoding="utf-8")
+
+
 def build_markdown(flagged, watch, cfg, now_local) -> str:
     lines = [f"## Risk watch {now_local:%Y-%m-%d} · {cfg['fund']['name']}", "",
              f"**Flagged:** {len(flagged)} · **Watch:** {len(watch)}", ""]
@@ -348,13 +403,16 @@ def main(argv=None) -> int:
     classified.sort(key=lambda x: (x["score"], x["severity"], x["ts"] or now), reverse=True)
     flagged, watch = split_flagged(classified, cfg)
 
-    if not args.all:  # --all is a look-around run: don't touch the seen-store or the log
+    if not args.all:  # --all is a look-around run: don't touch the seen-store, log or summary
         save_seen(seen, cfg["news"]["seen_retention_days"], now)
         append_log(flagged + watch, now)
+        write_summary(flagged, watch, now, now_local, raw)
 
     html = build_html(flagged, watch, cfg, now_local, len(queries), raw)
     (REPORT_DIR / f"fund_watch_{now_local:%Y-%m-%d_%H%M}.html").write_text(html, encoding="utf-8")
     (REPORT_DIR / "fund_watch_latest.html").write_text(html, encoding="utf-8")
+    (REPORT_DIR / "fund_watch_latest.md").write_text(
+        build_page_md(flagged, watch, cfg, now_local, len(queries), raw), encoding="utf-8")
 
     md = build_markdown(flagged, watch, cfg, now_local)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
