@@ -56,10 +56,13 @@ earlier runs are shown. It's keyword-based, so expect some false positives, and 
   five repository secrets (see below). The stock scanner uses the same secrets, but its own
   e-mail stays off (`email.enabled: false` in the root `config.yaml`).
 
-## E-mail setup (Gmail, separate mailbox)
-1. Create a new Gmail account for the alerts.
+## E-mail setup (Gmail)
+1. Use a Gmail account as the sender. A separate account is safest; your own works too
+   (it can send to itself).
 2. In that account, turn on 2-Step Verification, then create an **app password**
    (Google Account → Security → App passwords). Copy the 16-character password.
+   An app password gives full access to that mailbox: revoke it there if the repository
+   ever becomes public or gets other collaborators.
 3. Add the repository secrets (*Settings → Secrets and variables → Actions*, or the `gh` CLI):
 
    | Secret | Value |
