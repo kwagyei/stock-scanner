@@ -38,6 +38,7 @@ def tmp_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(scanner, "PAPER_LOG", tmp_path / "data" / "paper_trades.csv")
     monkeypatch.setattr(scanner, "WEEKLY_LOG", tmp_path / "data" / "weekly_summary.csv")
     monkeypatch.setattr(scanner, "SCORES_LOG", tmp_path / "data" / "scores_log.csv")
+    monkeypatch.setattr(scanner, "RELEASES_LOG", tmp_path / "data" / "releases.csv")
     monkeypatch.setattr(scanner, "DASHBOARD", tmp_path / "DASHBOARD.md")
     monkeypatch.setattr(scanner, "FUND_SUMMARY", tmp_path / "fund_watch_latest.json")
     return tmp_path
@@ -368,17 +369,30 @@ def test_mfn_release_window_for_hype(cfg, hours_ago, expected_hype):
     assert scanner.score_stock(pm, nm, None, cfg)[2] is expected_hype
 
 
+MFN_BODY_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:x="https://mfn.se/schemas/rss-ns-x/"><channel>
+<item><title>A AB tecknar avtal</title><link>https://mfn.se/a/a-co/avtal</link>
+<pubDate>Tue, 06 Oct 2026 06:30:00 +0000</pubDate><x:language>sv</x:language>
+<x:content type="text">A AB har tecknat ett avtal.</x:content></item>
+<item><title>A AB signs agreement</title><link>https://mfn.se/a/a-co/agreement</link>
+<pubDate>Tue, 06 Oct 2026 06:30:00 +0000</pubDate><x:language>en</x:language>
+<x:content type="text">A AB has signed an agreement.</x:content></item>
+</channel></rss>"""
+
+
 def test_main_fetches_releases_only_with_slug(cfg, tmp_paths, monkeypatch):
     wl = tmp_paths / "watchlist.csv"
     wl.write_text("ticker,name,query,mfn_slug\nA.ST,A,A,a-co\nB.ST,B,B,\n")
     calls = []
     monkeypatch.setattr(scanner, "fetch_history", lambda t, p: flat(70))
     monkeypatch.setattr(scanner, "fetch_news", lambda q, c: [])
-    monkeypatch.setattr(scanner, "fetch_releases", lambda s, c: calls.append(s) or [])
+    monkeypatch.setattr(scanner.ns, "fetch_mfn_xml", lambda s, n: calls.append(s) or MFN_BODY_XML)
     monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: None)
     monkeypatch.setattr(scanner.time, "sleep", lambda s: None)
     scanner.main(["--no-email", "--watchlist", str(wl)])
     assert calls == ["a-co"]
+    stored = scanner.ns.load_releases(scanner.RELEASES_LOG)
+    assert list(stored["ticker"]) == ["A.ST"] and stored["source_type"].iloc[0] == "primary"
     scanner.main(["--no-email", "--no-news", "--watchlist", str(wl)])
     assert calls == ["a-co"]
 

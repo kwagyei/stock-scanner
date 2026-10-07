@@ -46,6 +46,7 @@ import yaml
 import yfinance as yf
 
 import evaluate as ev
+import news_sources as ns
 
 try:  # python.org macOS builds ship without CA certificates; use certifi's bundle
     import certifi
@@ -59,6 +60,7 @@ REPORT_DIR = ROOT / "reports"
 SIGNALS_LOG = DATA_DIR / "signals_log.csv"
 SCORES_LOG = DATA_DIR / "scores_log.csv"    # every stock, every run, with each score component
 PAPER_LOG = DATA_DIR / "paper_trades.csv"
+RELEASES_LOG = DATA_DIR / "releases.csv"     # primary + aggregator releases for the LLM experiment
 WEEKLY_LOG = DATA_DIR / "weekly_summary.csv"
 DASHBOARD = ROOT / "DASHBOARD.md"
 FUND_SUMMARY = ROOT / "fund-watch" / "data" / "fund_watch_latest.json"   # written by fund-watch/fund_watch.py
@@ -256,16 +258,17 @@ def filter_titles(items: list[dict], word: str) -> list[dict]:
     return [i for i in items if pat.search(i["title"])]
 
 
-def fetch_releases(slug: str, cfg: dict) -> list[dict]:
+def fetch_releases(slug: str, cfg: dict, raw: bytes | None = None) -> list[dict]:
     """Company releases from MFN's per-company feed (MFN- and Cision-distributed).
 
     Swedish and English versions of a release share a timestamp; keep one per
-    timestamp, preferring the configured news language.
+    timestamp, preferring the configured news language. `raw` is the feed already
+    fetched by news_sources (one request serves v0 and releases.csv).
     """
     limit = cfg["releases"]["mfn_limit"]
     url = f"https://mfn.se/all/a/{urllib.parse.quote(slug)}.rss?limit={limit}"
     try:
-        feed = feedparser.parse(url, agent=USER_AGENT)
+        feed = feedparser.parse(raw) if raw is not None else feedparser.parse(url, agent=USER_AGENT)
     except Exception as exc:
         print(f"[warn] release fetch failed for {slug}: {exc}", file=sys.stderr)
         return []
@@ -1705,6 +1708,8 @@ def main(argv=None) -> int:
         print(f"[warn] no benchmark data for {bench_symbol(cfg)}", file=sys.stderr)
 
     rows, missing, stale = [], [], []
+    release_rows, release_warnings = [], []
+    stored_releases = ns.load_releases(RELEASES_LOG)
     seen = last_logged_bars()
     for _, w in wl.iterrows():
         pm = price_metrics(histories.get(w["ticker"]), cfg)
@@ -1723,8 +1728,19 @@ def main(argv=None) -> int:
         if not args.no_news:
             items = filter_titles(fetch_news(w["query"], cfg), w["title_match"])
             time.sleep(pause)
+            release_rows += ns.aggregator_rows(items, w["ticker"], cfg.get("release_sources", []), now)
             if cfg.get("releases", {}).get("enabled") and w["mfn_slug"]:
-                releases = fetch_releases(w["mfn_slug"], cfg)
+                limit = cfg["releases"]["mfn_limit"]
+                raw = ns.fetch_mfn_xml(w["mfn_slug"], limit)
+                if raw is not None:
+                    releases = fetch_releases(w["mfn_slug"], cfg, raw)
+                    primary = ns.parse_mfn(raw, w["ticker"], now, cfg["llm"]["max_body_chars"],
+                                           cfg["news"]["language"])
+                    gap = ns.coverage_gaps(stored_releases, primary, w["ticker"], limit)
+                    if gap:
+                        print(f"[warn] {gap}", file=sys.stderr)
+                        release_warnings.append(gap)
+                    release_rows += primary
                 time.sleep(pause)
         nm = news_metrics(items, now, cfg, releases)
         mcap = fetch_market_cap(w["ticker"])
@@ -1738,6 +1754,10 @@ def main(argv=None) -> int:
         })
     rows.sort(key=lambda r: (r["score"], r["vol_ratio"] if not math.isnan(r["vol_ratio"]) else 0),
               reverse=True)
+    if release_rows:
+        stored_releases, added = ns.merge_releases(stored_releases, release_rows)
+        ns.save_releases(stored_releases, RELEASES_LOG)
+        print(f"[info] releases.csv: {len(added)} new release(s)")
 
     if cfg["paper_trading"]["enabled"]:
         paper = backfill_signal_moves(paper, histories)
