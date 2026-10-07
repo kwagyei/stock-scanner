@@ -8,6 +8,7 @@ on:
     - cron: "7 6 * * 1-5"     # 08:07 Stockholm summer / 07:07 winter
     - cron: "37 6 * * 1-5"    # backup: 08:37 summer / 07:37 winter, skipped if 08:07 ran
     - cron: "52 16 * * 1-5"   # 18:52 summer / 17:52 winter (after the 17:30 close)
+  pull_request:               # tests only (the tests job below); no scan, no commit
   workflow_dispatch:          # "Run workflow" button for manual runs
     inputs:
       weekly:
@@ -19,11 +20,25 @@ permissions:
   contents: write
 
 concurrency:
-  group: attention-scan
+  group: ${{ github.event_name == 'pull_request' && format('tests-{0}', github.ref) || 'attention-scan' }}
   cancel-in-progress: false
 
 jobs:
+  tests:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt pytest   # includes the Anthropic SDK
+      - name: Run tests (offline; feeds and the Anthropic API are mocked)
+        run: python -m pytest -q
+
   slot:
+    if: github.event_name != 'pull_request'
     # Morning runs only: skip if a scan already completed this morning (it leaves a "scan ..."
     # commit). The concurrency group makes a second run wait until the first has finished.
     runs-on: ubuntu-latest
@@ -55,7 +70,7 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - run: pip install -r requirements.txt pytest
+      - run: pip install -r requirements.txt pytest   # includes the Anthropic SDK
 
       - name: Run tests
         run: python -m pytest -q
@@ -67,6 +82,7 @@ jobs:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}   # LLM release scoring; read by the SDK only
         run: python scanner.py ${{ inputs.weekly && '--weekly' || '' }}
 
       - name: Upload digest
@@ -81,6 +97,7 @@ jobs:
           git config user.name "scanner-bot"
           git config user.email "scanner-bot@users.noreply.github.com"
           git add data/ reports/ DASHBOARD.md   # digest_*.html are gitignored
+          if [ -f prompts/used_prompts.json ]; then git add prompts/used_prompts.json; fi   # prompt fingerprints
           git diff --cached --quiet && exit 0
           git commit -m "scan $(date -u +%Y-%m-%d_%H%M)"
           git pull --rebase   # the fund risk watch commits to main too
