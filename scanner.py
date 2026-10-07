@@ -124,6 +124,18 @@ def fetch_history(ticker: str, period: str) -> pd.DataFrame:
     return hist
 
 
+def today_bar_complete(now_local: dt.datetime, cfg: dict) -> bool:
+    hh, mm = (int(x) for x in str(cfg.get("complete_bar_after", "18:00")).split(":"))
+    return (now_local.hour, now_local.minute) >= (hh, mm)
+
+
+def completed_bars(hist: pd.DataFrame, now_local: dt.datetime) -> pd.DataFrame:
+    """Drop today's bar (still forming during the session)."""
+    if hist is None or hist.empty:
+        return hist
+    return hist[hist.index < pd.Timestamp(now_local.date())]
+
+
 def fetch_market_cap(ticker: str) -> float | None:
     try:
         mc = getattr(yf.Ticker(ticker).fast_info, "market_cap", None)
@@ -1414,6 +1426,11 @@ def main(argv=None) -> int:
     print(f"[info] fetching prices for {len(tickers)} tickers …")
     histories = {t: fetch_history(t, cfg["history_period"]) for t in tickers}
     bench = fetch_history(cfg["benchmark"], cfg["history_period"])
+    if not today_bar_complete(now_local, cfg):
+        print(f"[info] before {cfg.get('complete_bar_after', '18:00')} Stockholm time: "
+              "ignoring today's still-forming daily bar")
+        histories = {t: completed_bars(h, now_local) for t, h in histories.items()}
+        bench = completed_bars(bench, now_local)
     if bench.empty:
         print(f"[warn] no benchmark data for {cfg['benchmark']}", file=sys.stderr)
 

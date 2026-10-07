@@ -1,6 +1,9 @@
 # Benchmark for paper-trade comparison (Yahoo symbol). ^OMX = OMX Stockholm 30.
 benchmark: "^OMX"
 history_period: "6mo"
+# Daily bars are only complete after the close (17:30). Runs before this Stockholm time ignore
+# today's still-forming bar for scoring and paper trades, and use yesterday's instead.
+complete_bar_after: "18:00"
 volume_baseline_days: 60
 
 thresholds:

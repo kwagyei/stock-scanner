@@ -530,6 +530,7 @@ def test_main_weekly_writes_report_and_one_row_per_week(cfg, tmp_paths, monkeypa
     monkeypatch.setattr(scanner, "fetch_news", lambda q, c: [])
     monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: 1e9)
     monkeypatch.setattr(scanner.time, "sleep", lambda s: None)
+    monkeypatch.setattr(scanner, "today_bar_complete", lambda now, cfg: True)   # as if after the close
     sent = []
     monkeypatch.setattr(scanner, "send_email", lambda html, subject: sent.append(subject))
 
@@ -1023,3 +1024,35 @@ def test_stale_bar_is_skipped_not_backdated(cfg, tmp_paths, monkeypatch):
     assert new.loc["HOT.ST", "status"] == "stale price data"
     assert new.loc["OK.ST", "status"] == "ok"                    # same date as before is fine
     assert "HOT.ST (stale)" in scanner.DASHBOARD.read_text()
+
+
+@pytest.mark.parametrize("local_hm,uses_today", [((12, 45), False), ((17, 59), False), ((18, 0), True), ((8, 7), False)])
+def test_todays_forming_bar_is_ignored_before_cutoff(cfg, tmp_paths, monkeypatch, local_hm, uses_today):
+    today = dt.date(2026, 10, 7)
+    idx = pd.bdate_range(end=today, periods=70)
+    h = pd.DataFrame([(100, 100, 100, 100, 1000)] * 70, index=idx, columns=["Open", "High", "Low", "Close", "Volume"])
+    h.iloc[-1] = (100, 112, 100, 111, 6000)                     # today's (forming) bar would score 4
+    wl = tmp_paths / "watchlist.csv"
+    wl.write_text("ticker,name,query\nX.ST,X,X\n")
+    monkeypatch.setattr(scanner, "fetch_history", lambda t, p: h)
+    monkeypatch.setattr(scanner, "fetch_news", lambda q, c: [])
+    monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: 1e9)
+    monkeypatch.setattr(scanner.time, "sleep", lambda s: None)
+    local = dt.datetime(2026, 10, 7, *local_hm, tzinfo=dt.timezone(dt.timedelta(hours=2)))
+    monkeypatch.setattr(scanner, "_now", lambda: local.astimezone(dt.timezone.utc))
+    scanner.main(["--no-email", "--watchlist", str(wl)])
+    log = pd.read_csv(scanner.SCORES_LOG, dtype=str).iloc[0]
+    assert (log["bar_date"] == "2026-10-07") is uses_today
+    traded = scanner.PAPER_LOG.exists() and "X.ST" in scanner.PAPER_LOG.read_text()
+    assert traded is uses_today
+
+
+def test_completed_bars_keeps_entry_day_open_for_pending_trades(cfg):
+    # A pending trade still opens at today's open once today's bar counts (evening run).
+    h = bars([(100, 100, 100, 100, 1), (102, 104, 101, 103, 1)], start="2026-10-06")
+    midday = scanner.completed_bars(h, dt.datetime(2026, 10, 7, 12, 0))
+    assert list(midday.index.date) == [dt.date(2026, 10, 6)]
+    p = scanner.update_paper(pending_trade(signal_date="2026-10-06"), {"X.ST": midday}, midday, cfg)
+    assert p.iloc[0]["status"] == "pending"
+    p = scanner.update_paper(p, {"X.ST": h}, h, cfg)
+    assert (p.iloc[0]["status"], p.iloc[0]["entry_price"]) == ("open", "102.0000")
