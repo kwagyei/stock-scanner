@@ -40,6 +40,7 @@ def tmp_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(scanner, "SCORES_LOG", tmp_path / "data" / "scores_log.csv")
     monkeypatch.setattr(scanner, "RELEASES_LOG", tmp_path / "data" / "releases.csv")
     monkeypatch.setattr(scanner, "LLM_SCORES_LOG", tmp_path / "data" / "llm_scores.csv")
+    monkeypatch.setattr(scanner, "LLM_EVENTS_LOG", tmp_path / "data" / "llm_events.csv")
     monkeypatch.setattr(scanner.ls, "PROMPT_REGISTRY", tmp_path / "used_prompts.json")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setattr(scanner, "DASHBOARD", tmp_path / "DASHBOARD.md")
@@ -1377,6 +1378,13 @@ def test_main_end_to_end_llm_blocks_v1_but_not_v0b(cfg, tmp_paths, monkeypatch):
     r = sig.iloc[0]
     assert (r["score_v0"], r["score_v0b"], r["score_v1"], r["block_buy"]) == ("6", "6", "4", "True")
     assert r["llm_prompt_version"] == "v1" and r["block_if_direction_lte"] == "-2" and r["release_ids"]
+    html = (scanner.REPORT_DIR / "latest.html").read_text()
+    assert "LLM release scoring" in html and "Profit warning well below expectations." in html
+    assert "Blocked v1 buys · 1" in html and "v1_v1" in html
+    evm = (scanner.REPORT_DIR / "evaluation.md").read_text()
+    assert "## LLM experiment: v0 / v0b / v1" in evm and "| `v0` | `v0b` | `v1_v1` |" in evm
+    events = pd.read_csv(scanner.LLM_EVENTS_LOG, dtype=str).fillna("")
+    assert list(events["release_id"]) == list(scores["release_id"]) and events.iloc[0]["entry_date"] == ""
     # a second run doesn't call the LLM again
     scanner.main(["--no-email", "--watchlist", str(wl)])
     assert len(calls) == 1
@@ -1401,3 +1409,19 @@ def test_spread_recorded_on_new_trades(cfg, tmp_paths):
     assert paper.iloc[0]["spread_pct"] == "1.667"
     paper = scanner.add_paper_signals(paper, [strat_row("B.ST")], cfg, "v2", strategy="v0b")
     assert paper.iloc[1]["spread_pct"] == ""
+
+
+def test_llm_failure_becomes_a_report_warning(cfg, tmp_paths, monkeypatch):
+    scanner.DATA_DIR.mkdir()
+    def boom(*a, **k):
+        raise scanner.ls.PromptChanged("prompt v1 changed after it was used live")
+    monkeypatch.setattr(scanner.ls, "run", boom)
+    rel = scanner.ns.load_releases(scanner.RELEASES_LOG)
+    rel.loc[0] = ["r", "X.ST", "mfn", "primary", "2026-10-09T07:00:00Z", "t", "u", "sv", "", ""]
+    warnings = []
+    scores, new = scanner.score_releases(rel, pd.DataFrame({"ticker": ["X.ST"], "name": ["X"]}), cfg, warnings)
+    assert new == [] and warnings == ["LLM scoring failed: prompt v1 changed after it was used live"]
+    html = scanner.build_llm_html([], [], rel, None, warnings, cfg)
+    assert "LLM scoring failed" in html and "class=warn" in html
+    md = scanner.build_evaluation_md(scanner.ev.evaluate(None), None, cfg, NOW, {"strategies": {}, "events": scanner.ev.event_study(None)}, warnings)
+    assert "[!WARNING]" in md and "LLM scoring failed" in md

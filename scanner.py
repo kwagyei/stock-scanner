@@ -64,6 +64,7 @@ SCORES_LOG = DATA_DIR / "scores_log.csv"    # every stock, every run, with each 
 PAPER_LOG = DATA_DIR / "paper_trades.csv"
 RELEASES_LOG = DATA_DIR / "releases.csv"     # primary + aggregator releases for the LLM experiment
 LLM_SCORES_LOG = DATA_DIR / "llm_scores.csv"  # one row per release and prompt version
+LLM_EVENTS_LOG = DATA_DIR / "llm_events.csv"  # returns after each scored release (event study)
 WEEKLY_LOG = DATA_DIR / "weekly_summary.csv"
 DASHBOARD = ROOT / "DASHBOARD.md"
 FUND_SUMMARY = ROOT / "fund-watch" / "data" / "fund_watch_latest.json"   # written by fund-watch/fund_watch.py
@@ -759,7 +760,60 @@ def _fmt_pct(x, digits=1):
     return "–" if x is None or (isinstance(x, float) and math.isnan(x)) else f"{x:+.{digits}f}%"
 
 
-def build_html(rows, missing, paper, summary, cfg, now_local, eval_line=None) -> str:
+def build_llm_html(rows, new_scores: list[dict], releases: pd.DataFrame, cmp: dict | None,
+                   warnings: list[str], cfg: dict) -> str:
+    """Digest section for the LLM experiment: this run's scored releases, blocked buys,
+    the v0 / v0b / v1 summary and any problems."""
+    if not cfg.get("llm"):
+        return ""
+    titles = dict(zip(releases["release_id"], releases["title"])) if not releases.empty else {}
+    urls = dict(zip(releases["release_id"], releases["url"])) if not releases.empty else {}
+    def scored_row(r):
+        rid = r["release_id"]
+        title = f'<a href="{escape(urls.get(rid, ""))}">{escape(titles.get(rid, rid))}</a>'
+        if r["status"] != "ok":
+            return (f"<tr><td>{escape(r['ticker'])}</td><td>{escape(str(r['published_at'])[:16])}</td><td>{title}</td>"
+                    f"<td colspan=5 class=warn>{escape(r['status'])} {escape(str(r.get('error') or ''))}</td></tr>")
+        return (f"<tr><td>{escape(r['ticker'])}</td><td>{escape(str(r['published_at'])[:16])}</td><td>{title}</td>"
+                f"<td>{escape(str(r['event_type']))}</td><td class=n>{int(r['direction']):+d}</td>"
+                f"<td class=n>{r['surprise']}</td><td>{'yes' if str(r['material']).lower() == 'true' else 'no'}</td>"
+                f"<td><small>{escape(str(r['rationale']))}</small></td></tr>")
+    scored = "\n".join(scored_row(r) for r in new_scores) or "<tr><td colspan=8>No releases scored this run.</td></tr>"
+    blocked = [r for r in rows if r.get("block_buy")]
+    blocked_html = "\n".join(
+        f"<tr><td><b>{escape(r['name'])}</b> <small>{escape(r['ticker'])}</small></td><td class=n>{r['score_v1']}</td>"
+        f"<td>{escape('; '.join(titles.get(i, i) for i in r['llm_release_ids']))}</td></tr>" for r in blocked
+    ) or "<tr><td colspan=3>None.</td></tr>"
+    summary = ""
+    if cmp:
+        head = "".join(f"<th>{escape(n)}</th>" for n in cmp["strategies"])
+        def line(label, f):
+            return f"<tr><td>{label}</td>" + "".join(f"<td class=n>{f(r)}</td>" for r in cmp["strategies"].values()) + "</tr>"
+        summary = (f"<div class=box><table><tr><th></th>{head}</tr>"
+                   + line("Verdict", lambda r: f"<b>{r['verdict']}</b>")
+                   + line("Closed trades", lambda r: f"{r['n']} / {r['min_trades']}")
+                   + line("Open / pending", lambda r: r.get("n_open", 0))
+                   + line("Avg vs small caps", lambda r: _fmt_pct(r.get("avg_excess")))
+                   + line("Avg vs OMXS30", lambda r: _fmt_pct(r.get("avg_excess_secondary")))
+                   + "</table></div>"
+                   f"<p><small>Event study: <b>{cmp['events']['verdict']}</b> · {cmp['events']['n']} of "
+                   f"{cmp['events']['min_events']} events with a {cmp['events']['focus']}-day outcome. "
+                   "Full report: <code>python evaluate.py --compare</code>.</small></p>")
+    warn = ("<p class=warn>" + "<br>".join(escape(w) for w in warnings) + "</p>") if warnings else ""
+    return f"""<h2>LLM release scoring · {cfg['llm']['model']} · prompt {cfg['llm']['prompt_version']}</h2>
+{warn}
+<p><small>Releases scored this run (primary MFN/Cision releases only).</small></p>
+<div class=box><table><tr><th>Stock</th><th>Published (UTC)</th><th>Release</th><th>Type</th><th>Dir</th>
+<th>Surprise</th><th>Material</th><th>Rationale</th></tr>{scored}</table></div>
+<h3>Blocked v1 buys · {len(blocked)}</h3>
+<p><small>A material release with direction ≤ {cfg['llm']['block_if_direction_lte']} blocks the v1 buy.</small></p>
+<div class=box><table><tr><th>Stock</th><th>v1 score</th><th>Release</th></tr>{blocked_html}</table></div>
+<h3>Strategies v0 / v0b / v1</h3>
+{summary}
+"""
+
+
+def build_html(rows, missing, paper, summary, cfg, now_local, eval_line=None, llm_html: str = "") -> str:
     alert_min = cfg["alert_min_score"]
     alerts = [r for r in rows if r["score"] >= alert_min]
     hype = [r for r in rows if r["hype"]]
@@ -841,6 +895,7 @@ def build_html(rows, missing, paper, summary, cfg, now_local, eval_line=None) ->
 <div class=box><table>{phead}{paper_rows(paper_open, False)}</table></div>
 <p><small>Last closed trades</small></p>
 <div class=box><table>{phead}{paper_rows(paper_closed, True)}</table></div>
+{llm_html}
 <h2>Full watchlist</h2>
 <div class=box><table>{head}{stock_rows(rows)}</table></div>
 </body></html>"""
@@ -1582,12 +1637,20 @@ def build_paper_md(paper, cfg, now_local, eval_res) -> str:
     return "\n".join(out + [FOOTER])
 
 
-def build_evaluation_md(res, pe_res, cfg, now_local) -> str:
+def build_evaluation_md(res, pe_res, cfg, now_local, cmp: dict | None = None, warnings=()) -> str:
     out = ["# ⚖️ Evaluation", "", _nav("reports/evaluation.md"), _updated(now_local),
-           f"<sub>Do the closed paper trades beat {bench_symbol(cfg)} (OMX Stockholm 30) over the same days, "
-           f"after {res['cost']:.1f}% cost per trade, by enough that it's unlikely to be luck? "
-           "[How to read this](../README.md#judging-the-results-evaluatepy)</sub>", "",
+           f"<sub>Do the closed paper trades beat the Stockholm small-cap index over the same days "
+           f"(OMX Stockholm 30 shown too), after costs (about {res['cost']:.1f}% per trade), by enough that it's "
+           "unlikely to be luck? [How to read this](../README.md#judging-the-results-evaluatepy)</sub>", "",
            "## Main rules", "", _eval_callout(res), ev.format_markdown(res)]
+    if cmp is not None:
+        out += ["## LLM experiment: v0 / v0b / v1", "",
+                "<sub>v0 = the rules above; v0b = only MFN/Cision releases count; v1 = v0b with LLM points "
+                "and blocking. Same exits and costs for all three; judged against small caps. "
+                "[How to read this](../README.md#llm-release-scoring)</sub>", ""]
+        if warnings:
+            out += [_callout("WARNING", "Problems in the last run: " + "; ".join(_md(w) for w in warnings)), ""]
+        out.append(ev.format_compare_markdown(cmp))
     if pe_res is not None:
         out += ["## Partial-exit variant", "",
                 "<details><summary>Same evaluation for the partial-exit variant</summary>", "",
@@ -1670,23 +1733,64 @@ def build_weekly_md(outcomes, table, wp, cfg, now_local, here: str | None = None
 
 # --------------------------------------------------------------------------- main
 
+def eval_settings(cfg: dict) -> dict:
+    """evaluate.py's settings from this config: costs.* per side, eval.* for the experiment."""
+    costs = {**ev.COST_DEFAULTS, **(cfg.get("costs") or {})}
+    e = cfg.get("eval") or {}
+    return {**ev.DEFAULTS, "digest_after_hour": 12, **(cfg.get("evaluation") or {}),
+            "costs": costs, "cost_pct": ev.round_trip(costs),
+            "min_trades": e.get("min_trades", (cfg.get("evaluation") or {}).get("min_trades", ev.DEFAULTS["min_trades"])),
+            "min_events": e.get("min_events", ev.EVENT_DEFAULTS["min_events"]),
+            "horizons": e.get("horizons", ev.EVENT_DEFAULTS["horizons"]),
+            "move_threshold": cfg["thresholds"]["price_move_1d"]}
+
+
+def comparison(cfg: dict) -> dict | None:
+    """v0 / v0b / v1 verdicts and the event study, from the logs on disk (None without llm config)."""
+    if not cfg.get("llm"):
+        return None
+    events = pd.read_csv(LLM_EVENTS_LOG, dtype=str, keep_default_na=False) if LLM_EVENTS_LOG.exists() else None
+    return ev.compare(load_paper(), events, st.strategy_labels(cfg), eval_settings(cfg))
+
+
+def update_events(releases: pd.DataFrame, usable: pd.DataFrame, histories: dict, bench_primary: pd.DataFrame,
+                  cfg: dict) -> pd.DataFrame:
+    """Recompute llm_events.csv: one row per usable LLM score; a release whose stock has no price
+    data this run keeps its previous row."""
+    ec = eval_settings(cfg)
+    cols = ev.event_columns(ec["horizons"])
+    old = pd.read_csv(LLM_EVENTS_LOG, dtype=str, keep_default_na=False) if LLM_EVENTS_LOG.exists() else pd.DataFrame(columns=cols)
+    if usable.empty:
+        return old
+    meta = releases[["release_id", "published_at"]].drop_duplicates("release_id")
+    scored = usable.drop(columns=["published_at"]).merge(meta, on="release_id", how="left")
+    have = scored["ticker"].map(lambda t: t in histories and histories[t] is not None and not histories[t].empty)
+    new = ev.event_outcomes(scored[have], histories, bench_primary, ec["horizons"], ec["cost_pct"])
+    keep = old[old["release_id"].isin(set(scored.loc[~have, "release_id"]))]
+    out = pd.concat([keep.astype(str), new.astype(str).replace("nan", "")], ignore_index=True).reindex(columns=cols)
+    out = out.sort_values("published_at", kind="stable")
+    out.to_csv(LLM_EVENTS_LOG, index=False)
+    return out
+
+
 def evaluations(paper: pd.DataFrame, cfg: dict):
     """(evaluation settings, main-rules result, partial-exit result or None), via evaluate.py."""
-    ec = {**ev.DEFAULTS, "digest_after_hour": 12, **(cfg.get("evaluation") or {})}
+    ec = eval_settings(cfg)
     args = (ec["cost_pct"], ec["stake"], ec["min_trades"])
     kw = {"move_threshold": cfg["thresholds"]["price_move_1d"]}
-    eval_res = ev.evaluate(ev.closed_trades(paper), *args, **kw)
-    pe_res = (ev.evaluate(ev.closed_trades(paper, variant=True), *args, **kw)
+    eval_res = ev.evaluate(ev.closed_trades(paper, costs=ec["costs"]), *args, **kw)
+    pe_res = (ev.evaluate(ev.closed_trades(paper, variant=True, costs=ec["costs"]), *args, **kw)
               if (cfg["paper_trading"].get("partial_exit") or {}).get("enabled") else None)
     return ec, eval_res, pe_res
 
 
-def write_pages(rows, missing, paper, cfg, now_local) -> None:
+def write_pages(rows, missing, paper, cfg, now_local, warnings=()) -> None:
     """The Markdown pages GitHub shows: dashboard, today, paper trades, evaluation."""
     _, eval_res, pe_res = evaluations(paper, cfg)
     pages = {REPORT_DIR / "latest.md": build_digest_md(rows, missing, cfg, now_local),
              REPORT_DIR / "paper_trades.md": build_paper_md(paper, cfg, now_local, eval_res),
-             REPORT_DIR / "evaluation.md": build_evaluation_md(eval_res, pe_res, cfg, now_local),
+             REPORT_DIR / "evaluation.md": build_evaluation_md(eval_res, pe_res, cfg, now_local,
+                                                               comparison(cfg), warnings),
              DASHBOARD: build_dashboard(rows, missing, paper, cfg, now_local, eval_res)}
     for path, text in pages.items():
         path.write_text(text, encoding="utf-8")
@@ -1891,7 +1995,10 @@ def main(argv=None) -> int:
         for strategy in st.strategy_labels(cfg) if cfg.get("llm") else [st.V0]:
             paper = add_paper_signals(paper, rows, cfg, watchlist_version(Path(args.watchlist)), strategy)
         paper.to_csv(PAPER_LOG, index=False)
-    all_books, paper = paper, book(paper)          # v0's reports below use the v0 book only
+    if cfg.get("llm"):
+        update_events(stored_releases, usable, histories, bench_primary, cfg)
+    cmp = comparison(cfg)
+    paper = book(paper)          # v0's reports below use the v0 book only
     summary = paper_summary(paper)
     ec, eval_res, pe_res = evaluations(paper, cfg)
     eval_line = ev.one_line(eval_res)
@@ -1912,7 +2019,8 @@ def main(argv=None) -> int:
                                           news_checked=not args.no_news, stale=stale, cfg=cfg))
     missing = missing + [f"{t} (stale)" for t in stale]   # shown in the reports' warnings
 
-    html = build_html(rows, missing, paper, summary, cfg, now_local, digest_eval)
+    html = build_html(rows, missing, paper, summary, cfg, now_local, digest_eval,
+                      build_llm_html(rows, llm_new, stored_releases, cmp, run_warnings, cfg))
     stamp = f"{now_local:%Y-%m-%d_%H%M}"
     (REPORT_DIR / f"digest_{stamp}.html").write_text(html, encoding="utf-8")
     (REPORT_DIR / "latest.html").write_text(html, encoding="utf-8")
@@ -1932,7 +2040,7 @@ def main(argv=None) -> int:
                 fh.write("\n" + weekly_md)
         print(weekly_md)
 
-    write_pages(rows, missing, paper, cfg, now_local)
+    write_pages(rows, missing, paper, cfg, now_local, run_warnings)
 
     n_alerts = sum(r["score"] >= cfg["alert_min_score"] for r in rows)
     email_cfg = cfg.get("email", {})

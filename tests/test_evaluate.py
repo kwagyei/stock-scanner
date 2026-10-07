@@ -56,7 +56,7 @@ def test_cost_and_stake_flags(tmp_path):
 
 def test_pass(tmp_path):
     trades = [(1 + 1 + 3 + (2 if i % 2 else -2), "1", "time", d) for i, d in enumerate(dates(40))]
-    r = ev.evaluate(ev.load_trades(log(tmp_path, trades)))
+    r = ev.evaluate(ev.load_trades(log(tmp_path, trades)), cost=1.0)
     assert r["verdict"] == "PASS" and all(r["checks"].values())
     assert r["avg_excess"] == pytest.approx(3.0) and r["t_stat"] > 2 and r["p_positive"] == 1.0
     assert ev.one_line(r).startswith("Evaluation: PASS – 40 trades, +3.0% vs index")
@@ -65,7 +65,7 @@ def test_pass(tmp_path):
 def test_fail_only_on_t_statistic(tmp_path):
     # excess alternates +6 / -4.5: positive on average and without the best trade, but noisy
     trades = [((7 if i % 2 else -3.5), "0", "time", d) for i, d in enumerate(dates(40))]
-    r = ev.evaluate(ev.load_trades(log(tmp_path, trades)))
+    r = ev.evaluate(ev.load_trades(log(tmp_path, trades)), cost=1.0)
     assert r["avg_excess"] == pytest.approx(0.75) and r["excess_wo_best"] > 0
     assert 0 < r["t_stat"] < 2
     assert [k for k, ok in r["checks"].items() if not ok] == ["unlikely to be luck (t > 2)"]
@@ -74,7 +74,7 @@ def test_fail_only_on_t_statistic(tmp_path):
 
 def test_fail_one_lucky_trade(tmp_path):
     trades = [(101, "0", "target", "2026-03-01")] + [(0, "0", "stop", d) for d in dates(29)]
-    r = ev.evaluate(ev.load_trades(log(tmp_path, trades)))
+    r = ev.evaluate(ev.load_trades(log(tmp_path, trades)), cost=1.0)
     assert r["avg_excess"] > 0 and r["excess_wo_best"] == pytest.approx(-1.0)
     assert r["verdict"] == "FAIL"
 
@@ -101,7 +101,7 @@ def test_zero_closed(tmp_path):
 
 
 def test_one_closed_trade(tmp_path):
-    r = ev.evaluate(ev.load_trades(log(tmp_path, [(20, "", "target", "2026-01-01")])), min_trades=1)
+    r = ev.evaluate(ev.load_trades(log(tmp_path, [(20, "", "target", "2026-01-01")])), min_trades=1, cost=1.0)
     assert r["t_stat"] is None and r["p_positive"] is None and r["excess_wo_best"] is None
     assert r["verdict"] == "FAIL"                     # can't show it isn't luck with one trade
     report = ev.format_report(r)
@@ -111,7 +111,7 @@ def test_one_closed_trade(tmp_path):
 def test_missing_bench_column_counts_as_zero(tmp_path):
     path = tmp_path / "p.csv"
     path.write_text("ticker,status,return_pct,exit_reason,exit_date\nA,closed,5,time,2026-01-01\n")
-    r = ev.evaluate(ev.load_trades(path), min_trades=1)
+    r = ev.evaluate(ev.load_trades(path), min_trades=1, cost=1.0)
     assert r["avg_bench"] == 0 and r["avg_excess"] == pytest.approx(4.0)
 
 
@@ -140,7 +140,7 @@ def test_cli(tmp_path, capsys):
 
 
 def test_config_defaults_match_spec():
-    assert ev.defaults_from_config()["cost_pct"] == 1.0
+    assert ev.defaults_from_config()["cost_pct"] == pytest.approx(1.2)   # 2 x (0.1 + 0.5), costs.* in config
     assert ev.defaults_from_config()["stake"] == 0.10
     assert ev.defaults_from_config()["min_trades"] == 30
 
@@ -215,3 +215,125 @@ def test_cli_direction_filter(tmp_path, capsys):
     ev.main(["--file", str(_moves_log(tmp_path)), "--direction", "drop", "--min-trades", "1"])
     out = capsys.readouterr().out
     assert "signal day: ▼ Drop" in out and "Per trade, after costs (2 closed trades)" in out
+
+
+# --------------------------------------------------------------------------- costs, benchmarks, strategies
+
+def test_trade_costs_use_logged_spread_else_config():
+    c = ev.trade_costs(pd.Series(["1.0", "", "0.4"]), {"commission_pct": 0.1, "half_spread_pct": 0.5})
+    assert list(c) == pytest.approx([1.2, 1.2, 0.6])
+    assert ev.round_trip({"commission_pct": 0.1, "half_spread_pct": 0.5}) == pytest.approx(1.2)
+
+
+def _books():
+    rows = []
+    for strat, rets in (("", [10, 4]), ("v0b", [6, -2]), ("v1_v1", [8, 8])):
+        for i, r in enumerate(rets):
+            rows.append({"ticker": f"T{i}", "status": "closed", "return_pct": str(r), "bench_return_pct": "1",
+                         "bench_primary_return_pct": "2" if i == 0 else "", "exit_reason": "time",
+                         "exit_date": f"2026-11-0{i + 1}", "signal_move": "0", "strategy": strat,
+                         "spread_pct": "0.8" if i == 0 else ""})
+    return pd.DataFrame(rows)
+
+
+def test_closed_trades_per_strategy_primary_benchmark_and_costs():
+    t = ev.closed_trades(_books(), strategy="v0", costs={"commission_pct": 0.1, "half_spread_pct": 0.5})
+    assert list(t["ret"]) == [10, 4]                                  # blank strategy = v0
+    assert list(t["bench"]) == [2, 1]                                 # primary, else secondary
+    assert list(t["bench_secondary"]) == [1, 1]
+    assert list(t["cost"]) == pytest.approx([1.0, 1.2])               # 0.2 + spread 0.8 / 0.2 + 1.0
+    r = ev.evaluate(t, min_trades=2)
+    assert r["cost"] == pytest.approx(1.1)
+    assert r["avg_excess"] == pytest.approx(((10 - 1.0 - 2) + (4 - 1.2 - 1)) / 2)
+    assert r["avg_excess_secondary"] == pytest.approx(((10 - 1.0 - 1) + (4 - 1.2 - 1)) / 2)
+
+
+def test_compare_gives_one_verdict_per_strategy():
+    d = {**ev.defaults_from_config(), "min_trades": 2}
+    cmp = ev.compare(_books(), None, ["v0", "v0b", "v1_v1"], d)
+    assert {s: r["n"] for s, r in cmp["strategies"].items()} == {"v0": 2, "v0b": 2, "v1_v1": 2}
+    assert cmp["strategies"]["v1_v1"]["avg_net"] > cmp["strategies"]["v0b"]["avg_net"]
+    md = ev.format_compare_markdown(cmp)
+    assert "| `v0` | `v0b` | `v1_v1` |" in md and "Avg vs small caps" in md and "No scored releases yet" in md
+    few = ev.compare(_books(), None, ["v0", "v0b", "v1_v1"], {**d, "min_trades": 30})
+    assert {r["verdict"] for r in few["strategies"].values()} == {"NOT YET"}
+
+
+def test_strategy_labels_from_config_and_log():
+    assert ev.strategy_labels(None, "v1") == ["v0", "v0b", "v1_v1"]
+    paper = pd.DataFrame({"strategy": ["", "v0", "v1_v0x"]})
+    assert ev.strategy_labels(paper, "v1") == ["v0", "v0b", "v1_v1", "v1_v0x"]
+
+
+def test_cli_strategy_and_compare(tmp_path, capsys):
+    path = tmp_path / "p.csv"
+    _books().to_csv(path, index=False)
+    ev.main(["--file", str(path), "--strategy", "v0b", "--min-trades", "2"])
+    assert "strategy v0b" in capsys.readouterr().out
+    ev.main(["--file", str(path), "--compare", "--events", str(tmp_path / "none.csv")])
+    assert "| Verdict | **NOT YET** |" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- event study
+
+def _prices(closes, start="2026-10-12"):
+    idx = pd.bdate_range(start, periods=len(closes))
+    return pd.DataFrame({"Open": [100.0] * len(closes), "Close": closes}, index=idx)
+
+
+def test_event_outcomes_on_known_prices():
+    # Mon 12 Oct onwards; release Mon 08:00 Stockholm (06:00 UTC) -> entry Mon open
+    h = {"A": _prices([101, 102, 103, 104, 110, 111])}
+    bench = _prices([100, 100, 100, 100, 101, 101])
+    scored = pd.DataFrame([{"release_id": "r", "ticker": "A", "published_at": "2026-10-12T06:00:00Z",
+                            "event_type": "report", "direction": "2", "surprise": "1", "material": "True",
+                            "confidence": "0.7"}])
+    out = ev.event_outcomes(scored, h, bench, [1, 5, 20], cost=1.2)
+    r = out.iloc[0]
+    assert r["entry_date"] == "2026-10-12"
+    assert r["ret_1d"] == pytest.approx(1.0) and r["abn_1d"] == pytest.approx(1.0 - 0 - 1.2)
+    assert r["ret_5d"] == pytest.approx(10.0) and r["bench_5d"] == pytest.approx(1.0)
+    assert r["abn_5d"] == pytest.approx(10.0 - 1.0 - 1.2)
+    assert pd.isna(r["abn_20d"])                                           # not reached yet
+    late = scored.assign(published_at="2026-10-12T08:00:00Z")              # 10:00 -> Tue open
+    assert ev.event_outcomes(late, h, bench, [1], 0).iloc[0]["entry_date"] == "2026-10-13"
+
+
+def _events(spec):
+    """spec: list of (direction, abn_5d); published in order."""
+    rows = []
+    for i, (d, a) in enumerate(spec):
+        rows.append({"release_id": f"r{i}", "ticker": "A", "published_at": f"2026-10-{12 + i // 10:02d}T0{i % 10}:00:00Z",
+                     "entry_date": "", "event_type": "report" if d >= 0 else "guidance", "direction": str(d),
+                     "surprise": "1", "material": "True", "confidence": "0.5",
+                     "ret_1d": "", "bench_1d": "", "abn_1d": "", "ret_5d": "", "bench_5d": "", "abn_5d": str(a),
+                     "ret_20d": "", "bench_20d": "", "abn_20d": ""})
+    return pd.DataFrame(rows)
+
+
+def test_event_study_groups_and_checks():
+    spec = [(-2, -6), (-1, -2), (0, 0), (1, 2), (2, 6)] * 4
+    spec = [(d, a + (i % 3) * 0.5) for i, (d, a) in enumerate(spec)]   # some noise
+    res = ev.event_study(_events(spec), horizons=[1, 5, 20], min_events=10)
+    g = res["groups"]["direction"]
+    assert list(g) == ["-2", "-1", "0", "1", "2"]
+    assert g["2"][5]["n"] == 4 and g["2"][5]["hit_rate"] == 100.0
+    assert g["2"][5]["mean"] == pytest.approx(pd.Series([6.5, 6, 7, 6.5]).mean())
+    assert res["monotonic"] and res["spread"] > 0
+    assert res["spread_first_half"] > 0 and res["spread_second_half"] > 0 and res["spread_wo_best"] > 0
+    assert res["verdict"] == "PASS" and set(res["groups"]["event_type"]) == {"guidance", "report"}
+
+
+def test_event_study_not_yet_and_fail():
+    spec = [(-2, -6), (2, 6)] * 3
+    assert ev.event_study(_events(spec), min_events=300)["verdict"] == "NOT YET"
+    backwards = [(-2, 5), (-1, 2), (1, -2), (2, -5)] * 3
+    res = ev.event_study(_events(backwards), min_events=4)
+    assert res["verdict"] == "FAIL" and not res["monotonic"] and res["spread"] < 0
+    assert ev.event_study(None)["verdict"] == "NOT YET"
+
+
+def test_event_study_one_lucky_event_fails_without_best():
+    spec = [(1, -1), (1, -1), (1, 30), (-1, 0), (-1, 0), (-1, 0)]
+    res = ev.event_study(_events(spec), min_events=6)
+    assert res["spread"] > 0 and res["spread_wo_best"] < 0 and res["verdict"] == "FAIL"
