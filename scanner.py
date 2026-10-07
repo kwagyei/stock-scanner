@@ -46,6 +46,7 @@ import yaml
 import yfinance as yf
 
 import evaluate as ev
+import llm_score as ls
 import news_sources as ns
 
 try:  # python.org macOS builds ship without CA certificates; use certifi's bundle
@@ -61,6 +62,7 @@ SIGNALS_LOG = DATA_DIR / "signals_log.csv"
 SCORES_LOG = DATA_DIR / "scores_log.csv"    # every stock, every run, with each score component
 PAPER_LOG = DATA_DIR / "paper_trades.csv"
 RELEASES_LOG = DATA_DIR / "releases.csv"     # primary + aggregator releases for the LLM experiment
+LLM_SCORES_LOG = DATA_DIR / "llm_scores.csv"  # one row per release and prompt version
 WEEKLY_LOG = DATA_DIR / "weekly_summary.csv"
 DASHBOARD = ROOT / "DASHBOARD.md"
 FUND_SUMMARY = ROOT / "fund-watch" / "data" / "fund_watch_latest.json"   # written by fund-watch/fund_watch.py
@@ -1660,6 +1662,30 @@ def pages_only(cfg: dict) -> int:
     return 0
 
 
+def score_releases(releases: pd.DataFrame, wl: pd.DataFrame, cfg: dict,
+                   warnings: list[str]) -> tuple[pd.DataFrame, list[dict]]:
+    """Run the LLM on new primary releases (llm_score.py). Problems are added to `warnings`
+    (shown in the reports) instead of stopping the scan."""
+    scores = ls.load_scores(LLM_SCORES_LOG)
+    if not cfg.get("llm") or releases.empty:
+        return scores, []
+    try:
+        scores, new, warn = ls.run(cfg, releases, scores, names=dict(zip(wl["ticker"], wl["name"])), now=_now())
+    except Exception as exc:   # e.g. PromptChanged, missing prompt file
+        msg = f"LLM scoring failed: {exc}"
+        print(f"[error] {msg}", file=sys.stderr)
+        warnings.append(msg)
+        return scores, []
+    for w in warn:
+        print(f"[warn] {w}", file=sys.stderr)
+    warnings.extend(warn)
+    if new:
+        ls.save_scores(scores, LLM_SCORES_LOG)
+        ok = sum(r["status"] == "ok" for r in new)
+        print(f"[info] llm_scores.csv: {len(new)} new row(s), {ok} scored ok")
+    return scores, new
+
+
 def _now() -> dt.datetime:
     return dt.datetime.now(UTC)
 
@@ -1758,6 +1784,7 @@ def main(argv=None) -> int:
         stored_releases, added = ns.merge_releases(stored_releases, release_rows)
         ns.save_releases(stored_releases, RELEASES_LOG)
         print(f"[info] releases.csv: {len(added)} new release(s)")
+    llm_scores, llm_new = score_releases(stored_releases, wl, cfg, release_warnings)
 
     if cfg["paper_trading"]["enabled"]:
         paper = backfill_signal_moves(paper, histories)

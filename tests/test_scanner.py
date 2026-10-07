@@ -39,6 +39,9 @@ def tmp_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(scanner, "WEEKLY_LOG", tmp_path / "data" / "weekly_summary.csv")
     monkeypatch.setattr(scanner, "SCORES_LOG", tmp_path / "data" / "scores_log.csv")
     monkeypatch.setattr(scanner, "RELEASES_LOG", tmp_path / "data" / "releases.csv")
+    monkeypatch.setattr(scanner, "LLM_SCORES_LOG", tmp_path / "data" / "llm_scores.csv")
+    monkeypatch.setattr(scanner.ls, "PROMPT_REGISTRY", tmp_path / "used_prompts.json")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setattr(scanner, "DASHBOARD", tmp_path / "DASHBOARD.md")
     monkeypatch.setattr(scanner, "FUND_SUMMARY", tmp_path / "fund_watch_latest.json")
     return tmp_path
