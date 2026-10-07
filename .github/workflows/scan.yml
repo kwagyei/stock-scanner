@@ -2,9 +2,12 @@ name: attention-scan
 
 on:
   schedule:
-    # GitHub cron runs in UTC and can start a few minutes late.
-    - cron: "30 6 * * 1-5"    # 08:30 Stockholm summer / 07:30 winter (before 09:00 open)
-    - cron: "45 16 * * 1-5"   # 18:45 Stockholm summer / 17:45 winter (after close)
+    # GitHub cron runs in UTC, can start late and can drop runs at busy times (e.g. :00, :30),
+    # so the times are off-peak and the morning has a backup. Morning runs must start before
+    # the 09:00 open: new paper trades buy at the next open.
+    - cron: "7 6 * * 1-5"     # 08:07 Stockholm summer / 07:07 winter
+    - cron: "37 6 * * 1-5"    # backup: 08:37 summer / 07:37 winter, skipped if 08:07 ran
+    - cron: "52 16 * * 1-5"   # 18:52 summer / 17:52 winter (after the 17:30 close)
   workflow_dispatch:          # "Run workflow" button for manual runs
     inputs:
       weekly:
@@ -20,7 +23,29 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  slot:
+    # Morning runs only: skip if a scan already completed this morning (it leaves a "scan ..."
+    # commit). The concurrency group makes a second run wait until the first has finished.
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - id: check
+        if: >-
+          github.event_name == 'schedule' &&
+          (github.event.schedule == '7 6 * * 1-5' || github.event.schedule == '37 6 * * 1-5')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          since="$(date -u +%Y-%m-%d)T05:00:00Z"
+          n=$(gh api "repos/$GITHUB_REPOSITORY/commits?sha=main&since=$since&per_page=100" \
+                --jq '[.[] | select(.commit.message | startswith("scan "))] | length')
+          echo "scan commits since $since: $n"
+          if [ "$n" -gt 0 ]; then echo "skip=true" >> "$GITHUB_OUTPUT"; echo "Already scanned this morning; skipping."; fi
+
   scan:
+    needs: slot
+    if: needs.slot.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

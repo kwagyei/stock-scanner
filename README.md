@@ -48,8 +48,11 @@ All thresholds are in `config.yaml`.
 
 ## Option A: run it in the cloud with GitHub Actions (recommended)
 
-Runs on weekdays at about 08:30 (before the open) and 18:45 (after the close),
+Runs on weekdays at about 08:07 (before the open) and 18:52 (after the close),
 Stockholm summer time. That's an hour earlier in winter. Your PC doesn't need to be on.
+GitHub sometimes drops scheduled runs at busy times, so there is a backup morning run at
+08:37 that does nothing if the 08:07 run already completed. Both stay before the 09:00
+open, because new paper trades buy at the next open.
 
 1. Create a free GitHub account, then a **private** repository (e.g. `stock-scanner`).
 2. Upload all files from this folder, keeping the `.github/workflows/scan.yml` path.
@@ -82,9 +85,9 @@ python scanner.py
 start reports\latest.html
 ```
 
-To schedule it, open Task Scheduler and choose *Create Basic Task* → Weekly → Mon–Fri at 08:30.
+To schedule it, open Task Scheduler and choose *Create Basic Task* → Weekly → Mon–Fri at 08:07.
 Set the action to run `C:\path\to\stock-scanner\.venv\Scripts\python.exe` with
-argument `scanner.py`, and set "Start in" to the project folder. Repeat for 18:45.
+argument `scanner.py`, and set "Start in" to the project folder. Repeat for 18:52.
 The PC must be on at those times.
 
 ## First things to do
