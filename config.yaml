@@ -1,5 +1,9 @@
-# Benchmark for paper-trade comparison (Yahoo symbol). ^OMX = OMX Stockholm 30.
-benchmark: "^OMX"
+# Benchmarks (Yahoo symbols). All strategies and the event study are judged against the
+# primary one; the secondary (OMX Stockholm 30) is shown for reference and stays in the
+# paper log's original bench_* columns, so v0's log is unchanged.
+benchmark:
+  primary: "nasdaq:IX3364"  # OMX Stockholm Small Cap PI via Nasdaq Nordic (Yahoo has no history); see README "Benchmark"
+  secondary: "^OMX"         # OMX Stockholm 30
 history_period: "6mo"
 # Daily bars are only complete after the close (17:30). Runs before this Stockholm time ignore
 # today's still-forming bar for scoring and paper trades, and use yesterday's instead.
@@ -76,11 +80,38 @@ universe:
 
 # evaluate.py: the judge of whether the signals beat the index after costs.
 # Also used for the one-line verdict in the evening digest.
+# Costs: see costs.* below (per side, all strategies). Closed trades needed: eval.min_trades.
 evaluation:
-  cost_pct: 1.0             # round-trip cost per trade, in percent (courtage + spread)
   stake: 0.10               # share of the account per trade, for the drawdown figure
-  min_trades: 30            # closed trades needed before PASS/FAIL (otherwise NOT YET)
   digest_after_hour: 12     # Stockholm hour from which the digest shows the verdict (evening run)
+
+# LLM release scoring experiment: v0 (current rules), v0b (MFN/Cision releases only),
+# v1_<prompt_version> (v0b with LLM points instead of the flat +2, and blocking).
+llm:
+  enabled: false              # true = score releases with Claude (paid API, ANTHROPIC_API_KEY); false = free, no v1 book
+  model: "claude-sonnet-5-5"
+  prompt_version: "v1"        # prompts/score_<version>.md; never edit a used prompt, add a new version
+  effort: "medium"            # fixed per prompt version (changing it needs a new version)
+  score_from_date: "2026-10-08"   # go-live: only releases published from this date are scored
+  max_calls_per_run: 50       # cost cap
+  max_body_chars: 8000
+  block_if_direction_lte: -2  # material release with direction <= this blocks a v1 buy that day
+  skip_routine: true          # don't call the LLM for titles in release_ignore_titles (they score 0)
+  points:                     # v1 replaces v0b's flat +2 for a release with these points
+    material_direction_2: 3   # material and direction +2
+    direction_1: 2            # direction +1
+    other: 0                  # direction 0 / -1 / -2, or not material, or no scored release
+
+# Trading costs for evaluation (all strategies), in percent per side. The bid-ask spread at
+# signal time is logged when available (Nasdaq share list) and then replaces half_spread_pct.
+costs:
+  commission_pct: 0.1
+  half_spread_pct: 0.5
+
+eval:
+  min_trades: 30              # per strategy, before PASS/FAIL
+  min_events: 300             # event study, before PASS/FAIL of the comparison
+  horizons: [1, 5, 20]        # trading days after entry
 
 weekly_summary:
   enabled: true

@@ -38,6 +38,11 @@ def tmp_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(scanner, "PAPER_LOG", tmp_path / "data" / "paper_trades.csv")
     monkeypatch.setattr(scanner, "WEEKLY_LOG", tmp_path / "data" / "weekly_summary.csv")
     monkeypatch.setattr(scanner, "SCORES_LOG", tmp_path / "data" / "scores_log.csv")
+    monkeypatch.setattr(scanner, "RELEASES_LOG", tmp_path / "data" / "releases.csv")
+    monkeypatch.setattr(scanner, "LLM_SCORES_LOG", tmp_path / "data" / "llm_scores.csv")
+    monkeypatch.setattr(scanner, "LLM_EVENTS_LOG", tmp_path / "data" / "llm_events.csv")
+    monkeypatch.setattr(scanner.ls, "PROMPT_REGISTRY", tmp_path / "used_prompts.json")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setattr(scanner, "DASHBOARD", tmp_path / "DASHBOARD.md")
     monkeypatch.setattr(scanner, "FUND_SUMMARY", tmp_path / "fund_watch_latest.json")
     return tmp_path
@@ -267,7 +272,7 @@ def test_paper_csv_round_trip(cfg, tmp_paths):
 
     df.to_csv(scanner.PAPER_LOG, index=False)
     back = scanner.load_paper()
-    pd.testing.assert_frame_equal(back, df.astype(str), check_dtype=False)
+    pd.testing.assert_frame_equal(back, df.astype(str).assign(strategy="v0"), check_dtype=False)
     assert list(back["status"]) == ["open", "closed", "pending"]
 
     # Re-running the update on loaded string data is idempotent for closed trades.
@@ -289,7 +294,7 @@ def test_main_persists_trade_lifecycle(cfg, tmp_paths, monkeypatch):
     wl.write_text("ticker,name,query\nX.ST,X,X\n")
     h = flat(70)
     h.iloc[-1] = (100, 112, 100, 111, 6000)          # +11%, 6x vol, small cap → 4
-    data = {"X.ST": h, "^OMX": flat(70, px=1000)}
+    data = {"X.ST": h, "^OMX": flat(70, px=1000), "nasdaq:IX3364": flat(70, px=500)}
     monkeypatch.setattr(scanner, "fetch_history", lambda t, p: data[t])
     monkeypatch.setattr(scanner, "fetch_news", lambda q, c: [])
     monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: 1e9)
@@ -305,6 +310,8 @@ def test_main_persists_trade_lifecycle(cfg, tmp_paths, monkeypatch):
     data["^OMX"] = flat(72, px=1000)
     scanner.main(["--no-email", "--watchlist", str(wl)])
     p = pd.read_csv(scanner.PAPER_LOG, dtype=str).fillna("")
+    assert sorted(p["strategy"]) == ["v0", "v0b"]               # default config: LLM off, no v1 book
+    p = p[p["strategy"] == "v0"]
     assert len(p) == 1
     assert list(p[["status", "exit_reason", "exit_price"]].iloc[0]) == ["closed", "stop", "90.0000"]
 
@@ -368,17 +375,30 @@ def test_mfn_release_window_for_hype(cfg, hours_ago, expected_hype):
     assert scanner.score_stock(pm, nm, None, cfg)[2] is expected_hype
 
 
+MFN_BODY_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:x="https://mfn.se/schemas/rss-ns-x/"><channel>
+<item><title>A AB tecknar avtal</title><link>https://mfn.se/a/a-co/avtal</link>
+<pubDate>Tue, 06 Oct 2026 06:30:00 +0000</pubDate><x:language>sv</x:language>
+<x:content type="text">A AB har tecknat ett avtal.</x:content></item>
+<item><title>A AB signs agreement</title><link>https://mfn.se/a/a-co/agreement</link>
+<pubDate>Tue, 06 Oct 2026 06:30:00 +0000</pubDate><x:language>en</x:language>
+<x:content type="text">A AB has signed an agreement.</x:content></item>
+</channel></rss>"""
+
+
 def test_main_fetches_releases_only_with_slug(cfg, tmp_paths, monkeypatch):
     wl = tmp_paths / "watchlist.csv"
     wl.write_text("ticker,name,query,mfn_slug\nA.ST,A,A,a-co\nB.ST,B,B,\n")
     calls = []
     monkeypatch.setattr(scanner, "fetch_history", lambda t, p: flat(70))
     monkeypatch.setattr(scanner, "fetch_news", lambda q, c: [])
-    monkeypatch.setattr(scanner, "fetch_releases", lambda s, c: calls.append(s) or [])
+    monkeypatch.setattr(scanner.ns, "fetch_mfn_xml", lambda s, n: calls.append(s) or MFN_BODY_XML)
     monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: None)
     monkeypatch.setattr(scanner.time, "sleep", lambda s: None)
     scanner.main(["--no-email", "--watchlist", str(wl)])
     assert calls == ["a-co"]
+    stored = scanner.ns.load_releases(scanner.RELEASES_LOG)
+    assert list(stored["ticker"]) == ["A.ST"] and stored["source_type"].iloc[0] == "primary"
     scanner.main(["--no-email", "--no-news", "--watchlist", str(wl)])
     assert calls == ["a-co"]
 
@@ -1212,3 +1232,219 @@ def test_pages_only_rebuilds_from_logs_without_fetching(cfg, tmp_paths, monkeypa
 def test_pages_only_without_logs_fails_clearly(cfg, tmp_paths):
     with pytest.raises(SystemExit, match="no score log yet"):
         scanner.main(["--pages-only"])
+
+
+# --------------------------------------------------------------------------- primary benchmark (Nasdaq)
+
+NASDAQ_PAYLOAD = {"data": {"CP": [
+    {"z": {"dateTime": "2026-10-06", "open": "1,230.10", "high": "1,240.00", "low": "1,225.00", "close": "1,238.50"}},
+    {"z": {"dateTime": "2026-10-07", "open": "1,242.15", "high": "1,245.00", "low": "1,230.00", "close": "1,235.22"}},
+    {"z": {"dateTime": "2026-10-08", "open": "-", "high": "", "low": None, "close": ""}},
+]}}
+
+
+def test_parse_nasdaq_chart_handles_comma_numbers_and_blank_rows():
+    df = scanner.parse_nasdaq_chart(NASDAQ_PAYLOAD)
+    assert list(df.index) == [pd.Timestamp("2026-10-06"), pd.Timestamp("2026-10-07")]
+    assert df.loc["2026-10-07", "Open"] == 1242.15
+    assert df.loc["2026-10-07", "Close"] == 1235.22
+    assert scanner.parse_nasdaq_chart({}).empty
+
+
+def test_fetch_history_routes_nasdaq_symbols(monkeypatch):
+    seen = {}
+
+    class Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return json.dumps(NASDAQ_PAYLOAD).encode()
+
+    def fake_urlopen(req, timeout):
+        seen["url"] = req.full_url
+        return Resp()
+
+    monkeypatch.setattr(scanner.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(scanner, "_now", lambda: NOW)
+    df = scanner.fetch_history("nasdaq:IX3364", "6mo")
+    assert len(df) == 2
+    assert "/instruments/IX3364/chart" in seen["url"] and "toDate=2026-10-06" in seen["url"]
+
+
+def test_fetch_nasdaq_index_failure_warns_and_returns_empty(monkeypatch, capsys):
+    def boom(*a, **k):
+        raise OSError("down")
+    monkeypatch.setattr(scanner.urllib.request, "urlopen", boom)
+    assert scanner.fetch_nasdaq_index("IX3364", "6mo", today=dt.date(2026, 10, 7)).empty
+    assert "Nasdaq index fetch failed" in capsys.readouterr().err
+
+
+def test_bench_symbol_primary_and_secondary(cfg):
+    assert scanner.bench_symbol(cfg, "primary") == "nasdaq:IX3364"
+    assert scanner.bench_symbol(cfg) == "^OMX"
+    assert scanner.bench_symbol({"benchmark": "^OMX"}, "secondary") == "^OMX"
+
+
+# --------------------------------------------------------------------------- strategies in the paper book
+
+OLD_PAPER_HEADER = ("id,ticker,name,signal_date,score,status,entry_date,entry_price,bench_entry,exit_date,"
+                    "exit_price,exit_reason,bench_exit,last_price,return_pct,bench_return_pct,universe,pe_status,"
+                    "pe_partial_date,pe_partial_price,pe_exit_date,pe_exit_price,pe_exit_reason,pe_return_pct,"
+                    "pe_bench_return_pct,signal_move")
+
+
+def test_paper_migration_marks_existing_rows_v0(tmp_paths):
+    scanner.DATA_DIR.mkdir()
+    scanner.PAPER_LOG.write_text(OLD_PAPER_HEADER + "\nELTEL.ST-2026-10-06,ELTEL.ST,Eltel,2026-10-06,4,open,"
+                                 "2026-10-07,18.0000,2500,,,,,18.0000,0.00,,v2,open,,,,,,0.00,,-0.1200\n")
+    p = scanner.load_paper()
+    assert list(p.columns) == scanner.PAPER_COLUMNS
+    assert p.iloc[0]["strategy"] == "v0" and p.iloc[0]["id"] == "ELTEL.ST-2026-10-06"
+    assert p.iloc[0]["bench_primary_entry"] == ""
+    assert len(scanner.book(p, "v0")) == 1 and scanner.book(p, "v0b").empty
+
+
+def strat_row(ticker="X.ST", score=4, v0b=4, v1=5, block=False):
+    return {"ticker": ticker, "name": ticker, "date": "2026-10-08", "score": score, "chg_1d": 0.05,
+            "score_v0b": v0b, "score_v1": v1, "block_buy": block}
+
+
+def test_three_books_are_independent_and_v1_blocks(cfg, tmp_paths):
+    paper = scanner.load_paper()
+    rows = [strat_row("A.ST", 4, 2, 2), strat_row("B.ST", 1, 4, 6), strat_row("C.ST", 4, 4, 4, block=True)]
+    for s in ("v0", "v0b", "v1_v1"):
+        paper = scanner.add_paper_signals(paper, rows, cfg, "v2", strategy=s)
+    got = {s: sorted(scanner.book(paper, s)["ticker"]) for s in ("v0", "v0b", "v1_v1")}
+    assert got == {"v0": ["A.ST", "C.ST"], "v0b": ["B.ST", "C.ST"], "v1_v1": ["B.ST"]}
+    assert set(scanner.book(paper, "v0")["id"]) == {"A.ST-2026-10-08", "C.ST-2026-10-08"}
+    assert scanner.book(paper, "v1_v1").iloc[0]["id"] == "v1_v1:B.ST-2026-10-08"
+    assert scanner.book(paper, "v1_v1").iloc[0]["score"] == "6"
+    # an open v0 trade doesn't stop v0b from opening the same stock
+    again = scanner.add_paper_signals(paper, [strat_row("A.ST", 4, 4, 4)], cfg, "v2", strategy="v0b")
+    assert len(scanner.book(again, "v0b")) == 3 and len(scanner.book(again, "v0")) == 2
+
+
+def test_primary_benchmark_return_on_trades(cfg):
+    p = scanner.update_paper(pending_trade("O.ST"), {"O.ST": flat(3)}, flat(3, px=1000), cfg,
+                             bench_primary=flat(3, px=500))
+    r = p.iloc[0]
+    assert r["status"] == "open" and r["bench_primary_entry"] == "500.0000"
+    assert r["bench_primary_return_pct"] == "0.00"
+
+
+BLOCK_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:x="https://mfn.se/schemas/rss-ns-x/"><channel>
+<item><title>X AB utf\xc3\xa4rdar vinstvarning</title><link>https://mfn.se/a/x/warn</link>
+<pubDate>Thu, 08 Oct 2026 08:00:00 +0000</pubDate><x:language>sv</x:language>
+<x:content type="text">R\xc3\xb6relseresultatet blir betydligt l\xc3\xa4gre \xc3\xa4n v\xc3\xa4ntat.</x:content></item>
+</channel></rss>"""
+
+
+def with_llm(cfg):
+    return {**cfg, "llm": {**cfg["llm"], "enabled": True}}
+
+
+def test_main_end_to_end_llm_blocks_v1_but_not_v0b(cfg, tmp_paths, monkeypatch):
+    import llm_score as ls
+    from types import SimpleNamespace
+    real_load = scanner.load_config
+    monkeypatch.setattr(scanner, "load_config", lambda p: with_llm(real_load(p)))
+    wl = tmp_paths / "watchlist.csv"
+    wl.write_text("ticker,name,query,mfn_slug\nX.ST,X,X,x\n")
+    start = pd.bdate_range(end="2026-10-08", periods=70)[0]
+    h = flat(70, start=start)
+    h.iloc[-1] = (100, 101, 85, 88, 6000)               # -12%, 6x volume, small cap
+    data = {"X.ST": h, "^OMX": flat(70, px=1000, start=start), "nasdaq:IX3364": flat(70, px=500, start=start)}
+    monkeypatch.setattr(scanner, "fetch_history", lambda t, p: data[t])
+    monkeypatch.setattr(scanner, "fetch_news", lambda q, c: [])
+    monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: 1e9)
+    monkeypatch.setattr(scanner.time, "sleep", lambda s: None)
+    monkeypatch.setattr(scanner.ns, "fetch_mfn_xml", lambda s, n: BLOCK_XML)
+    monkeypatch.setattr(scanner, "_now", lambda: dt.datetime(2026, 10, 8, 16, 52, tzinfo=UTC))
+    answer = {"event_type": "guidance", "direction": -2, "surprise": 3, "material": True,
+              "confidence": 0.9, "rationale": "Profit warning well below expectations."}
+    calls = []
+
+    class Client:
+        class messages:
+            @staticmethod
+            def create(**kw):
+                calls.append(kw)
+                return SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text=json.dumps(answer))],
+                                       usage=SimpleNamespace(input_tokens=900, output_tokens=60))
+    monkeypatch.setattr(ls, "make_client", lambda: Client)
+
+    scanner.main(["--no-email", "--watchlist", str(wl)])
+    assert len(calls) == 1 and "vinstvarning" in calls[0]["messages"][0]["content"]
+    scores = ls.load_scores(scanner.LLM_SCORES_LOG)
+    assert list(scores[["status", "direction", "is_backfill"]].iloc[0]) == ["ok", "-2", "false"]
+    p = pd.read_csv(scanner.PAPER_LOG, dtype=str).fillna("")
+    # v0: release 2 (MFN) + volume 2 + price 1 + small cap 1 = 6; v0b same; v1: release 0 -> 4 but blocked
+    assert sorted(p["strategy"]) == ["v0", "v0b"]
+    sig = pd.read_csv(scanner.SIGNALS_LOG, dtype=str).fillna("")
+    r = sig.iloc[0]
+    assert (r["score_v0"], r["score_v0b"], r["score_v1"], r["block_buy"]) == ("6", "6", "4", "True")
+    assert r["llm_prompt_version"] == "v1" and r["block_if_direction_lte"] == "-2" and r["release_ids"]
+    html = (scanner.REPORT_DIR / "latest.html").read_text()
+    assert "LLM release scoring" in html and "Profit warning well below expectations." in html
+    assert "Blocked v1 buys · 1" in html and "v1_v1" in html
+    evm = (scanner.REPORT_DIR / "evaluation.md").read_text()
+    assert "## LLM experiment: v0 / v0b / v1" in evm and "| `v0` | `v0b` | `v1_v1` |" in evm
+    events = pd.read_csv(scanner.LLM_EVENTS_LOG, dtype=str).fillna("")
+    assert list(events["release_id"]) == list(scores["release_id"]) and events.iloc[0]["entry_date"] == ""
+    # a second run doesn't call the LLM again
+    scanner.main(["--no-email", "--watchlist", str(wl)])
+    assert len(calls) == 1
+
+
+def test_parse_spreads():
+    payload = {"data": {"instrumentListing": {"rows": [
+        {"symbol": "4C", "bidPrice": "6.61", "askPrice": "6.72"},
+        {"symbol": "SAAB B", "bidPrice": "1,000.00", "askPrice": "1,001.00"},
+        {"symbol": "NOBID", "bidPrice": "", "askPrice": "3.00"},
+        {"symbol": "CROSSED", "bidPrice": "5.00", "askPrice": "4.00"},
+    ]}}}
+    sp = scanner.parse_spreads(payload)
+    assert set(sp) == {"4C.ST", "SAAB-B.ST"}
+    assert sp["4C.ST"] == pytest.approx(0.11 / 6.665 * 100)
+    assert scanner.parse_spreads({}) == {}
+
+
+def test_spread_recorded_on_new_trades(cfg, tmp_paths):
+    paper = scanner.add_paper_signals(scanner.load_paper().iloc[0:0], [{**strat_row("A.ST"), "spread_pct": 1.6667}],
+                                      cfg, "v2", strategy="v0b")
+    assert paper.iloc[0]["spread_pct"] == "1.667"
+    paper = scanner.add_paper_signals(paper, [strat_row("B.ST")], cfg, "v2", strategy="v0b")
+    assert paper.iloc[1]["spread_pct"] == ""
+
+
+def test_llm_failure_becomes_a_report_warning(cfg, tmp_paths, monkeypatch):
+    scanner.DATA_DIR.mkdir()
+    def boom(*a, **k):
+        raise scanner.ls.PromptChanged("prompt v1 changed after it was used live")
+    monkeypatch.setattr(scanner.ls, "run", boom)
+    rel = scanner.ns.load_releases(scanner.RELEASES_LOG)
+    rel.loc[0] = ["r", "X.ST", "mfn", "primary", "2026-10-09T07:00:00Z", "t", "u", "sv", "", ""]
+    warnings = []
+    scores, new = scanner.score_releases(rel, pd.DataFrame({"ticker": ["X.ST"], "name": ["X"]}), with_llm(cfg), warnings)
+    assert new == [] and warnings == ["LLM scoring failed: prompt v1 changed after it was used live"]
+    html = scanner.build_llm_html([], [], rel, None, warnings, with_llm(cfg))
+    assert "LLM scoring failed" in html and "class=warn" in html
+    md = scanner.build_evaluation_md(scanner.ev.evaluate(None), None, cfg, NOW, {"strategies": {}, "events": scanner.ev.event_study(None)}, warnings)
+    assert "[!WARNING]" in md and "LLM scoring failed" in md
+
+
+def test_llm_off_by_default_makes_no_api_call(cfg, tmp_paths, monkeypatch):
+    """The default config is the free setup: no client is ever created, even with a key set."""
+    assert cfg["llm"]["enabled"] is False
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-not-a-real-key")
+    def no_client():
+        raise AssertionError("LLM client created while llm.enabled is false")
+    monkeypatch.setattr(scanner.ls, "make_client", no_client)
+    scanner.DATA_DIR.mkdir()
+    rel = scanner.ns.load_releases(scanner.RELEASES_LOG)
+    rel.loc[0] = ["r", "X.ST", "mfn", "primary", "2026-10-09T07:00:00Z", "Order", "u", "sv", "", ""]
+    warnings = []
+    scores, new = scanner.score_releases(rel, pd.DataFrame({"ticker": ["X.ST"], "name": ["X"]}), cfg, warnings)
+    assert new == [] and warnings == []
+    html = scanner.build_llm_html([], [], rel, None, [], cfg)
+    assert "LLM scoring is off" in html and "Blocked v1 buys" not in html

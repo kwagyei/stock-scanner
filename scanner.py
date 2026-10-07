@@ -35,6 +35,7 @@ import ssl
 import sys
 import time
 import urllib.parse
+import urllib.request
 from email.message import EmailMessage
 from html import escape
 from pathlib import Path
@@ -45,6 +46,9 @@ import yaml
 import yfinance as yf
 
 import evaluate as ev
+import llm_score as ls
+import news_sources as ns
+import strategies as st
 
 try:  # python.org macOS builds ship without CA certificates; use certifi's bundle
     import certifi
@@ -58,6 +62,9 @@ REPORT_DIR = ROOT / "reports"
 SIGNALS_LOG = DATA_DIR / "signals_log.csv"
 SCORES_LOG = DATA_DIR / "scores_log.csv"    # every stock, every run, with each score component
 PAPER_LOG = DATA_DIR / "paper_trades.csv"
+RELEASES_LOG = DATA_DIR / "releases.csv"     # primary + aggregator releases for the LLM experiment
+LLM_SCORES_LOG = DATA_DIR / "llm_scores.csv"  # one row per release and prompt version
+LLM_EVENTS_LOG = DATA_DIR / "llm_events.csv"  # returns after each scored release (event study)
 WEEKLY_LOG = DATA_DIR / "weekly_summary.csv"
 DASHBOARD = ROOT / "DASHBOARD.md"
 FUND_SUMMARY = ROOT / "fund-watch" / "data" / "fund_watch_latest.json"   # written by fund-watch/fund_watch.py
@@ -73,6 +80,10 @@ PAPER_COLUMNS = [
     "pe_status", "pe_partial_date", "pe_partial_price",
     "pe_exit_date", "pe_exit_price", "pe_exit_reason", "pe_return_pct", "pe_bench_return_pct",
     "signal_move",   # 1-day price move on the signal day (fraction), for the drop / jump / flat split
+    # LLM experiment: which paper book (v0 / v0b / v1_<prompt>); index returns vs the primary
+    # (small-cap) benchmark. bench_* above stay on the secondary (OMXS30) for v0's reports.
+    "strategy", "bench_primary_entry", "bench_primary_exit", "bench_primary_return_pct",
+    "spread_pct",    # bid-ask spread (% of mid) from Nasdaq's share list at signal time; blank if unknown
 ]
 DEFAULT_UNIVERSE = "v1"   # trades from before watchlist versioning (the hand-picked list)
 
@@ -82,6 +93,14 @@ DEFAULT_UNIVERSE = "v1"   # trades from before watchlist versioning (the hand-pi
 def load_config(path: Path) -> dict:
     with open(path, encoding="utf-8") as fh:
         return yaml.safe_load(fh)
+
+
+def bench_symbol(cfg: dict, which: str = "secondary") -> str:
+    """Benchmark ticker. which: "primary" (small caps, used to judge strategies) or
+    "secondary" (OMX Stockholm 30, the original benchmark kept in bench_* columns).
+    An older config with a single `benchmark: "^OMX"` string counts as the secondary."""
+    b = cfg["benchmark"]
+    return b if isinstance(b, str) else b[which]
 
 
 def load_watchlist(path: Path) -> pd.DataFrame:
@@ -111,8 +130,99 @@ def watchlist_version(path: Path) -> str:
 
 # --------------------------------------------------------------------------- data
 
+NASDAQ_CHART_URL = ("https://api.nasdaq.com/api/nordic/instruments/{id}/chart"
+                    "?assetClass=INDEXES&fromDate={start}&toDate={end}")
+
+
+def _period_days(period: str) -> int:
+    m = re.fullmatch(r"(\d+)(d|wk|mo|y)", period.strip())
+    if not m:
+        return 183
+    n, unit = int(m.group(1)), m.group(2)
+    return n * {"d": 1, "wk": 7, "mo": 31, "y": 366}[unit]
+
+
+def _nasdaq_number(v) -> float | None:
+    if v in (None, "", "-"):
+        return None
+    try:
+        return float(str(v).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def parse_nasdaq_chart(payload: dict) -> pd.DataFrame:
+    """Nasdaq Nordic /chart JSON -> OHLC frame shaped like fetch_history's (date index)."""
+    rows = []
+    for p in ((payload or {}).get("data") or {}).get("CP") or []:
+        z = p.get("z") or {}
+        close = _nasdaq_number(z.get("close"))
+        if close is None or not z.get("dateTime"):
+            continue
+        rows.append({"date": pd.Timestamp(z["dateTime"]).normalize(),
+                     "Open": _nasdaq_number(z.get("open")), "High": _nasdaq_number(z.get("high")),
+                     "Low": _nasdaq_number(z.get("low")), "Close": close})
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows).drop_duplicates("date", keep="last").set_index("date").sort_index()
+    df.index.name = None
+    return df
+
+
+def fetch_nasdaq_index(orderbook_id: str, period: str, today: dt.date | None = None) -> pd.DataFrame:
+    """Daily OHLC for a Nasdaq Nordic index (e.g. IX3364 = OMX Stockholm Small Cap PI), from
+    Nasdaq's public chart endpoint. Yahoo has no usable history for the small-cap index."""
+    end = today or _now().date()
+    start = end - dt.timedelta(days=_period_days(period))
+    url = NASDAQ_CHART_URL.format(id=urllib.parse.quote(orderbook_id), start=start, end=end)
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (stock-attention-scanner)",
+                                               "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            payload = json.loads(resp.read())
+    except Exception as exc:
+        print(f"[warn] Nasdaq index fetch failed for {orderbook_id}: {exc}", file=sys.stderr)
+        return pd.DataFrame()
+    return parse_nasdaq_chart(payload)
+
+
+SCREENER_URL = ("https://api.nasdaq.com/api/nordic/screener/shares"
+                "?category={category}&tableonly=true&market=STO{segment}")
+
+
+def parse_spreads(payload: dict) -> dict:
+    """{ticker: bid-ask spread in % of mid} from one Nasdaq share-list response."""
+    out = {}
+    rows = (((payload or {}).get("data") or {}).get("instrumentListing") or {}).get("rows") or []
+    for r in rows:
+        bid, ask = _nasdaq_number(r.get("bidPrice")), _nasdaq_number(r.get("askPrice"))
+        if not (r.get("symbol") and bid and ask) or ask < bid:
+            continue
+        out[r["symbol"].replace(" ", "-") + ".ST"] = (ask - bid) / ((ask + bid) / 2) * 100
+    return out
+
+
+def fetch_spreads(segments: list[str]) -> dict:
+    """Bid-ask spreads for the watchlist universe, a snapshot at run time (an approximation of
+    the spread at entry; the evaluation falls back to costs.half_spread_pct when missing)."""
+    out = {}
+    for seg in segments:
+        url = SCREENER_URL.format(category="FIRST_NORTH", segment="") if seg == "FIRST_NORTH" else \
+            SCREENER_URL.format(category="MAIN_MARKET", segment=f"&segment={seg}")
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                out.update(parse_spreads(json.loads(resp.read())))
+        except Exception as exc:
+            print(f"[warn] spread fetch failed for {seg}: {exc}", file=sys.stderr)
+    return out
+
+
 def fetch_history(ticker: str, period: str) -> pd.DataFrame:
-    """Daily OHLCV. Index = tz-naive dates in exchange local time."""
+    """Daily OHLCV. Index = tz-naive dates in exchange local time.
+    A "nasdaq:<orderbook id>" symbol is fetched from Nasdaq Nordic instead of Yahoo."""
+    if ticker.startswith("nasdaq:"):
+        return fetch_nasdaq_index(ticker.split(":", 1)[1], period)
     try:
         hist = yf.Ticker(ticker).history(period=period, interval="1d", auto_adjust=False)
     except Exception as exc:  # network / symbol errors
@@ -188,16 +298,17 @@ def filter_titles(items: list[dict], word: str) -> list[dict]:
     return [i for i in items if pat.search(i["title"])]
 
 
-def fetch_releases(slug: str, cfg: dict) -> list[dict]:
+def fetch_releases(slug: str, cfg: dict, raw: bytes | None = None) -> list[dict]:
     """Company releases from MFN's per-company feed (MFN- and Cision-distributed).
 
     Swedish and English versions of a release share a timestamp; keep one per
-    timestamp, preferring the configured news language.
+    timestamp, preferring the configured news language. `raw` is the feed already
+    fetched by news_sources (one request serves v0 and releases.csv).
     """
     limit = cfg["releases"]["mfn_limit"]
     url = f"https://mfn.se/all/a/{urllib.parse.quote(slug)}.rss?limit={limit}"
     try:
-        feed = feedparser.parse(url, agent=USER_AGENT)
+        feed = feedparser.parse(raw) if raw is not None else feedparser.parse(url, agent=USER_AGENT)
     except Exception as exc:
         print(f"[warn] release fetch failed for {slug}: {exc}", file=sys.stderr)
         return []
@@ -328,6 +439,7 @@ def load_paper() -> pd.DataFrame:
             if c not in df.columns:
                 df[c] = ""
         df["universe"] = df["universe"].replace("", DEFAULT_UNIVERSE)
+        df["strategy"] = df["strategy"].replace("", st.V0)     # rows from before the experiment
         return df[PAPER_COLUMNS]
     return pd.DataFrame(columns=PAPER_COLUMNS, dtype=str)
 
@@ -341,7 +453,13 @@ def _price_on(hist: pd.DataFrame, date: pd.Timestamp, field: str) -> float | Non
     return float(sub.iloc[-1][field])
 
 
-def update_paper(paper: pd.DataFrame, histories: dict, bench: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+def book(paper: pd.DataFrame, strategy: str = st.V0) -> pd.DataFrame:
+    """One strategy's paper trades (v0's reports use only the v0 book)."""
+    return paper[paper["strategy"].replace("", st.V0) == strategy]
+
+
+def update_paper(paper: pd.DataFrame, histories: dict, bench: pd.DataFrame, cfg: dict,
+                 bench_primary: pd.DataFrame | None = None) -> pd.DataFrame:
     pc = cfg["paper_trading"]
     pe_enabled = (pc.get("partial_exit") or {}).get("enabled", False)
     for idx, row in paper.iterrows():
@@ -354,6 +472,7 @@ def update_paper(paper: pd.DataFrame, histories: dict, bench: pd.DataFrame, cfg:
             continue
         if main_todo:
             _update_main(paper, idx, row, h, bench, pc)
+            _update_primary_bench(paper, idx, h, bench_primary)
         row = paper.loc[idx]
         if pe_enabled and row["entry_date"] and row["pe_status"] != "closed":
             _update_partial(paper, idx, row, h, bench, pc)
@@ -410,6 +529,25 @@ def _update_main(paper, idx, row, h, bench, pc) -> None:
     if bx and bench_entry:
         paper.at[idx, "bench_exit"] = f"{bx:.4f}"
         paper.at[idx, "bench_return_pct"] = f"{(bx / bench_entry - 1) * 100:.2f}"
+
+
+def _update_primary_bench(paper, idx, h, bench_primary) -> None:
+    """Primary-benchmark return over the same days as the main trade (entry open to exit close)."""
+    row = paper.loc[idx]
+    if bench_primary is None or bench_primary.empty or not row["entry_date"]:
+        return
+    entry_day = pd.Timestamp(row["entry_date"])
+    if not row["bench_primary_entry"]:
+        b0 = _price_on(bench_primary, entry_day, "Open") if entry_day in bench_primary.index else None
+        if not b0:
+            return
+        paper.at[idx, "bench_primary_entry"] = f"{b0:.4f}"
+    b0 = float(paper.at[idx, "bench_primary_entry"])
+    end = pd.Timestamp(row["exit_date"]) if row["exit_date"] else h.index[-1]
+    bx = _price_on(bench_primary, end, "Close")
+    if bx:
+        paper.at[idx, "bench_primary_exit"] = f"{bx:.4f}"
+        paper.at[idx, "bench_primary_return_pct"] = f"{(bx / b0 - 1) * 100:.2f}"
 
 
 def simulate_partial(bars: pd.DataFrame, entry: float, pc: dict) -> dict:
@@ -475,18 +613,26 @@ def _update_partial(paper, idx, row, h, bench, pc) -> None:
 
 
 def add_paper_signals(paper: pd.DataFrame, rows: list[dict], cfg: dict,
-                      universe: str = DEFAULT_UNIVERSE) -> pd.DataFrame:
+                      universe: str = DEFAULT_UNIVERSE, strategy: str = st.V0) -> pd.DataFrame:
+    """New pending trades for one strategy's book. v0 uses r["score"]; v0b and v1 use
+    r["score_v0b"] / r["score_v1"], and v1 skips rows with block_buy."""
     pc = cfg["paper_trading"]
-    active = set(paper.loc[paper["status"].isin(["pending", "open"]), "ticker"])
+    mine = book(paper, strategy)
+    active = set(mine.loc[mine["status"].isin(["pending", "open"]), "ticker"])
+    key = {st.V0: "score", st.V0B: "score_v0b"}.get(strategy, "score_v1")
     new = []
     for r in rows:
-        if r["score"] >= pc["min_score"] and r["ticker"] not in active:
+        if key not in r or (strategy not in (st.V0, st.V0B) and r.get("block_buy")):
+            continue
+        if r[key] >= pc["min_score"] and r["ticker"] not in active:
             rec = {c: "" for c in PAPER_COLUMNS}
             rec.update({
-                "id": f"{r['ticker']}-{r['date']}",
+                "id": f"{r['ticker']}-{r['date']}" if strategy == st.V0 else f"{strategy}:{r['ticker']}-{r['date']}",
                 "ticker": r["ticker"], "name": r["name"],
-                "signal_date": r["date"], "score": str(r["score"]),
+                "signal_date": r["date"], "score": str(r[key]),
                 "status": "pending", "universe": universe, "signal_move": "" if r.get("chg_1d") is None else f"{r['chg_1d']:.4f}",
+                "strategy": strategy,
+                "spread_pct": "" if r.get("spread_pct") is None else f"{r['spread_pct']:.3f}",
             })
             new.append(rec)
             active.add(r["ticker"])
@@ -532,7 +678,7 @@ def last_logged_bars() -> dict:
     return log.groupby("ticker")["bar_date"].max().to_dict()
 
 
-def score_log_rows(rows, missing, wl, now, universe, news_checked=True, stale=()) -> list[dict]:
+def score_log_rows(rows, missing, wl, now, universe, news_checked=True, stale=(), cfg=None) -> list[dict]:
     """One row per watchlist stock for this run, scored or not; stocks without price data too."""
     run = now.isoformat(timespec="minutes")
     out = []
@@ -548,6 +694,7 @@ def score_log_rows(rows, missing, wl, now, universe, news_checked=True, stale=()
             "news_24h": r["n_24h"] if news_checked else "", "releases_24h": r["n_releases"] if news_checked else "",
             "market_cap_msek": "" if not mc else round(mc / 1e6), "universe": universe,
             "reasons": "; ".join(r["reasons"]),
+            **(strategy_log_fields(r, cfg) if cfg else {}),
         })
     names = dict(zip(wl["ticker"], wl["name"]))
     blank = {c: "" for c in ["bar_date", "score", *(f"pts_{k}" for k in SCORE_COMPONENTS), "hype", "close",
@@ -613,7 +760,67 @@ def _fmt_pct(x, digits=1):
     return "–" if x is None or (isinstance(x, float) and math.isnan(x)) else f"{x:+.{digits}f}%"
 
 
-def build_html(rows, missing, paper, summary, cfg, now_local, eval_line=None) -> str:
+def build_llm_html(rows, new_scores: list[dict], releases: pd.DataFrame, cmp: dict | None,
+                   warnings: list[str], cfg: dict) -> str:
+    """Digest section for the LLM experiment: this run's scored releases, blocked buys,
+    the v0 / v0b / v1 summary and any problems."""
+    if not cfg.get("llm"):
+        return ""
+    on = st.llm_enabled(cfg)
+    titles = dict(zip(releases["release_id"], releases["title"])) if not releases.empty else {}
+    urls = dict(zip(releases["release_id"], releases["url"])) if not releases.empty else {}
+    def scored_row(r):
+        rid = r["release_id"]
+        title = f'<a href="{escape(urls.get(rid, ""))}">{escape(titles.get(rid, rid))}</a>'
+        if r["status"] != "ok":
+            return (f"<tr><td>{escape(r['ticker'])}</td><td>{escape(str(r['published_at'])[:16])}</td><td>{title}</td>"
+                    f"<td colspan=5 class=warn>{escape(r['status'])} {escape(str(r.get('error') or ''))}</td></tr>")
+        return (f"<tr><td>{escape(r['ticker'])}</td><td>{escape(str(r['published_at'])[:16])}</td><td>{title}</td>"
+                f"<td>{escape(str(r['event_type']))}</td><td class=n>{int(r['direction']):+d}</td>"
+                f"<td class=n>{r['surprise']}</td><td>{'yes' if str(r['material']).lower() == 'true' else 'no'}</td>"
+                f"<td><small>{escape(str(r['rationale']))}</small></td></tr>")
+    scored = "\n".join(scored_row(r) for r in new_scores) or "<tr><td colspan=8>No releases scored this run.</td></tr>"
+    blocked = [r for r in rows if r.get("block_buy")]
+    blocked_html = "\n".join(
+        f"<tr><td><b>{escape(r['name'])}</b> <small>{escape(r['ticker'])}</small></td><td class=n>{r['score_v1']}</td>"
+        f"<td>{escape('; '.join(titles.get(i, i) for i in r['llm_release_ids']))}</td></tr>" for r in blocked
+    ) or "<tr><td colspan=3>None.</td></tr>"
+    summary = ""
+    if cmp:
+        head = "".join(f"<th>{escape(n)}</th>" for n in cmp["strategies"])
+        def line(label, f):
+            return f"<tr><td>{label}</td>" + "".join(f"<td class=n>{f(r)}</td>" for r in cmp["strategies"].values()) + "</tr>"
+        summary = (f"<div class=box><table><tr><th></th>{head}</tr>"
+                   + line("Verdict", lambda r: f"<b>{r['verdict']}</b>")
+                   + line("Closed trades", lambda r: f"{r['n']} / {r['min_trades']}")
+                   + line("Open / pending", lambda r: r.get("n_open", 0))
+                   + line("Avg vs small caps", lambda r: _fmt_pct(r.get("avg_excess")))
+                   + line("Avg vs OMXS30", lambda r: _fmt_pct(r.get("avg_excess_secondary")))
+                   + "</table></div>"
+                   f"<p><small>Event study: <b>{cmp['events']['verdict']}</b> · {cmp['events']['n']} of "
+                   f"{cmp['events']['min_events']} events with a {cmp['events']['focus']}-day outcome. "
+                   "Full report: <code>python evaluate.py --compare</code>.</small></p>")
+    warn = ("<p class=warn>" + "<br>".join(escape(w) for w in warnings) + "</p>") if warnings else ""
+    if not on:
+        return f"""<h2>Strategies v0 / v0b</h2>
+{warn}
+<p><small>LLM scoring is off (<code>llm.enabled: false</code>): no API calls, no cost, no v1 book.</small></p>
+{summary}
+"""
+    return f"""<h2>LLM release scoring · {cfg['llm']['model']} · prompt {cfg['llm']['prompt_version']}</h2>
+{warn}
+<p><small>Releases scored this run (primary MFN/Cision releases only).</small></p>
+<div class=box><table><tr><th>Stock</th><th>Published (UTC)</th><th>Release</th><th>Type</th><th>Dir</th>
+<th>Surprise</th><th>Material</th><th>Rationale</th></tr>{scored}</table></div>
+<h3>Blocked v1 buys · {len(blocked)}</h3>
+<p><small>A material release with direction ≤ {cfg['llm']['block_if_direction_lte']} blocks the v1 buy.</small></p>
+<div class=box><table><tr><th>Stock</th><th>v1 score</th><th>Release</th></tr>{blocked_html}</table></div>
+<h3>Strategies v0 / v0b / v1</h3>
+{summary}
+"""
+
+
+def build_html(rows, missing, paper, summary, cfg, now_local, eval_line=None, llm_html: str = "") -> str:
     alert_min = cfg["alert_min_score"]
     alerts = [r for r in rows if r["score"] >= alert_min]
     hype = [r for r in rows if r["hype"]]
@@ -695,6 +902,7 @@ def build_html(rows, missing, paper, summary, cfg, now_local, eval_line=None) ->
 <div class=box><table>{phead}{paper_rows(paper_open, False)}</table></div>
 <p><small>Last closed trades</small></p>
 <div class=box><table>{phead}{paper_rows(paper_closed, True)}</table></div>
+{llm_html}
 <h2>Full watchlist</h2>
 <div class=box><table>{head}{stock_rows(rows)}</table></div>
 </body></html>"""
@@ -930,7 +1138,7 @@ def build_weekly(signals, outcomes, table, wp, cfg, now_local) -> tuple[str, str
 <title>Scanner weekly {label}</title>
 <style>{STYLE}</style></head><body>
 <h1>Attention scanner · weekly summary {label}</h1>
-<p><small>Generated {now_local:%a %d %b %Y, %H:%M}. Research tool, not advice. Benchmark {escape(cfg['benchmark'])}.</small></p>
+<p><small>Generated {now_local:%a %d %b %Y, %H:%M}. Research tool, not advice. Benchmark {escape(bench_symbol(cfg))}.</small></p>
 <h2>Signal hit rate · last {wc['lookback_weeks']} weeks</h2>
 <p><small>Signals = score ≥ {cfg['alert_min_score']}, one per stock and bar date. Return is measured from the
 signal-day close. A hit = the stock beat the index over the same days. n counts signals old enough to measure.</small></p>
@@ -1436,12 +1644,20 @@ def build_paper_md(paper, cfg, now_local, eval_res) -> str:
     return "\n".join(out + [FOOTER])
 
 
-def build_evaluation_md(res, pe_res, cfg, now_local) -> str:
+def build_evaluation_md(res, pe_res, cfg, now_local, cmp: dict | None = None, warnings=()) -> str:
     out = ["# ⚖️ Evaluation", "", _nav("reports/evaluation.md"), _updated(now_local),
-           f"<sub>Do the closed paper trades beat {cfg['benchmark']} (OMX Stockholm 30) over the same days, "
-           f"after {res['cost']:.1f}% cost per trade, by enough that it's unlikely to be luck? "
-           "[How to read this](../README.md#judging-the-results-evaluatepy)</sub>", "",
+           f"<sub>Do the closed paper trades beat the Stockholm small-cap index over the same days "
+           f"(OMX Stockholm 30 shown too), after costs (about {res['cost']:.1f}% per trade), by enough that it's "
+           "unlikely to be luck? [How to read this](../README.md#judging-the-results-evaluatepy)</sub>", "",
            "## Main rules", "", _eval_callout(res), ev.format_markdown(res)]
+    if cmp is not None:
+        out += ["## LLM experiment: v0 / v0b / v1", "",
+                "<sub>v0 = the rules above; v0b = only MFN/Cision releases count; v1 = v0b with LLM points "
+                "and blocking. Same exits and costs for all three; judged against small caps. "
+                "[How to read this](../README.md#llm-release-scoring)</sub>", ""]
+        if warnings:
+            out += [_callout("WARNING", "Problems in the last run: " + "; ".join(_md(w) for w in warnings)), ""]
+        out.append(ev.format_compare_markdown(cmp))
     if pe_res is not None:
         out += ["## Partial-exit variant", "",
                 "<details><summary>Same evaluation for the partial-exit variant</summary>", "",
@@ -1466,7 +1682,7 @@ def build_weekly_md(outcomes, table, wp, cfg, now_local, here: str | None = None
     if here:
         out.append(_nav(here))
     out += [f"<sub>Generated **{now_local:%a %d %b %Y, %H:%M}** (Stockholm) · compared with "
-            f"{cfg['benchmark']} (OMX Stockholm 30)</sub>", "",
+            f"{bench_symbol(cfg)} (OMX Stockholm 30)</sub>", "",
             _glance([("🗓️ Signals this week", len(this_week), f"score ≥ {cfg['alert_min_score']}"),
                      ("💼 Paper trades closed", wp["week"]["n"], "this week"),
                      ("💰 Profit / loss", _fmt_sek(wp["week"]["pnl_sek"]), "this week")]
@@ -1524,23 +1740,64 @@ def build_weekly_md(outcomes, table, wp, cfg, now_local, here: str | None = None
 
 # --------------------------------------------------------------------------- main
 
+def eval_settings(cfg: dict) -> dict:
+    """evaluate.py's settings from this config: costs.* per side, eval.* for the experiment."""
+    costs = {**ev.COST_DEFAULTS, **(cfg.get("costs") or {})}
+    e = cfg.get("eval") or {}
+    return {**ev.DEFAULTS, "digest_after_hour": 12, **(cfg.get("evaluation") or {}),
+            "costs": costs, "cost_pct": ev.round_trip(costs),
+            "min_trades": e.get("min_trades", (cfg.get("evaluation") or {}).get("min_trades", ev.DEFAULTS["min_trades"])),
+            "min_events": e.get("min_events", ev.EVENT_DEFAULTS["min_events"]),
+            "horizons": e.get("horizons", ev.EVENT_DEFAULTS["horizons"]),
+            "move_threshold": cfg["thresholds"]["price_move_1d"]}
+
+
+def comparison(cfg: dict) -> dict | None:
+    """v0 / v0b / v1 verdicts and the event study, from the logs on disk (None without llm config)."""
+    if not cfg.get("llm"):
+        return None
+    events = pd.read_csv(LLM_EVENTS_LOG, dtype=str, keep_default_na=False) if LLM_EVENTS_LOG.exists() else None
+    return ev.compare(load_paper(), events, st.strategy_labels(cfg), eval_settings(cfg))
+
+
+def update_events(releases: pd.DataFrame, usable: pd.DataFrame, histories: dict, bench_primary: pd.DataFrame,
+                  cfg: dict) -> pd.DataFrame:
+    """Recompute llm_events.csv: one row per usable LLM score; a release whose stock has no price
+    data this run keeps its previous row."""
+    ec = eval_settings(cfg)
+    cols = ev.event_columns(ec["horizons"])
+    old = pd.read_csv(LLM_EVENTS_LOG, dtype=str, keep_default_na=False) if LLM_EVENTS_LOG.exists() else pd.DataFrame(columns=cols)
+    if usable.empty:
+        return old
+    meta = releases[["release_id", "published_at"]].drop_duplicates("release_id")
+    scored = usable.drop(columns=["published_at"]).merge(meta, on="release_id", how="left")
+    have = scored["ticker"].map(lambda t: t in histories and histories[t] is not None and not histories[t].empty)
+    new = ev.event_outcomes(scored[have], histories, bench_primary, ec["horizons"], ec["cost_pct"])
+    keep = old[old["release_id"].isin(set(scored.loc[~have, "release_id"]))]
+    out = pd.concat([keep.astype(str), new.astype(str).replace("nan", "")], ignore_index=True).reindex(columns=cols)
+    out = out.sort_values("published_at", kind="stable")
+    out.to_csv(LLM_EVENTS_LOG, index=False)
+    return out
+
+
 def evaluations(paper: pd.DataFrame, cfg: dict):
     """(evaluation settings, main-rules result, partial-exit result or None), via evaluate.py."""
-    ec = {**ev.DEFAULTS, "digest_after_hour": 12, **(cfg.get("evaluation") or {})}
+    ec = eval_settings(cfg)
     args = (ec["cost_pct"], ec["stake"], ec["min_trades"])
     kw = {"move_threshold": cfg["thresholds"]["price_move_1d"]}
-    eval_res = ev.evaluate(ev.closed_trades(paper), *args, **kw)
-    pe_res = (ev.evaluate(ev.closed_trades(paper, variant=True), *args, **kw)
+    eval_res = ev.evaluate(ev.closed_trades(paper, costs=ec["costs"]), *args, **kw)
+    pe_res = (ev.evaluate(ev.closed_trades(paper, variant=True, costs=ec["costs"]), *args, **kw)
               if (cfg["paper_trading"].get("partial_exit") or {}).get("enabled") else None)
     return ec, eval_res, pe_res
 
 
-def write_pages(rows, missing, paper, cfg, now_local) -> None:
+def write_pages(rows, missing, paper, cfg, now_local, warnings=()) -> None:
     """The Markdown pages GitHub shows: dashboard, today, paper trades, evaluation."""
     _, eval_res, pe_res = evaluations(paper, cfg)
     pages = {REPORT_DIR / "latest.md": build_digest_md(rows, missing, cfg, now_local),
              REPORT_DIR / "paper_trades.md": build_paper_md(paper, cfg, now_local, eval_res),
-             REPORT_DIR / "evaluation.md": build_evaluation_md(eval_res, pe_res, cfg, now_local),
+             REPORT_DIR / "evaluation.md": build_evaluation_md(eval_res, pe_res, cfg, now_local,
+                                                               comparison(cfg), warnings),
              DASHBOARD: build_dashboard(rows, missing, paper, cfg, now_local, eval_res)}
     for path, text in pages.items():
         path.write_text(text, encoding="utf-8")
@@ -1584,9 +1841,46 @@ def pages_only(cfg: dict) -> int:
         run_local = run.astimezone(ZoneInfo("Europe/Stockholm"))
     except Exception:
         run_local = run
-    write_pages(rows, missing, load_paper(), cfg, run_local)
+    write_pages(rows, missing, book(load_paper()), cfg, run_local)
     print(f"[info] pages rebuilt from the scan at {run_local:%Y-%m-%d %H:%M} (Stockholm); nothing fetched")
     return 0
+
+
+def strategy_log_fields(r: dict, cfg: dict) -> dict:
+    """The LLM-experiment columns of signals_log / scores_log for one row."""
+    llm = cfg.get("llm") or {}
+    if "score_v0b" not in r:
+        return {}
+    return {"score_v0": r["score_v0"], "score_v0b": r["score_v0b"], "score_v1": r["score_v1"],
+            "block_buy": r["block_buy"], "release_ids": " ".join(r["release_ids"]),
+            "llm_release_ids": " ".join(r["llm_release_ids"]), "llm_model": llm.get("model", ""),
+            "llm_prompt_version": llm.get("prompt_version", ""),
+            "block_if_direction_lte": llm.get("block_if_direction_lte", ""),
+            "spread_pct": "" if r.get("spread_pct") is None else round(r["spread_pct"], 3)}
+
+
+def score_releases(releases: pd.DataFrame, wl: pd.DataFrame, cfg: dict,
+                   warnings: list[str]) -> tuple[pd.DataFrame, list[dict]]:
+    """Run the LLM on new primary releases (llm_score.py). Problems are added to `warnings`
+    (shown in the reports) instead of stopping the scan."""
+    scores = ls.load_scores(LLM_SCORES_LOG)
+    if not st.llm_enabled(cfg) or releases.empty:
+        return scores, []
+    try:
+        scores, new, warn = ls.run(cfg, releases, scores, names=dict(zip(wl["ticker"], wl["name"])), now=_now())
+    except Exception as exc:   # e.g. PromptChanged, missing prompt file
+        msg = f"LLM scoring failed: {exc}"
+        print(f"[error] {msg}", file=sys.stderr)
+        warnings.append(msg)
+        return scores, []
+    for w in warn:
+        print(f"[warn] {w}", file=sys.stderr)
+    warnings.extend(warn)
+    if new:
+        ls.save_scores(scores, LLM_SCORES_LOG)
+        ok = sum(r["status"] == "ok" for r in new)
+        print(f"[info] llm_scores.csv: {len(new)} new row(s), {ok} scored ok")
+    return scores, new
 
 
 def _now() -> dt.datetime:
@@ -1627,16 +1921,25 @@ def main(argv=None) -> int:
 
     print(f"[info] fetching prices for {len(tickers)} tickers …")
     histories = {t: fetch_history(t, cfg["history_period"]) for t in tickers}
-    bench = fetch_history(cfg["benchmark"], cfg["history_period"])
+    bench = fetch_history(bench_symbol(cfg), cfg["history_period"])
+    bench_primary = fetch_history(bench_symbol(cfg, "primary"), cfg["history_period"])
     if not today_bar_complete(now_local, cfg):
         print(f"[info] before {cfg.get('complete_bar_after', '18:00')} Stockholm time: "
               "ignoring today's still-forming daily bar")
         histories = {t: completed_bars(h, now_local) for t, h in histories.items()}
         bench = completed_bars(bench, now_local)
+        bench_primary = completed_bars(bench_primary, now_local)
     if bench.empty:
-        print(f"[warn] no benchmark data for {cfg['benchmark']}", file=sys.stderr)
+        print(f"[warn] no benchmark data for {bench_symbol(cfg)}", file=sys.stderr)
+    run_warnings = []   # LLM-experiment problems, shown in the reports
+    if bench_primary.empty:
+        msg = f"no primary benchmark data for {bench_symbol(cfg, 'primary')}"
+        print(f"[warn] {msg}", file=sys.stderr)
+        run_warnings.append(msg)
 
     rows, missing, stale = [], [], []
+    release_rows = []
+    stored_releases = ns.load_releases(RELEASES_LOG)
     seen = last_logged_bars()
     for _, w in wl.iterrows():
         pm = price_metrics(histories.get(w["ticker"]), cfg)
@@ -1655,8 +1958,19 @@ def main(argv=None) -> int:
         if not args.no_news:
             items = filter_titles(fetch_news(w["query"], cfg), w["title_match"])
             time.sleep(pause)
+            release_rows += ns.aggregator_rows(items, w["ticker"], cfg.get("release_sources", []), now)
             if cfg.get("releases", {}).get("enabled") and w["mfn_slug"]:
-                releases = fetch_releases(w["mfn_slug"], cfg)
+                limit = cfg["releases"]["mfn_limit"]
+                raw = ns.fetch_mfn_xml(w["mfn_slug"], limit)
+                if raw is not None:
+                    releases = fetch_releases(w["mfn_slug"], cfg, raw)
+                    primary = ns.parse_mfn(raw, w["ticker"], now, cfg["llm"]["max_body_chars"],
+                                           cfg["news"]["language"])
+                    gap = ns.coverage_gaps(stored_releases, primary, w["ticker"], limit)
+                    if gap:
+                        print(f"[warn] {gap}", file=sys.stderr)
+                        run_warnings.append(gap)
+                    release_rows += primary
                 time.sleep(pause)
         nm = news_metrics(items, now, cfg, releases)
         mcap = fetch_market_cap(w["ticker"])
@@ -1670,12 +1984,28 @@ def main(argv=None) -> int:
         })
     rows.sort(key=lambda r: (r["score"], r["vol_ratio"] if not math.isnan(r["vol_ratio"]) else 0),
               reverse=True)
+    if release_rows:
+        stored_releases, added = ns.merge_releases(stored_releases, release_rows)
+        ns.save_releases(stored_releases, RELEASES_LOG)
+        print(f"[info] releases.csv: {len(added)} new release(s)")
+    llm_scores, llm_new = score_releases(stored_releases, wl, cfg, run_warnings)
+    usable = ls.usable_scores(llm_scores, cfg["llm"]["prompt_version"]) if cfg.get("llm") else llm_scores.iloc[0:0]
+    complete_today = today_bar_complete(now_local, cfg)
+    spreads = fetch_spreads(cfg.get("universe", {}).get("segments", [])) if rows and cfg.get("llm") else {}
+    for r in rows:
+        r.update(st.strategy_scores(r, stored_releases, usable, cfg, now, complete_today))
+        r["spread_pct"] = spreads.get(r["ticker"])
 
     if cfg["paper_trading"]["enabled"]:
         paper = backfill_signal_moves(paper, histories)
-        paper = update_paper(paper, histories, bench, cfg)
-        paper = add_paper_signals(paper, rows, cfg, watchlist_version(Path(args.watchlist)))
+        paper = update_paper(paper, histories, bench, cfg, bench_primary)
+        for strategy in st.strategy_labels(cfg) if cfg.get("llm") else [st.V0]:
+            paper = add_paper_signals(paper, rows, cfg, watchlist_version(Path(args.watchlist)), strategy)
         paper.to_csv(PAPER_LOG, index=False)
+    if cfg.get("llm"):
+        update_events(stored_releases, usable, histories, bench_primary, cfg)
+    cmp = comparison(cfg)
+    paper = book(paper)          # v0's reports below use the v0 book only
     summary = paper_summary(paper)
     ec, eval_res, pe_res = evaluations(paper, cfg)
     eval_line = ev.one_line(eval_res)
@@ -1688,15 +2018,16 @@ def main(argv=None) -> int:
         "chg_5d": round(r["chg_5d"], 4),
         "vol_ratio": round(r["vol_ratio"], 2) if not math.isnan(r["vol_ratio"]) else "",
         "news_24h": r["n_24h"], "hype": r["hype"], "reasons": "; ".join(r["reasons"]),
-    } for r in rows if r["score"] > 0 or r["hype"]]
-    if log_rows:
-        pd.DataFrame(log_rows).to_csv(SIGNALS_LOG, mode="a", index=False,
-                                      header=not SIGNALS_LOG.exists())
+        **strategy_log_fields(r, cfg),
+    } for r in rows if r["score"] > 0 or r["hype"] or r.get("score_v0b", 0) > 0 or r.get("score_v1", 0) > 0
+        or r.get("block_buy")]
+    append_csv(SIGNALS_LOG, log_rows)
     append_csv(SCORES_LOG, score_log_rows(rows, missing, wl, now, watchlist_version(Path(args.watchlist)),
-                                          news_checked=not args.no_news, stale=stale))
+                                          news_checked=not args.no_news, stale=stale, cfg=cfg))
     missing = missing + [f"{t} (stale)" for t in stale]   # shown in the reports' warnings
 
-    html = build_html(rows, missing, paper, summary, cfg, now_local, digest_eval)
+    html = build_html(rows, missing, paper, summary, cfg, now_local, digest_eval,
+                      build_llm_html(rows, llm_new, stored_releases, cmp, run_warnings, cfg))
     stamp = f"{now_local:%Y-%m-%d_%H%M}"
     (REPORT_DIR / f"digest_{stamp}.html").write_text(html, encoding="utf-8")
     (REPORT_DIR / "latest.html").write_text(html, encoding="utf-8")
@@ -1716,7 +2047,7 @@ def main(argv=None) -> int:
                 fh.write("\n" + weekly_md)
         print(weekly_md)
 
-    write_pages(rows, missing, paper, cfg, now_local)
+    write_pages(rows, missing, paper, cfg, now_local, run_warnings)
 
     n_alerts = sum(r["score"] >= cfg["alert_min_score"] for r in rows)
     email_cfg = cfg.get("email", {})

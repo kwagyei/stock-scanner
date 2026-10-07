@@ -23,8 +23,10 @@ have made money. **It never places trades.**
 
 4. Flags **hype warnings**: up ≥ 50% in 5 days with no company release found.
 5. Updates the **paper-trade log**. When score ≥ 4, it buys at the next day's open and
-   exits at +30%, −15%, or after 20 trading days. Each trade is compared with OMXS30
-   over the same period.
+   exits at +30%, −15%, or after 20 trading days. Each trade is compared with the
+   Stockholm small-cap index (primary benchmark) and OMXS30 (secondary) over the same period.
+   Three paper books run side by side on the same exits (see [LLM release scoring](#llm-release-scoring)):
+   `v0` (these rules), `v0b` and `v1_<prompt>`.
    A **partial-exit variant** is tracked next to it on the same entries (columns `pe_*`):
    sell half at +30%, move the stop on the rest to the entry price, and sell the rest at
    that stop or after 20 trading days. The main rules are not affected; the digest and
@@ -110,15 +112,21 @@ closed trades in `data/paper_trades.csv`, takes off a round-trip cost, and compa
 trade with the index over the same days. It never changes any data.
 
 ```
-python evaluate.py                    # main paper-trade rules
+python evaluate.py                    # main paper-trade rules (the v0 book)
+python evaluate.py --strategy v0b     # another book: v0, v0b or v1_<prompt version>
+python evaluate.py --compare          # v0 / v0b / v1 side by side, plus the LLM event study
 python evaluate.py --variant          # the partial-exit variant
 python evaluate.py --cost 0.5 --stake 0.05 --min-trades 50
 python evaluate.py --direction drop      # only trades that followed a big drop (or: jump, flat)
 ```
 
-Defaults (also used for the one-line verdict in the evening digest and on the dashboard)
-are under `evaluation:` in `config.yaml`: 1.0% cost per round trip, 10% of the account per
-trade, 30 closed trades before a verdict.
+Defaults (also used for the one-line verdict in the evening digest and on the dashboard):
+costs from `costs:` in `config.yaml`, per side, so 2 × (0.1% commission + 0.5% half spread)
+= 1.2% per round trip. Where the bid-ask spread was logged at signal time (`spread_pct`),
+it replaces the 0.5% half spread. `--cost` sets one round-trip figure for every trade
+instead. Trades are judged against the small-cap index where the trade has it, else
+OMXS30. 10% of the account per trade (`evaluation.stake`), 30 closed trades before a
+verdict (`eval.min_trades`).
 
 **The verdict**
 
@@ -143,6 +151,81 @@ trade, 30 closed trades before a verdict.
 
 A PASS on paper is necessary, not sufficient: paper fills ignore slippage, and thin small
 caps rarely fill at the open price. If it passes, start small.
+
+## LLM release scoring
+
+An experiment: does Claude reading the company's own press release add anything to the
+rules? Three paper books run in parallel, with the same exits, costs and benchmark.
+
+**Off by default, so it costs nothing.** With `llm.enabled: false` (the default) nothing is
+sent to Claude and no API key is needed; v0 and v0b still run (both free) and there is no
+v1 book. Set `llm.enabled: true` and add the API key (below) to start v1. The Anthropic API
+is billed per use (roughly $3–10 a month here), separately from any Claude subscription.
+
+| Strategy | Score |
+|---|---|
+| `v0` | The rules above, unchanged. "Company release" = MFN feed or a wire source in Google News. |
+| `v0b` | v0, but only primary releases (MFN feed, which carries Cision too) count, timed to the signal bar (below). |
+| `v1_<prompt>` | v0b with the flat +2 replaced by LLM points: material and direction +2 → +3; direction +1 → +2; anything else → 0. No buy when a material release scores direction ≤ −2 (`block_buy`). |
+
+With several releases on one signal bar, the most positive decides the points and the most
+negative decides blocking. Routine titles (`release_ignore_titles`) count for nothing and are
+not sent to the LLM.
+
+**Timing.** A release published before 09:00 Stockholm on a trading day can be traded at that
+day's open; otherwise at the next trading day's open. Trading days are the dates in the price
+data, so weekends and holidays need no calendar. The signal bar is the trading day before that
+entry day: v0b and v1 count releases from 09:00 on the signal bar up to the next open, and the
+paper trade buys at the next open as usual. The event study uses the same entry day.
+
+**Files**
+
+| File | What's in it |
+|---|---|
+| `news_sources.py` | Fetches each company's MFN feed once per run (v0 parses the same bytes) and stores releases in `data/releases.csv`: primary rows with the full text, plus Google News wire matches as `aggregator` rows (no text). Deduplicated on `release_id` (hash of source + URL) and on near-identical titles per stock within 24h. |
+| `llm_score.py` | Sends each new primary release to Claude (`data/llm_scores.csv`). JSON output checked against a fixed schema; one retry on invalid output, then `status=error`. Scored once per `release_id` + prompt version. `api_error` rows (API down, rate limit, no key) are retried next run. `python llm_score.py --backfill` also scores releases before `llm.score_from_date`; those rows get `is_backfill=true` and are never used in trading or evaluation. |
+| `prompts/score_v1.md` | The prompt. **Never edit a prompt after it has been used live**: add `score_v2.md`, set `llm.prompt_version: v2` (a new strategy `v1_v2`). On first live use the prompt is fingerprinted in `prompts/used_prompts.json`; an edited prompt makes scoring stop with an error in the report. |
+| `strategies.py` | Timing, v0b/v1 points and blocking. |
+| `data/llm_events.csv` | Return after each scored release at 1, 5 and 20 trading days, the small-cap index over the same days, and the abnormal return (difference minus costs). Rebuilt every run. |
+
+`paper_trades.csv` has a `strategy` column (trades from before the experiment are `v0`) plus
+`bench_primary_*` and `spread_pct`. `signals_log.csv` and `scores_log.csv` add `score_v0`,
+`score_v0b`, `score_v1`, `block_buy`, the release ids, model, prompt version and block threshold.
+
+**Config keys**: `llm.model`, `llm.prompt_version`, `llm.effort` (fixed per prompt version),
+`llm.score_from_date` (go-live: only releases published from this date are scored),
+`llm.max_calls_per_run` (cost cap), `llm.max_body_chars`, `llm.block_if_direction_lte`,
+`llm.skip_routine`, `llm.points.*`; `costs.commission_pct`, `costs.half_spread_pct`;
+`eval.min_trades`, `eval.min_events`, `eval.horizons`; `benchmark.primary`, `benchmark.secondary`.
+
+**Adding the API key.** Create a key at console.anthropic.com. In the GitHub repo:
+*Settings → Secrets and variables → Actions → New repository secret*, name
+`ANTHROPIC_API_KEY`. The workflow passes it to the scan step only; the SDK reads it from the
+environment and it is never printed or written to a file. Locally, `export ANTHROPIC_API_KEY=…`
+in your terminal before `python scanner.py`. Without a key (and `llm.enabled: true`) the scan still
+runs; the report says how many releases were not scored. Expected cost with Sonnet 5.5: about
+$0.01–0.03 per release, roughly $3–10 a month, at most 50 calls per run. Set a monthly spend
+limit in the console.
+
+**Reading the comparison** (`python evaluate.py --compare`, and the *Evaluation* page). One
+column per strategy, each with its own verdict (same four checks as above, against small
+caps; OMXS30 shown for reference). Then the event study: abnormal returns grouped by the LLM's
+`direction`, `surprise` and `event_type` (N, mean, median, t, hit rate at each horizon) and six
+checks at 5 days: enough events (`eval.min_events`, 300); returns rise with direction; "up minus
+down" (direction > 0 minus direction < 0) is positive, in both halves of the sample, and without
+the best event; t above 2. Everything says **NOT YET** until each strategy has 30 closed trades
+and the study has 300 events. The LLM helps only if v1 beats v0b *and* the event study passes;
+v0b vs v0 shows what timing and primary-only releases do on their own.
+
+**Data sources**
+
+- Releases: `https://mfn.se/all/a/<mfn_slug>.rss?limit=20` (full text in `<x:content type="text">`).
+- Primary benchmark: OMX Stockholm Small Cap PI from Nasdaq Nordic's public chart endpoint,
+  `https://api.nasdaq.com/api/nordic/instruments/IX3364/chart?assetClass=INDEXES&fromDate=…&toDate=…`
+  (`benchmark.primary: "nasdaq:IX3364"`). Yahoo has no usable history for this index. Like the
+  share screener it is undocumented; if it fails, the report warns and the trade's primary
+  benchmark stays blank (the evaluation then uses OMXS30 for it).
+- Spreads: bid and ask from the Nasdaq share screener at scan time.
 
 ## Rebuilding the watchlist
 
@@ -180,7 +263,8 @@ builder stops with an error and your watchlist is left as it is.
   in `/Applications/Python 3.x/` once.
 - **No social media yet.** X requires paid API access, and scraping it breaks its terms.
   Reddit and the Placera forum are candidates for v2.
-- **Paper fills:** these are idealised. There's no courtage, no spread, and thin small
-  caps may not fill at the open price.
+- **Paper fills:** these are idealised. The evaluation deducts commission and spread, but
+  thin small caps may not fill at the open price at all. The logged spread is a snapshot
+  at scan time, not the spread at the next open.
 
 *General information and a research tool. Not investment advice.*
