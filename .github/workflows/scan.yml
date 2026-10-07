@@ -81,5 +81,7 @@ jobs:
           git config user.name "scanner-bot"
           git config user.email "scanner-bot@users.noreply.github.com"
           git add data/ reports/ DASHBOARD.md   # digest_*.html are gitignored
-          git diff --cached --quiet || git commit -m "scan $(date -u +%Y-%m-%d_%H%M)"
+          git diff --cached --quiet && exit 0
+          git commit -m "scan $(date -u +%Y-%m-%d_%H%M)"
+          git pull --rebase   # the fund risk watch commits to main too
           git push

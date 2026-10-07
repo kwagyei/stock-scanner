@@ -1,0 +1,132 @@
+# Fund risk news monitor – configuration
+# Edit holdings when the fund publishes a new factsheet (monthly on am.jpmorgan.com).
+
+fund:
+  name: "JPMorgan Funds - Taiwan Fund A (acc) USD"
+  isin: "LU0210528419"
+  search_names: ["JPMorgan Taiwan Fund", "JPM Taiwan Fund"]
+
+# Top holdings. weight = % of fund (approximate, from latest public data).
+# aliases are extra names used in news headlines.
+holdings:
+  - {name: "MediaTek", weight: 9.2, aliases: []}
+  - {name: "TSMC", weight: 9.1, aliases: ["Taiwan Semiconductor"]}
+  - {name: "Delta Electronics", weight: 6.8, aliases: []}
+  - {name: "Elite Material", weight: 3.4, aliases: ["Elite Material Co"]}
+  - {name: "CTBC Financial", weight: 3.4, aliases: ["CTBC"]}
+  - {name: "Hon Hai", weight: 0, aliases: ["Foxconn"]}
+  - {name: "Quanta Computer", weight: 0, aliases: ["Quanta"]}
+  - {name: "Accton Technology", weight: 0, aliases: ["Accton"]}
+  - {name: "ASE Technology", weight: 0, aliases: ["ASE Holding", "ASE Technology Holding"]}
+  - {name: "E.Sun Financial", weight: 0, aliases: []}
+  - {name: "Mega Financial", weight: 0, aliases: []}
+  - {name: "Cathay Financial", weight: 0, aliases: []}
+
+# Companies the holdings depend on (customers, suppliers). Bad news here travels to Taiwan.
+dependencies:
+  customers: ["Nvidia", "Apple", "AMD", "Broadcom", "Qualcomm", "Microsoft", "Google", "Amazon", "Meta"]
+  suppliers: ["ASML", "Applied Materials", "Tokyo Electron", "Lam Research"]
+
+# Broad topic searches beyond named companies.
+topics:
+  - "Taiwan Strait"
+  - "China Taiwan military"
+  - "Taiwan blockade"
+  - "Taiwan earthquake"
+  - "Taiwan typhoon"
+  - "Taiwan power outage"
+  - "Taiwan water shortage"
+  - "Taiwan strike workers"
+  - "semiconductor export controls"
+  - "chip tariffs"
+  - "US China chip ban"
+  - "TAIEX"
+  - "Taiwan dollar"
+  - "Taiwan stock market"
+  - "AI capex spending"
+  - "AI chip demand"
+  - "semiconductor inventory"
+
+# Risk categories. Keywords are matched as whole words/phrases, case-insensitive.
+# severity: 3 = high, 2 = medium, 1 = low
+risk_categories:
+  geopolitics:
+    severity: 3
+    # "war" alone matched Taiwan's annual war games; use phrases instead.
+    keywords: ["blockade", "invasion", "invade", "war with", "go to war", "all-out war", "act of war",
+               "war over Taiwan", "military drills", "live-fire", "PLA", "missile", "warships", "incursion",
+               "quarantine", "annexation", "embargo", "armed conflict", "military conflict", "tensions escalate"]
+  trade_restrictions:
+    severity: 3
+    keywords: ["export controls", "export control", "export ban", "ban", "banned", "tariff", "tariffs",
+               "sanction", "sanctions", "entity list", "restriction", "restrictions", "Section 232",
+               "license requirement", "trade war", "retaliation", "countermeasures"]
+  natural_disaster:
+    severity: 3
+    # Taiwan has small quakes almost daily; only strong ones count (magnitude 6+ or described as such).
+    keywords: ["strong earthquake", "major earthquake", "powerful earthquake", "deadly earthquake",
+               "strong quake", "major quake", "powerful quake", "deadly quake",
+               "magnitude 6", "magnitude 7", "magnitude 8", "mag. 6", "mag. 7", "mag. 8",
+               "tsunami", "typhoon", "flood", "flooding", "landslide", "drought", "water shortage", "water rationing"]
+  infrastructure:
+    severity: 2
+    # bare "fire" / "shutdown" matched "fires CEO", "under fire", "government shutdown"
+    keywords: ["power outage", "blackout", "power cut", "grid failure", "factory fire", "plant fire", "fab fire",
+               "fire broke out", "blaze", "explosion", "contamination", "gas leak", "evacuated", "evacuates",
+               "evacuation", "halts production", "halted production", "production halt", "suspends production",
+               "plant shutdown", "factory shutdown", "production shutdown"]
+  labour:
+    severity: 2
+    keywords: ["strike", "strikes", "walkout", "labor dispute", "labour dispute", "union protest",
+               "layoffs", "job cuts", "worker shortage"]
+  demand_and_customers:
+    severity: 2
+    keywords: ["cuts orders", "cut orders", "order cuts", "cancels orders", "cancelled orders",
+               "pulls out of", "relocate", "relocates", "shifts production",
+               "moves production", "capex cut", "cuts spending", "spending slowdown", "demand slowdown",
+               "inventory glut", "oversupply", "excess inventory", "AI bubble",
+               "delays shipments", "delays orders", "delays production", "shipment delays", "delayed shipments",
+               "halts construction"]
+  company_results:
+    severity: 2
+    keywords: ["profit warning", "cuts guidance", "lowers guidance", "lowers forecast", "cuts forecast",
+               "misses estimates", "missed estimates", "revenue falls", "revenue drops", "sales fall",
+               "sales decline", "profit falls", "loss widens", "downgrade", "downgraded", "weak outlook",
+               "disappointing"]
+  legal_regulatory:
+    severity: 2
+    keywords: ["lawsuit", "sued", "fined", "fines", "antitrust", "probe", "investigation", "indicted",
+               "raid", "subpoena", "trade secrets", "espionage", "penalty"]
+  cyber_operations:
+    severity: 2
+    keywords: ["cyberattack", "cyber attack", "ransomware", "hack", "hacked", "data breach", "outage",
+               "defect", "recall", "yield problems", "yield issues"]
+  market_stress:
+    severity: 1
+    keywords: ["sell-off", "selloff", "plunge", "plunges", "tumbles", "slumps", "crash", "rout",
+               "outflows", "foreign selling", "volatility", "slide", "slides", "slump", "falls sharply"]
+  fund_specific:
+    severity: 3
+    keywords: ["manager change", "portfolio manager leaves", "fund suspended", "suspends dealing",
+               "liquidation", "fund merger", "merged", "closes fund"]
+
+# Scoring
+scoring:
+  holding_bonus: 2         # headline names a top-5 holding (weight >= 3%)
+  other_holding_bonus: 1   # names another watched holding
+  dependency_bonus: 1      # names a customer/supplier
+  taiwan_bonus: 1          # mentions Taiwan / Taiwanese
+  flag_min_score: 3        # items below this go to "watch" instead of "flagged"
+  require_relevance: true  # flag only if Taiwan, the fund, a holding, a customer or a supplier is named;
+                           # other keyword matches (e.g. a quake in India) go to "watch"
+
+news:
+  lookback: "2d"           # Google News window; overlap is removed with the seen-store
+  language: "en-US"
+  country: "US"
+  pause_seconds: 1.0
+  seen_retention_days: 30
+
+email:
+  enabled: false           # set true + SMTP_* / EMAIL_TO secrets
+  send_when: flagged       # always | flagged
