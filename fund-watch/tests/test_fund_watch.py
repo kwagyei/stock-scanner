@@ -362,12 +362,12 @@ def test_markdown_page(monkeypatch):
     run(monkeypatch, feeds)
     md = (fw.REPORT_DIR / "fund_watch_latest.md").read_text()
     assert md.startswith("# 🛡️ Fund risk watch") and "(../../DASHBOARD.md)" in md
-    assert "| 🇹🇼 **Taiwan** | **2** | **1** | 1 |" in md                           # flagged, high, watch
+    assert "| 🇹🇼 **Taiwan** | **2** | **1** | 1 |" in md        # stories, high, watch (no grouping here)
     assert "| 🌍 **Global** |" in md
     assert "## 🇹🇼 JPMorgan Funds - Taiwan Fund A (acc) USD" in md and "## 🌍 Avanza Global" in md
     taiwan = md.split("## 🇹🇼")[1].split("## 🌍")[0]
     assert "> [!WARNING]\n> **1 high-severity item(s)**" in taiwan
-    assert "TSMC \\| halts production" in taiwan and "🔴 HIGH" in taiwan and "🟠 MEDIUM" in taiwan
+    assert "TSMC \\| halts production" in taiwan and "🔴&nbsp;HIGH" in taiwan and "🟠&nbsp;MEDIUM" in taiwan
     flagged, watch = taiwan.split("<details>")
     assert "Peru" in watch and "Peru" not in flagged
     assert md.count("<details>") == md.count("</details>")
@@ -469,3 +469,105 @@ def test_shipped_config(cfg):
     assert [f["id"] for f in cfg["funds"]] == ["jpm_taiwan", "avanza_global"]
     g = fund(cfg, "avanza_global")
     assert g["isin"] == "SE0011527613" and g["flag_min_score"] == 4
+
+
+# --------------------------------------------------------------------------- story grouping
+
+def _stories(cfg, titles, fid="avanza_global", threshold=None):
+    """Classify headlines for a fund and group them, like a run does."""
+    f = fund(cfg, fid)
+    cats, names = fw.compile_categories(cfg), fw.build_name_sets(f)
+    items = [item(t, hours_ago=n) for n, t in enumerate(titles, 1)]
+    cl = [c for it in items if (c := fw.classify(it, cats, names, cfg, fund=f))]
+    cl.sort(key=lambda x: (x["score"], x["severity"]), reverse=True)
+    thr = cfg["news"]["story_similarity"] if threshold is None else threshold
+    return fw.group_stories(cl, fw.word_weights(items + [item(t) for t in BACKGROUND]), thr)
+
+
+# Unrelated headlines so word weights look like a real run (common words, a few rare ones).
+BACKGROUND = ["Taiwan stocks close higher on tech gains", "Taiwan shares edge lower", "China Taiwan tensions",
+              "Stock market today: Nasdaq rises", "Stocks fall as yields climb", "Apple unveils new iPhone",
+              "Nvidia earnings preview", "TSMC sales rise in September", "Taiwan dollar firms",
+              "Wall Street opens flat", "Fed officials speak this week", "Oil prices steady"] * 3
+
+# Real headline styles from one strike story (many outlets, similar wording).
+MICRON = ["Micron Taiwan union wins strike vote over bonus dispute",
+          "Micron's Taiwan union wins strike vote with 99% support",
+          "Micron Taiwan union wins mandate to strike over bonus dispute",
+          "Micron Taiwan workers vote to strike over bonus dispute",
+          "Micron Taiwan union authorizes strike over bonus dispute"]
+
+
+def test_same_story_headlines_are_grouped(cfg):
+    stories = _stories(cfg, MICRON, "jpm_taiwan")
+    assert len(stories) == 1 and len(stories[0]["similar"]) == 4
+
+
+def test_very_differently_worded_headlines_may_stay_apart(cfg):
+    # Deliberately cautious: wrongly merging two stories would hide one, so headlines that share
+    # little wording stay separate even when they are about the same event.
+    assert len(_stories(cfg, ["Micron shares fall as Taiwan workers authorize strike amid bonus dispute",
+                              "Micron's Taiwan Union Wins Strike Mandate Over Profit-Sharing Demand"],
+                        "jpm_taiwan")) == 2
+
+
+def test_lead_is_the_best_ranked_headline(cfg):
+    # the TSMC headline scores highest for the Taiwan fund and leads; the others follow it
+    stories = _stories(cfg, ["Taiwan workers vote to strike at TSMC plant over bonus dispute",
+                             "Workers vote to strike at chip plant over bonus dispute in Taiwan",
+                             "Chip plant workers in Taiwan vote to strike over bonus dispute"], "jpm_taiwan")
+    assert len(stories) == 1 and "TSMC" in stories[0]["title"] and stories[0]["entities"] == ["TSMC"]
+
+
+@pytest.mark.parametrize("a,b", [
+    ("Quanta says September server dip is normal as revenue falls 23% from August",
+     "EMC stock gains 1.06 percent as August revenue falls"),                       # different companies
+    ("McDonald's Faces Antitrust Lawsuit Over AI Pricing",
+     "Expedia hit with antitrust class action over algorithm"),
+    ("Micron Taiwan plant faces strike over bonus dispute",
+     "Micron Taiwan plant faces lawsuit over bonus dispute"),                       # same words, other risk
+])
+def test_different_stories_stay_apart(cfg, a, b):
+    assert len(_stories(cfg, [a, b], "jpm_taiwan")) == 2
+
+
+def test_grouping_can_be_switched_off(cfg):
+    assert len(_stories(cfg, MICRON, "jpm_taiwan", threshold=1.01)) == len(MICRON)
+
+
+def test_grouped_story_end_to_end(monkeypatch):
+    feeds = {"Taiwan strike workers": [item(t, source=f"Outlet {n}") for n, t in enumerate(MICRON)]}
+    run(monkeypatch, feeds)
+    md = (fw.REPORT_DIR / "fund_watch_latest.md").read_text()
+    taiwan = md.split("## 🇹🇼")[1].split("## 🌍")[0]
+    flagged = taiwan.split("👀 Watch")[0]
+    assert flagged.count("](<http://x>)<br><sub>Outlet") == 1                      # one row for the story
+    assert flagged.count("\n- [Micron") == 4                                       # 4 in the grouped list
+    assert "➕ 4 similar: Outlet 1, Outlet 2, Outlet 3, Outlet 4" in flagged
+    assert "📰 Similar headlines grouped into these stories (4)" in flagged
+    assert "| 🇹🇼 **Taiwan** | **1**<br><sub>5 articles</sub> |" in md
+    assert md.count("<details>") == md.count("</details>")
+    rows = [r for r in _log() if r["fund"] == "jpm_taiwan"]
+    assert len(rows) == 5 and len({r["story"] for r in rows}) == 1                   # every article logged
+    s = {f["id"]: f for f in json.loads(fw.SUMMARY_FILE.read_text())["funds"]}["jpm_taiwan"]
+    assert (s["n_flagged"], s["n_flagged_articles"], s["top"][0]["similar"]) == (1, 5, 4)
+    html = (fw.REPORT_DIR / "fund_watch_latest.html").read_text()
+    assert "+4 similar (Outlet 1, Outlet 2, Outlet 3, Outlet 4)" in html and "Flagged · 1 story" in html
+
+
+def test_watch_level_headline_joins_a_flagged_story(cfg):
+    # without "Taiwan" the second headline alone would be on watch (labour 2 < 3); grouped, it
+    # travels with the flagged lead instead of appearing separately.
+    stories = _stories(cfg, ["Micron Taiwan union authorizes strike over bonus dispute",
+                             "Micron union authorizes strike over bonus dispute"], "jpm_taiwan")
+    flagged, watch = fw.split_flagged(stories, cfg, fund(cfg, "jpm_taiwan"))
+    assert len(flagged) == 1 and len(flagged[0]["similar"]) == 1 and watch == []
+
+
+def test_log_with_fund_but_no_story_column_is_upgraded(monkeypatch):
+    fw.DATA_DIR.mkdir()
+    fw.LOG_FILE.write_text("run_utc,fund,published_utc,score,severity,categories,entities,source,title,link\n"
+                           "2026-10-07T13:35+00:00,avanza_global,,4,HIGH,macro,,Forbes,Fed raises rates,http://f\n")
+    run(monkeypatch, {})
+    rows = _log()
+    assert list(rows[0]) == fw.LOG_COLUMNS and (rows[0]["fund"], rows[0]["story"]) == ("avanza_global", "")

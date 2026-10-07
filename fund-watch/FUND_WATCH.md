@@ -62,6 +62,14 @@ Score = severity (3/2/1), plus these bonuses:
 - +1 if one of the fund's relevance words is named (Taiwan, Taipei, TAIEX; or Wall Street, S&P 500,
   Nasdaq, Fed, krona and similar)
 
+**Same story, many outlets.** Headlines about the same story are grouped into one item, led by
+the best-scoring headline ("➕ 18 similar: TipRanks, Nikkei Asia…"; the others are listed under
+the table). Two headlines are grouped when their distinctive words overlap enough
+(`news.story_similarity`, 0.5) and they share a risk category, so a company's lawsuit and its
+strike stay separate. It's cautious on purpose: very differently worded headlines about the
+same event can still show up separately, but two different stories shouldn't be merged.
+Counts on the page and the dashboard are stories; the log keeps every article with a `story` id.
+
 **Flagged** = score ≥ 3 (≥ 4 for Avanza Global) and the article is tied to the fund: a relevance
 word, the fund, a holding or a dependency (`require_relevance`). Everything else goes under
 **Watch**. Only articles not seen in earlier runs are shown. It's keyword-based, so expect some

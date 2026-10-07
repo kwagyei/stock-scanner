@@ -607,6 +607,7 @@ def test_main_applies_title_match(cfg, tmp_paths, monkeypatch):
     monkeypatch.setattr(scanner, "fetch_news", lambda q, c: feed)
     monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: None)
     monkeypatch.setattr(scanner.time, "sleep", lambda s: None)
+    monkeypatch.setattr(scanner, "_now", lambda: NOW)          # news items are timed relative to NOW
     scanner.main(["--no-email", "--watchlist", str(wl)])
     log = pd.read_csv(scanner.SIGNALS_LOG).set_index("ticker")
     assert "S.ST" not in log.index                     # 1 relevant item: no spike, no signal
@@ -1113,10 +1114,12 @@ def test_weekly_page_has_direction_split(cfg):
 
 def _fund_summary(run_utc="2026-10-07T05:13+00:00", flagged=2, high=1, single=False):
     top = [{"score": 6, "severity": "HIGH", "title": "TSMC | halts production", "link": "https://x.test/a",
-            "source": "Reuters", "entities": ["TSMC"], "categories": ["infrastructure"]},
+            "source": "Reuters", "entities": ["TSMC"], "categories": ["infrastructure"],
+            "similar": 3, "similar_sources": "Bloomberg, Nikkei Asia, Focus Taiwan"},
            {"score": 3, "severity": "MEDIUM", "title": "Quanta revenue falls", "link": "https://x.test/b",
             "source": "digitimes", "entities": ["Quanta Computer"], "categories": ["company_results"]}][:flagged]
-    tw = {"n_flagged": flagged, "n_high": high, "n_watch": 4, "top": top}
+    tw = {"n_flagged": flagged, "n_high": high, "n_watch": 4, "top": top,
+          **({} if single else {"n_flagged_articles": flagged + (3 if flagged else 0)})}
     if single:   # the format written before several funds
         return {"run_utc": run_utc, "run_local": "2026-10-07 07:13", "n_raw": 1300, **tw}
     gl = {"id": "avanza_global", "short": "Global", "icon": "🌍", "name": "Avanza Global", "isin": "SE0011527613",
@@ -1141,9 +1144,12 @@ def test_dashboard_fund_watch_section(cfg, tmp_paths, monkeypatch):
     assert "**3**<br><sub>flagged · 1 high</sub>" in md                            # summed over both funds
     sec = md.split("## 🛡️ Fund risk watch")[1].split("## More")[0]
     assert "Last run **Wed&nbsp;7&nbsp;Oct 07:13**" in sec and "1300 articles scanned" in sec
-    assert "| 🇹🇼 **Taiwan** | **2** | 1 | 4 |" in sec and "| 🌍 **Global** | **1** | 0 | 9 |" in sec
+    assert "| 🇹🇼 **Taiwan** | **2**<br><sub>5 articles</sub> | 1 | 4 |" in sec
+    assert "| 🌍 **Global** | **1** | 0 | 9 |" in sec                               # no grouping: no article count
+    assert "➕ 3 similar: Bloomberg, Nikkei Asia, Focus Taiwan" in sec
     assert "**🇹🇼 Taiwan** · 1 high-severity" in sec and "**🌍 Global**" in sec
-    assert "| 🔴&nbsp;HIGH | [TSMC \\| halts production](<https://x.test/a>) | TSMC |" in sec
+    assert ("| 🔴&nbsp;HIGH | [TSMC \\| halts production](<https://x.test/a>)"
+            "<br><sub>➕ 3 similar: Bloomberg, Nikkei Asia, Focus Taiwan</sub> | TSMC |") in sec
     assert "[Fed raises interest rates](<https://x.test/c>)" in sec
     assert "[Full fund watch →](fund-watch/reports/fund_watch_latest.md)" in sec
     assert "last ran" not in sec                                                  # fresh: no stale warning

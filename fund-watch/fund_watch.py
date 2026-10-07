@@ -24,6 +24,7 @@ import csv
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import re
 import smtplib
@@ -50,7 +51,7 @@ REPORT_DIR = ROOT / "reports"
 SEEN_FILE = DATA_DIR / "fund_watch_seen.json"
 LOG_FILE = DATA_DIR / "fund_watch_log.csv"
 SUMMARY_FILE = DATA_DIR / "fund_watch_latest.json"   # read by the stock scanner's dashboard
-LOG_COLUMNS = ["run_utc", "fund", "published_utc", "score", "severity", "categories",
+LOG_COLUMNS = ["run_utc", "fund", "story", "published_utc", "score", "severity", "categories",
                "entities", "source", "title", "link"]
 UTC = dt.timezone.utc
 SEVERITY_LABEL = {3: "HIGH", 2: "MEDIUM", 1: "LOW"}
@@ -263,17 +264,81 @@ def _considered(item: dict, fund: dict, names: dict) -> bool:
         any(p.search(text) for p in names["region"] + names["fund"])
 
 
+# --------------------------------------------------------------------------- stories
+
+STOPWORDS = set("""a an and are as at be by for from has have in into is it its of on or that the this to
+was were will with after amid over under about against says say said new more than up down out not but
+can could would may might how what why who when where which while does do did vs via per their his her
+they them we you your our""".split())
+
+
+def headline_words(title: str) -> set[str]:
+    """Distinctive words of a headline (no publisher suffix, no small words)."""
+    core = re.sub(r"\s+-\s+[^-]+$", "", title).lower().replace("’", "'")
+    core = re.sub(r"'s\b", "", core)
+    return {w for w in re.findall(r"[a-z0-9]+", core) if len(w) > 2 and w not in STOPWORDS}
+
+
+def word_weights(items: list[dict]) -> dict:
+    """Rare words count more than common ones (inverse document frequency over this run)."""
+    df = {}
+    for it in items:
+        for w in headline_words(it["title"]):
+            df[w] = df.get(w, 0) + 1
+    n = len(items)
+    return {w: math.log((n + 1) / (c + 1)) + 1 for w, c in df.items()}
+
+
+def _similarity(a: set, b: set, weight: dict) -> float:
+    shared = a & b
+    if not shared:
+        return 0.0
+    sq = lambda ws: sum(weight.get(w, 1.0) ** 2 for w in ws)
+    return sq(shared) / math.sqrt(sq(a) * sq(b))
+
+
+def group_stories(items: list[dict], weight: dict, threshold: float) -> list[dict]:
+    """Merge headlines about the same story. items must be ranked best first; the best of each
+    group leads it and carries the others in "similar". Two headlines join when their distinctive
+    words overlap enough (>= threshold) and they share a risk category, so a company's lawsuit
+    and its strike stay apart. Set threshold above 1 to switch grouping off."""
+    words = [headline_words(i["title"]) for i in items]
+    parent = list(range(len(items)))
+
+    def root(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(len(items)):
+        for j in range(i + 1, len(items)):
+            if set(items[i]["categories"]) & set(items[j]["categories"]) and \
+                    _similarity(words[i], words[j], weight) >= threshold:
+                parent[root(j)] = root(i)
+    groups = {}
+    for i in range(len(items)):
+        groups.setdefault(root(i), []).append(i)
+    stories = []
+    for members in sorted(groups.values(), key=lambda m: m[0]):   # keeps the ranking
+        lead = items[members[0]]
+        stories.append({**lead, "similar": [items[k] for k in members[1:]]})
+    return stories
+
+
 def classify_funds(items: list[dict], cfg: dict, now: dt.datetime) -> list[dict]:
-    """Per fund: {"fund", "flagged", "watch"}, each list ranked by score."""
+    """Per fund: {"fund", "flagged", "watch"}: stories ranked by score (see group_stories)."""
     cats = compile_categories(cfg)
     matched = [(it, match_categories(it, cats)) for it in items]
+    weight = word_weights(items)
+    threshold = cfg["news"].get("story_similarity", 0.5)
     results = []
     for f in cfg["funds"]:
         names = build_name_sets(f)
         cl = [c for it, m in matched
               if m and _considered(it, f, names) and (c := classify(it, cats, names, cfg, m, f))]
         cl.sort(key=lambda x: (x["score"], x["severity"], x["ts"] or now), reverse=True)
-        flagged, watch = split_flagged(cl, cfg, f)
+        flagged, watch = split_flagged(group_stories(cl, weight, threshold), cfg, f)
         results.append({"fund": f, "flagged": flagged, "watch": watch})
     return results
 
@@ -305,6 +370,15 @@ def _n_high(items) -> int:
     return sum(1 for i in items if i["severity"] == 3)
 
 
+def _n_articles(stories) -> int:
+    return sum(1 + len(s.get("similar", [])) for s in stories)
+
+
+def _similar_sources(story, limit: int = 4) -> str:
+    srcs = list(dict.fromkeys(i["source"] for i in story.get("similar", []) if i["source"]))
+    return ", ".join(srcs[:limit]) + ("…" if len(srcs) > limit else "")
+
+
 def build_html(results, now_local, n_queries, n_raw) -> str:
     def rows(items):
         out = []
@@ -313,20 +387,24 @@ def build_html(results, now_local, n_queries, n_raw) -> str:
                                for c, k in i["categories"].items())
             when = i["ts"].strftime("%d %b %H:%M") if i["ts"] else ""
             ents = escape(", ".join(i["entities"])) or "–"
+            sim = i.get("similar", [])
+            more = (f"<details><summary><small>+{len(sim)} similar ({escape(_similar_sources(i))})</small></summary>"
+                    + "".join(f"<small>· <a href=\"{escape(o['link'])}\">{escape(o['title'])}</a></small><br>"
+                              for o in sim) + "</details>") if sim else ""
             out.append(
                 f"<tr class=s{i['severity']}><td class=n>{i['score']}</td>"
                 f"<td><span class=sev>{SEVERITY_LABEL[i['severity']]}</span></td>"
                 f"<td><a href=\"{escape(i['link'])}\">{escape(i['title'])}</a>"
-                f"<br><small>{escape(i['source'])} · {when} UTC</small></td>"
+                f"<br><small>{escape(i['source'])} · {when} UTC</small>{more}</td>"
                 f"<td>{ents}</td><td><small>{cats}</small></td></tr>")
         return "\n".join(out)
 
     head = "<tr><th>Score</th><th>Severity</th><th>Headline</th><th>Affects</th><th>Why flagged</th></tr>"
     sections = "\n".join(
         f"""<h2>{escape(r['fund']['icon'])} {escape(r['fund']['name'])} <small>ISIN {escape(r['fund']['isin'])}</small></h2>
-<h3>Flagged · {len(r['flagged'])}</h3>
+<h3>Flagged · {len(r['flagged'])} {'story' if len(r['flagged']) == 1 else 'stories'}</h3>
 <div class=box><table>{head}{rows(r['flagged']) or '<tr><td colspan=5>Nothing new above the flag threshold.</td></tr>'}</table></div>
-<h3>Watch (lower score) · {len(r['watch'])}</h3>
+<h3>Watch (lower score) · {len(r['watch'])} {'story' if len(r['watch']) == 1 else 'stories'}</h3>
 <div class=box><table>{head}{rows(r['watch']) or '<tr><td colspan=5>None.</td></tr>'}</table></div>"""
         for r in results)
     return f"""<!doctype html><html><head><meta charset="utf-8">
@@ -351,7 +429,7 @@ false positives; read the source.</small></p>
 </body></html>"""
 
 
-SEVERITY_ICON = {3: "🔴 HIGH", 2: "🟠 MEDIUM", 1: "🔵 LOW"}
+SEVERITY_ICON = {3: "🔴&nbsp;HIGH", 2: "🟠&nbsp;MEDIUM", 1: "🔵&nbsp;LOW"}
 
 
 def _md(text) -> str:
@@ -365,8 +443,20 @@ def _md_items(items, empty: str) -> str:
     for i in items:
         when = i["ts"].strftime("%d %b %H:%M") if i["ts"] else ""
         why = "<br>".join(f"**{cat_label(c)}:** {_md(', '.join(k))}" for c, k in i["categories"].items())
+        sim = i.get("similar", [])
+        more = f"<br><sub>➕ {len(sim)} similar: {_md(_similar_sources(i))}</sub>" if sim else ""
         out.append(f"| **{i['score']}** | {SEVERITY_ICON[i['severity']]} | [{_md(i['title'])}](<{i['link']}>)"
-                   f"<br><sub>{_md(i['source'])} · {when} UTC</sub> | {_md(', '.join(i['entities'])) or '–'} | {why} |")
+                   f"<br><sub>{_md(i['source'])} · {when} UTC</sub>{more} | {_md(', '.join(i['entities'])) or '–'} | {why} |")
+    grouped = [i for i in items if i.get("similar")]
+    if grouped:
+        out += ["", f"<details><summary>📰 Similar headlines grouped into these stories "
+                    f"({sum(len(i['similar']) for i in grouped)})</summary>", ""]
+        for i in grouped:
+            lead = re.sub(r"\s+-\s+[^-]+$", "", i["title"])
+            out.append(f"**{_md(lead)}**")
+            out += [f"- [{_md(o['title'])}](<{o['link']}>)" for o in i["similar"]]
+            out.append("")
+        out.append("</details>")
     return "\n".join(out) + "\n"
 
 
@@ -374,12 +464,15 @@ def build_page_md(results, now_local, n_queries, n_raw) -> str:
     """The report as a Markdown page (GitHub shows Markdown, not HTML, in a private repo)."""
     back = ("[![Dashboard](https://img.shields.io/badge/Dashboard-24292f?style=for-the-badge)]"
             "(../../DASHBOARD.md)")
-    glance = (["| Fund | 🚩 Flagged | 🔴 High | 👀 Watch |", "|:---|:---:|:---:|:---:|"]
-              + [f"| {r['fund']['icon']} **{_md(r['fund']['short'])}** | **{len(r['flagged'])}** | "
+    glance = (["| Fund | 🚩 Flagged stories | 🔴 High | 👀 Watch |", "|:---|:---:|:---:|:---:|"]
+              + [f"| {r['fund']['icon']} **{_md(r['fund']['short'])}** | **{len(r['flagged'])}**"
+                 + (f"<br><sub>{_n_articles(r['flagged'])} articles</sub>"
+                    if _n_articles(r["flagged"]) != len(r["flagged"]) else "") + " | "
                  f"**{_n_high(r['flagged'])}** | {len(r['watch'])} |" for r in results])
     out = ["# 🛡️ Fund risk watch", "", back, "",
            f"<sub>Updated **{now_local:%a %d %b %Y, %H:%M}** (Stockholm) · {n_raw} articles from "
-           f"{n_queries} searches · new articles only · each article is scored for every fund</sub>", "",
+           f"{n_queries} searches · new articles only · each article is scored for every fund · "
+           "headlines about the same story are grouped</sub>", "",
            "\n".join(glance), "",
            "<sub>Score = severity (HIGH 3, MEDIUM 2, LOW 1) + 2 for a top holding (+1 another holding) "
            "+ 1 dependency + 1 relevance word (e.g. Taiwan, Wall Street, krona). Flagged = score 3 or more "
@@ -392,7 +485,7 @@ def build_page_md(results, now_local, n_queries, n_raw) -> str:
             out += [f"> [!WARNING]\n> **{high} high-severity item(s)** among the new articles. Read the sources.", ""]
         out += [_md_items(r["flagged"], "✅ Nothing new above the flag threshold."),
                 f"<details><summary>👀 Watch: lower score or not clearly linked to the fund "
-                f"({len(r['watch'])})</summary>", "", _md_items(r["watch"], "None."), "</details>", ""]
+                f"({len(r['watch'])} stories)</summary>", "", _md_items(r["watch"], "None."), "</details>", ""]
     return "\n".join(out + ["---", "<sub>Research and alerting only. Not investment advice.</sub>", ""])
 
 
@@ -401,9 +494,11 @@ def write_summary(results, now, now_local, n_raw) -> None:
     funds = [{"id": r["fund"]["id"], "short": r["fund"]["short"], "icon": r["fund"]["icon"],
               "name": r["fund"]["name"], "isin": r["fund"]["isin"],
               "n_flagged": len(r["flagged"]), "n_high": _n_high(r["flagged"]), "n_watch": len(r["watch"]),
+              "n_flagged_articles": _n_articles(r["flagged"]),
               "top": [{"score": i["score"], "severity": SEVERITY_LABEL[i["severity"]], "title": i["title"],
                        "link": i["link"], "source": i["source"], "entities": i["entities"],
-                       "categories": list(i["categories"])} for i in r["flagged"][:10]]}
+                       "categories": list(i["categories"]), "similar": len(i.get("similar", [])),
+                       "similar_sources": _similar_sources(i)} for i in r["flagged"][:10]]}
              for r in results]
     SUMMARY_FILE.write_text(json.dumps({
         "run_utc": now.isoformat(timespec="minutes"), "run_local": f"{now_local:%Y-%m-%d %H:%M}",
@@ -421,24 +516,26 @@ def build_markdown(results, now_local) -> str:
             lines += ["| Score | Severity | Headline | Affects | Categories |", "|---|---|---|---|---|"]
             for i in r["flagged"][:25]:
                 t = i["title"].replace("|", "/")
-                lines.append(f"| {i['score']} | {SEVERITY_LABEL[i['severity']]} | [{t}]({i['link']}) "
+                more = f" (+{len(i['similar'])} similar)" if i.get("similar") else ""
+                lines.append(f"| {i['score']} | {SEVERITY_LABEL[i['severity']]} | [{t}]({i['link']}){more} "
                              f"| {', '.join(i['entities']) or '–'} | {', '.join(map(cat_label, i['categories']))} |")
             lines.append("")
     return "\n".join(lines) + "\n"
 
 
 def append_log(results, now) -> None:
-    """One row per (fund, item). Older single-fund logs get a fund column (the Taiwan fund)."""
+    """One row per (fund, article), grouped articles included; `story` = key of the story's lead.
+    A log with older columns is rewritten first (rows without a fund were the Taiwan fund's)."""
     if LOG_FILE.exists():
         with open(LOG_FILE, newline="", encoding="utf-8") as fh:
             rows = list(csv.reader(fh))
-        if rows and "fund" not in rows[0]:
+        if rows and rows[0] != LOG_COLUMNS:
             old_head = rows[0]
             with open(LOG_FILE, "w", newline="", encoding="utf-8") as fh:
                 w = csv.writer(fh)
                 w.writerow(LOG_COLUMNS)
                 for r in rows[1:]:
-                    rec = dict(zip(old_head, r), fund="jpm_taiwan")
+                    rec = {"fund": "jpm_taiwan", **dict(zip(old_head, r))}
                     w.writerow([rec.get(c, "") for c in LOG_COLUMNS])
     new = not LOG_FILE.exists()
     with open(LOG_FILE, "a", newline="", encoding="utf-8") as fh:
@@ -446,11 +543,13 @@ def append_log(results, now) -> None:
         if new:
             w.writerow(LOG_COLUMNS)
         for r in results:
-            for i in r["flagged"] + r["watch"]:
-                w.writerow([now.isoformat(timespec="minutes"), r["fund"]["id"],
-                            i["ts"].isoformat(timespec="minutes") if i["ts"] else "",
-                            i["score"], SEVERITY_LABEL[i["severity"]], ";".join(i["categories"]),
-                            ";".join(i["entities"]), i["source"], i["title"], i["link"]])
+            for story in r["flagged"] + r["watch"]:
+                sid = item_key(story["title"])
+                for i in [story, *story.get("similar", [])]:
+                    w.writerow([now.isoformat(timespec="minutes"), r["fund"]["id"], sid,
+                                i["ts"].isoformat(timespec="minutes") if i["ts"] else "",
+                                i["score"], SEVERITY_LABEL[i["severity"]], ";".join(i["categories"]),
+                                ";".join(i["entities"]), i["source"], i["title"], i["link"]])
 
 
 def send_email(html: str, subject: str, required: bool = False) -> None:
