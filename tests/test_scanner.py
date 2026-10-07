@@ -1380,3 +1380,24 @@ def test_main_end_to_end_llm_blocks_v1_but_not_v0b(cfg, tmp_paths, monkeypatch):
     # a second run doesn't call the LLM again
     scanner.main(["--no-email", "--watchlist", str(wl)])
     assert len(calls) == 1
+
+
+def test_parse_spreads():
+    payload = {"data": {"instrumentListing": {"rows": [
+        {"symbol": "4C", "bidPrice": "6.61", "askPrice": "6.72"},
+        {"symbol": "SAAB B", "bidPrice": "1,000.00", "askPrice": "1,001.00"},
+        {"symbol": "NOBID", "bidPrice": "", "askPrice": "3.00"},
+        {"symbol": "CROSSED", "bidPrice": "5.00", "askPrice": "4.00"},
+    ]}}}
+    sp = scanner.parse_spreads(payload)
+    assert set(sp) == {"4C.ST", "SAAB-B.ST"}
+    assert sp["4C.ST"] == pytest.approx(0.11 / 6.665 * 100)
+    assert scanner.parse_spreads({}) == {}
+
+
+def test_spread_recorded_on_new_trades(cfg, tmp_paths):
+    paper = scanner.add_paper_signals(scanner.load_paper().iloc[0:0], [{**strat_row("A.ST"), "spread_pct": 1.6667}],
+                                      cfg, "v2", strategy="v0b")
+    assert paper.iloc[0]["spread_pct"] == "1.667"
+    paper = scanner.add_paper_signals(paper, [strat_row("B.ST")], cfg, "v2", strategy="v0b")
+    assert paper.iloc[1]["spread_pct"] == ""

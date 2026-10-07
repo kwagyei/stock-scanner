@@ -82,6 +82,7 @@ PAPER_COLUMNS = [
     # LLM experiment: which paper book (v0 / v0b / v1_<prompt>); index returns vs the primary
     # (small-cap) benchmark. bench_* above stay on the secondary (OMXS30) for v0's reports.
     "strategy", "bench_primary_entry", "bench_primary_exit", "bench_primary_return_pct",
+    "spread_pct",    # bid-ask spread (% of mid) from Nasdaq's share list at signal time; blank if unknown
 ]
 DEFAULT_UNIVERSE = "v1"   # trades from before watchlist versioning (the hand-picked list)
 
@@ -182,6 +183,38 @@ def fetch_nasdaq_index(orderbook_id: str, period: str, today: dt.date | None = N
         print(f"[warn] Nasdaq index fetch failed for {orderbook_id}: {exc}", file=sys.stderr)
         return pd.DataFrame()
     return parse_nasdaq_chart(payload)
+
+
+SCREENER_URL = ("https://api.nasdaq.com/api/nordic/screener/shares"
+                "?category={category}&tableonly=true&market=STO{segment}")
+
+
+def parse_spreads(payload: dict) -> dict:
+    """{ticker: bid-ask spread in % of mid} from one Nasdaq share-list response."""
+    out = {}
+    rows = (((payload or {}).get("data") or {}).get("instrumentListing") or {}).get("rows") or []
+    for r in rows:
+        bid, ask = _nasdaq_number(r.get("bidPrice")), _nasdaq_number(r.get("askPrice"))
+        if not (r.get("symbol") and bid and ask) or ask < bid:
+            continue
+        out[r["symbol"].replace(" ", "-") + ".ST"] = (ask - bid) / ((ask + bid) / 2) * 100
+    return out
+
+
+def fetch_spreads(segments: list[str]) -> dict:
+    """Bid-ask spreads for the watchlist universe, a snapshot at run time (an approximation of
+    the spread at entry; the evaluation falls back to costs.half_spread_pct when missing)."""
+    out = {}
+    for seg in segments:
+        url = SCREENER_URL.format(category="FIRST_NORTH", segment="") if seg == "FIRST_NORTH" else \
+            SCREENER_URL.format(category="MAIN_MARKET", segment=f"&segment={seg}")
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                out.update(parse_spreads(json.loads(resp.read())))
+        except Exception as exc:
+            print(f"[warn] spread fetch failed for {seg}: {exc}", file=sys.stderr)
+    return out
 
 
 def fetch_history(ticker: str, period: str) -> pd.DataFrame:
@@ -598,6 +631,7 @@ def add_paper_signals(paper: pd.DataFrame, rows: list[dict], cfg: dict,
                 "signal_date": r["date"], "score": str(r[key]),
                 "status": "pending", "universe": universe, "signal_move": "" if r.get("chg_1d") is None else f"{r['chg_1d']:.4f}",
                 "strategy": strategy,
+                "spread_pct": "" if r.get("spread_pct") is None else f"{r['spread_pct']:.3f}",
             })
             new.append(rec)
             active.add(r["ticker"])
@@ -1710,7 +1744,8 @@ def strategy_log_fields(r: dict, cfg: dict) -> dict:
             "block_buy": r["block_buy"], "release_ids": " ".join(r["release_ids"]),
             "llm_release_ids": " ".join(r["llm_release_ids"]), "llm_model": llm.get("model", ""),
             "llm_prompt_version": llm.get("prompt_version", ""),
-            "block_if_direction_lte": llm.get("block_if_direction_lte", "")}
+            "block_if_direction_lte": llm.get("block_if_direction_lte", ""),
+            "spread_pct": "" if r.get("spread_pct") is None else round(r["spread_pct"], 3)}
 
 
 def score_releases(releases: pd.DataFrame, wl: pd.DataFrame, cfg: dict,
@@ -1845,8 +1880,10 @@ def main(argv=None) -> int:
     llm_scores, llm_new = score_releases(stored_releases, wl, cfg, run_warnings)
     usable = ls.usable_scores(llm_scores, cfg["llm"]["prompt_version"]) if cfg.get("llm") else llm_scores.iloc[0:0]
     complete_today = today_bar_complete(now_local, cfg)
+    spreads = fetch_spreads(cfg.get("universe", {}).get("segments", [])) if rows and cfg.get("llm") else {}
     for r in rows:
         r.update(st.strategy_scores(r, stored_releases, usable, cfg, now, complete_today))
+        r["spread_pct"] = spreads.get(r["ticker"])
 
     if cfg["paper_trading"]["enabled"]:
         paper = backfill_signal_moves(paper, histories)
