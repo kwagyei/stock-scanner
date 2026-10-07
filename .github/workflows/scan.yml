@@ -8,6 +8,7 @@ on:
     - cron: "7 6 * * 1-5"     # 08:07 Stockholm summer / 07:07 winter
     - cron: "37 6 * * 1-5"    # backup: 08:37 summer / 07:37 winter, skipped if 08:07 ran
     - cron: "52 16 * * 1-5"   # 18:52 summer / 17:52 winter (after the 17:30 close)
+    - cron: "58 17 7 10 *"    # TEMPORARY schedule test, 7 Oct 2026 19:58 Stockholm only; remove after
   workflow_dispatch:          # "Run workflow" button for manual runs
     inputs:
       weekly:
