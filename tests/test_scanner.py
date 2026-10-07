@@ -1117,8 +1117,9 @@ def _fund_summary(run_utc="2026-10-07T05:13+00:00", flagged=2, high=1, single=Fa
             "source": "Reuters", "entities": ["TSMC"], "categories": ["infrastructure"],
             "similar": 3, "similar_sources": "Bloomberg, Nikkei Asia, Focus Taiwan"},
            {"score": 3, "severity": "MEDIUM", "title": "Quanta revenue falls", "link": "https://x.test/b",
-            "source": "digitimes", "entities": ["Quanta Computer"], "categories": ["company_results"]}][:flagged]
-    tw = {"n_flagged": flagged, "n_high": high, "n_watch": 4, "top": top,
+            "source": "digitimes", "entities": ["Quanta Computer"], "categories": ["company_results"],
+            "status": "escalated", "first_seen": "2026-10-05T05:13+00:00"}][:flagged]
+    tw = {"n_flagged": flagged, "n_high": high, "n_watch": 4, "top": top, "n_developing": 2,
           **({} if single else {"n_flagged_articles": flagged + (3 if flagged else 0)})}
     if single:   # the format written before several funds
         return {"run_utc": run_utc, "run_local": "2026-10-07 07:13", "n_raw": 1300, **tw}
@@ -1144,8 +1145,9 @@ def test_dashboard_fund_watch_section(cfg, tmp_paths, monkeypatch):
     assert "**3**<br><sub>flagged · 1 high</sub>" in md                            # summed over both funds
     sec = md.split("## 🛡️ Fund risk watch")[1].split("## More")[0]
     assert "Last run **Wed&nbsp;7&nbsp;Oct 07:13**" in sec and "1300 articles scanned" in sec
-    assert "| 🇹🇼 **Taiwan** | **2**<br><sub>5 articles</sub> | 1 | 4 |" in sec
-    assert "| 🌍 **Global** | **1** | 0 | 9 |" in sec                               # no grouping: no article count
+    assert "| 🇹🇼 **Taiwan** | **2**<br><sub>5 articles</sub> | 1 | 2 | 4 |" in sec   # ... developing, watch
+    assert "| 🌍 **Global** | **1** | 0 | 0 | 9 |" in sec                           # no grouping: no article count
+    assert "⬆️ **escalated** · first seen Mon&nbsp;5&nbsp;Oct" in sec
     assert "➕ 3 similar: Bloomberg, Nikkei Asia, Focus Taiwan" in sec
     assert "**🇹🇼 Taiwan** · 1 high-severity" in sec and "**🌍 Global**" in sec
     assert ("| 🔴&nbsp;HIGH | [TSMC \\| halts production](<https://x.test/a>)"
@@ -1159,7 +1161,7 @@ def test_dashboard_reads_old_single_fund_summary(cfg, tmp_paths, monkeypatch):
     monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
     scanner.FUND_SUMMARY.write_text(json.dumps(_fund_summary(single=True)))
     md = _dash(cfg)
-    assert "**2**<br><sub>flagged · 1 high</sub>" in md and "| 🇹🇼 **Taiwan** | **2** | 1 | 4 |" in md
+    assert "**2**<br><sub>flagged · 1 high</sub>" in md and "| 🇹🇼 **Taiwan** | **2** | 1 | 0 | 4 |" in md
 
 
 def test_dashboard_fund_watch_missing_quiet_and_stale(cfg, tmp_paths, monkeypatch):
@@ -1167,7 +1169,7 @@ def test_dashboard_fund_watch_missing_quiet_and_stale(cfg, tmp_paths, monkeypatc
     md = _dash(cfg)
     assert "hasn't run yet" in md and "**–**<br><sub>not run yet</sub>" in md
     scanner.FUND_SUMMARY.write_text(json.dumps(_fund_summary(flagged=0, high=0)))
-    assert "✅ Nothing new flagged on the last run." in _dash(cfg)
+    assert "✅ Nothing new flagged on the last run. 2 earlier story(ies) still developing." in _dash(cfg)
     stale = _dash(cfg, now=dt.datetime(2026, 10, 10, 9, 0))
     assert "The fund watch last ran 3 day(s) ago" in stale
     scanner.FUND_SUMMARY.write_text("{broken")

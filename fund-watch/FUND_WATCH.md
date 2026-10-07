@@ -70,6 +70,14 @@ strike stay separate. It's cautious on purpose: very differently worded headline
 same event can still show up separately, but two different stories shouldn't be merged.
 Counts on the page and the dashboard are stories; the log keeps every article with a `story` id.
 
+**Stories are remembered for 7 days** (`news.story_memory_days`, in `data/fund_watch_stories.json`).
+When a later run finds new headlines about a remembered story, it isn't flagged again: it goes
+under **🔁 Still developing** ("first seen Tue 6 Oct"), and no e-mail is sent for it. If it got
+worse, i.e. it scores or rates higher than before, it is flagged again and marked
+**⬆️ escalated**, so an escalation is never hidden. Matching uses the same word overlap and
+shared category as the grouping. The first run without a memory file starts from the articles
+in the log of the last 7 days.
+
 **Flagged** = score ≥ 3 (≥ 4 for Avanza Global) and the article is tied to the fund: a relevance
 word, the fund, a holding or a dependency (`require_relevance`). Everything else goes under
 **Watch**. Only articles not seen in earlier runs are shown. It's keyword-based, so expect some

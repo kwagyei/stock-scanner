@@ -22,6 +22,7 @@ def offline(monkeypatch, tmp_path):
     monkeypatch.setattr(fw, "SEEN_FILE", tmp_path / "data" / "fund_watch_seen.json")
     monkeypatch.setattr(fw, "LOG_FILE", tmp_path / "data" / "fund_watch_log.csv")
     monkeypatch.setattr(fw, "SUMMARY_FILE", tmp_path / "data" / "fund_watch_latest.json")
+    monkeypatch.setattr(fw, "STORIES_FILE", tmp_path / "data" / "fund_watch_stories.json")
 
 
 @pytest.fixture
@@ -362,7 +363,7 @@ def test_markdown_page(monkeypatch):
     run(monkeypatch, feeds)
     md = (fw.REPORT_DIR / "fund_watch_latest.md").read_text()
     assert md.startswith("# 🛡️ Fund risk watch") and "(../../DASHBOARD.md)" in md
-    assert "| 🇹🇼 **Taiwan** | **2** | **1** | 1 |" in md        # stories, high, watch (no grouping here)
+    assert "| 🇹🇼 **Taiwan** | **2** | **1** | 0 | 1 |" in md    # stories, high, developing, watch
     assert "| 🌍 **Global** |" in md
     assert "## 🇹🇼 JPMorgan Funds - Taiwan Fund A (acc) USD" in md and "## 🌍 Avanza Global" in md
     taiwan = md.split("## 🇹🇼")[1].split("## 🌍")[0]
@@ -546,6 +547,7 @@ def test_grouped_story_end_to_end(monkeypatch):
     assert "➕ 4 similar: Outlet 1, Outlet 2, Outlet 3, Outlet 4" in flagged
     assert "📰 Similar headlines grouped into these stories (4)" in flagged
     assert "| 🇹🇼 **Taiwan** | **1**<br><sub>5 articles</sub> |" in md
+    assert len(json.loads(fw.STORIES_FILE.read_text())["jpm_taiwan"]) >= 1
     assert md.count("<details>") == md.count("</details>")
     rows = [r for r in _log() if r["fund"] == "jpm_taiwan"]
     assert len(rows) == 5 and len({r["story"] for r in rows}) == 1                   # every article logged
@@ -571,3 +573,117 @@ def test_log_with_fund_but_no_story_column_is_upgraded(monkeypatch):
     run(monkeypatch, {})
     rows = _log()
     assert list(rows[0]) == fw.LOG_COLUMNS and (rows[0]["fund"], rows[0]["story"]) == ("avanza_global", "")
+
+
+# --------------------------------------------------------------------------- story memory
+
+DAY1 = ["Micron Taiwan union wins strike vote over bonus dispute",
+        "Micron's Taiwan union wins strike vote with 99% support"]
+DAY2_SAME = ["Micron Taiwan union wins mandate to strike over bonus dispute"]      # same story, new wording
+
+
+class _Clock:
+    """Lets a test move 'now' between runs."""
+    now = NOW
+
+
+class _MovingDatetime(dt.datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return _Clock.now if tz else _Clock.now.replace(tzinfo=None)
+
+
+def run_on(monkeypatch, when, feeds, *args):
+    _Clock.now = when
+    monkeypatch.setattr(fw, "fetch_feed", lambda q, c: [dict(i) for key, items in feeds.items() if key in q for i in items])
+    monkeypatch.setattr(fw.dt, "datetime", _MovingDatetime)
+    assert fw.main(["--no-email", *args]) == 0
+    return {f["id"]: f for f in json.loads(fw.SUMMARY_FILE.read_text())["funds"]} if fw.SUMMARY_FILE.exists() else {}
+
+
+def _feed(titles, when, source="Reuters"):
+    return {"Taiwan strike workers": [{**item(t, source=source), "ts": when} for t in titles]}
+
+
+def test_ongoing_story_next_day_is_developing_not_flagged(monkeypatch):
+    d2 = NOW + dt.timedelta(days=1)
+    tw = run_on(monkeypatch, NOW, _feed(DAY1, NOW))["jpm_taiwan"]
+    assert (tw["n_flagged"], tw["n_developing"], tw["top"][0]["status"]) == (1, 0, "new")
+    tw = run_on(monkeypatch, d2, _feed(DAY2_SAME, d2))["jpm_taiwan"]
+    assert (tw["n_flagged"], tw["n_developing"]) == (0, 1)
+    md = (fw.REPORT_DIR / "fund_watch_latest.md").read_text()
+    taiwan = md.split("## 🇹🇼")[1].split("## 🌍")[0]
+    assert "🔁 Still developing: earlier stories with new headlines, not worse (1)" in taiwan
+    assert "🔁 first seen Wed 7 Oct" in taiwan and "✅ Nothing new above the flag threshold." in taiwan
+    mem = json.loads(fw.STORIES_FILE.read_text())["jpm_taiwan"]
+    assert len(mem) == 1 and mem[0]["n_articles"] == 3 and mem[0]["last_seen"].startswith("2026-10-08")
+    statuses = [r["story_status"] for r in _log() if r["fund"] == "jpm_taiwan"]
+    assert statuses == ["new", "new", "update"] and len({r["story"] for r in _log() if r["fund"] == "jpm_taiwan"}) == 1
+
+
+def test_escalated_story_is_flagged_again(monkeypatch):
+    d2 = NOW + dt.timedelta(days=1)
+    run_on(monkeypatch, NOW, _feed(DAY1, NOW))                                      # labour 2 + Taiwan 1 = 3
+    worse = ["Micron Taiwan union wins strike vote, TSMC workers join bonus dispute"]  # + top holding = 5
+    tw = run_on(monkeypatch, d2, _feed(worse, d2))["jpm_taiwan"]
+    assert (tw["n_flagged"], tw["n_developing"], tw["top"][0]["status"]) == (1, 0, "escalated")
+    assert tw["top"][0]["first_seen"].startswith("2026-10-07")
+    md = (fw.REPORT_DIR / "fund_watch_latest.md").read_text()
+    assert "⬆️ **escalated** · first seen Wed 7 Oct" in md
+
+
+def test_different_story_next_day_is_new(monkeypatch):
+    d2 = NOW + dt.timedelta(days=1)
+    run_on(monkeypatch, NOW, _feed(DAY1, NOW))
+    tw = run_on(monkeypatch, d2, _feed(["Kuai Kuai snack workers end strike in Taiwan"], d2))["jpm_taiwan"]
+    assert (tw["n_flagged"], tw["n_developing"], tw["top"][0]["status"]) == (1, 0, "new")
+
+
+def test_memory_is_per_fund_and_forgets_old_stories(monkeypatch, cfg):
+    run_on(monkeypatch, NOW, _feed(DAY1, NOW))
+    mem = json.loads(fw.STORIES_FILE.read_text())
+    assert set(mem) == {"jpm_taiwan", "avanza_global"}                             # each fund its own list
+    later = NOW + dt.timedelta(days=cfg["news"]["story_memory_days"] + 1)
+    tw = run_on(monkeypatch, later, _feed(DAY2_SAME, later))["jpm_taiwan"]
+    assert tw["top"][0]["status"] == "new"                                          # forgotten after 7 days
+
+
+def test_all_run_neither_reads_nor_writes_memory(monkeypatch):
+    run_on(monkeypatch, NOW, _feed(DAY1, NOW))
+    before = fw.STORIES_FILE.read_text()
+    run_on(monkeypatch, NOW + dt.timedelta(days=1), _feed(DAY2_SAME, NOW), "--all")
+    assert fw.STORIES_FILE.read_text() == before
+    md = (fw.REPORT_DIR / "fund_watch_latest.md").read_text()
+    assert "Still developing" not in md.split("## 🇹🇼")[1].split("## 🌍")[0]     # judged as new without memory
+
+
+def test_memory_needs_a_shared_category(cfg):
+    m = {"id": "x", "categories": ["legal_regulatory"], "headlines": [sorted(fw.headline_words(DAY1[0]))],
+         "first_seen": "2026-10-07T05:00+00:00", "last_seen": "2026-10-07T05:00+00:00",
+         "max_score": 3, "max_severity": 2, "n_articles": 1}
+    story = classify(DAY1[0], cfg)                                                   # labour
+    w = fw.word_weights([item(t) for t in DAY1 + BACKGROUND])
+    assert fw._match_memory(story, [m], w, 0.5) is None
+    assert fw._match_memory(story, [{**m, "categories": ["labour"]}], w, 0.5)["id"] == "x"
+
+
+def test_corrupt_memory_starts_fresh():
+    fw.DATA_DIR.mkdir()
+    fw.STORIES_FILE.write_text("{nope")
+    assert fw.load_stories() == {}
+
+
+def test_memory_starts_from_the_log(monkeypatch):
+    # A log from before the memory existed (no story ids): its articles still count as known stories.
+    fw.DATA_DIR.mkdir()
+    fw.LOG_FILE.write_text(
+        "run_utc,fund,published_utc,score,severity,categories,entities,source,title,link\n"
+        "2026-10-07T04:00+00:00,jpm_taiwan,,3,MEDIUM,labour,,Reuters,Micron Taiwan union wins strike vote over bonus dispute - Reuters,http://a\n"
+        "2026-09-20T04:00+00:00,jpm_taiwan,,3,MEDIUM,labour,,Reuters,Ancient strike story in Taiwan - Reuters,http://b\n")
+    mem = fw.load_stories(7, NOW)
+    assert [m["lead"].split(" - ")[0] for m in mem["jpm_taiwan"]] == ["Micron Taiwan union wins strike vote over bonus dispute"]
+    assert mem["jpm_taiwan"][0]["max_severity"] == 2 and mem["jpm_taiwan"][0]["categories"] == ["labour"]
+    d2 = NOW + dt.timedelta(days=1)
+    tw = run_on(monkeypatch, d2, _feed(DAY2_SAME, d2))["jpm_taiwan"]
+    assert (tw["n_flagged"], tw["n_developing"]) == (0, 1)                          # known from the log
+    assert fw.STORIES_FILE.exists()

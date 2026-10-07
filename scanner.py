@@ -1278,11 +1278,12 @@ def _fund_section(fs: dict | None, now_local: dt.datetime) -> list[str]:
                                        "Check its runs on the Actions tab."))
     out.append(f"<sub>Last run **{_day(fs['run_local'][:10])} {fs['run_local'][11:]}** (Stockholm) · "
                f"{fs['n_raw']} articles scanned · new articles only</sub>\n")
-    out.append(_md_table(["Fund", "Flagged stories", "High", "Watch"],
+    out.append(_md_table(["Fund", "Flagged stories", "High", "Still developing", "Watch"],
                          [[f"{f['icon']} **{_md(f['short'])}**", f"**{f['n_flagged']}**"
                            + (f"<br><sub>{f['n_flagged_articles']} articles</sub>"
                               if f.get("n_flagged_articles", f["n_flagged"]) != f["n_flagged"] else ""),
-                           f["n_high"], f["n_watch"]] for f in fs["funds"]], align="lccc"))
+                           f["n_high"], f.get("n_developing", 0), f["n_watch"]] for f in fs["funds"]],
+                         align="lcccc"))
     for f in fs["funds"]:
         if not f["n_flagged"]:
             continue
@@ -1292,11 +1293,15 @@ def _fund_section(fs: dict | None, now_local: dt.datetime) -> list[str]:
                              [[FUND_SEVERITY.get(i["severity"], i["severity"]),
                                f"[{_md(i['title'])}](<{i['link']}>)"
                                + (f"<br><sub>➕ {i['similar']} similar: {_md(i.get('similar_sources', ''))}</sub>"
-                                  if i.get("similar") else ""),
+                                  if i.get("similar") else "")
+                               + (f"<br><sub>⬆️ **escalated** · first seen {_day(i['first_seen'][:10])}</sub>"
+                                  if i.get("status") == "escalated" and i.get("first_seen") else ""),
                                _md(", ".join(i["entities"])) or "–"]
                               for i in f["top"][:3]], align="lll"))
     if not _fund_totals(fs)[0]:
-        out.append("✅ Nothing new flagged on the last run.\n")
+        dev = sum(f.get("n_developing", 0) for f in fs["funds"])
+        out.append("✅ Nothing new flagged on the last run." + (f" {dev} earlier story(ies) still developing."
+                                                                 if dev else "") + "\n")
     return out + [f"[Full fund watch →]({page})", ""]
 
 

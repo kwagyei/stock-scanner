@@ -51,8 +51,9 @@ REPORT_DIR = ROOT / "reports"
 SEEN_FILE = DATA_DIR / "fund_watch_seen.json"
 LOG_FILE = DATA_DIR / "fund_watch_log.csv"
 SUMMARY_FILE = DATA_DIR / "fund_watch_latest.json"   # read by the stock scanner's dashboard
-LOG_COLUMNS = ["run_utc", "fund", "story", "published_utc", "score", "severity", "categories",
-               "entities", "source", "title", "link"]
+STORIES_FILE = DATA_DIR / "fund_watch_stories.json"  # stories of earlier runs, per fund
+LOG_COLUMNS = ["run_utc", "fund", "story", "story_status", "published_utc", "score", "severity",
+               "categories", "entities", "source", "title", "link"]
 UTC = dt.timezone.utc
 SEVERITY_LABEL = {3: "HIGH", 2: "MEDIUM", 1: "LOW"}
 
@@ -326,6 +327,107 @@ def group_stories(items: list[dict], weight: dict, threshold: float) -> list[dic
     return stories
 
 
+# --------------------------------------------------------------------------- story memory
+# Stories are remembered for a few days, so an ongoing story with new headlines tomorrow is shown
+# as "still developing" instead of being flagged again, unless it got worse (escalated).
+
+def _recent(memory: dict, keep_days: int, now: dt.datetime) -> dict:
+    cutoff = (now - dt.timedelta(days=keep_days)).isoformat(timespec="minutes")
+    return {fid: [m for m in stories if m.get("last_seen", "") >= cutoff] for fid, stories in memory.items()}
+
+
+def load_stories(keep_days: int = 7, now: dt.datetime | None = None) -> dict:
+    """{fund id: [remembered story, ...]}, without stories older than keep_days (so they can't match).
+    Without a memory file yet, it starts from the recent articles in the log."""
+    if not STORIES_FILE.exists():
+        return stories_from_log(keep_days, now) if now else {}
+    try:
+        memory = json.loads(STORIES_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return _recent(memory, keep_days, now) if now else memory
+
+
+def stories_from_log(keep_days: int, now: dt.datetime) -> dict:
+    """Memory rebuilt from the log's articles of the last keep_days (one story per logged story id;
+    rows from before grouping each count as their own story)."""
+    if not LOG_FILE.exists():
+        return {}
+    severity = {v: k for k, v in SEVERITY_LABEL.items()}
+    cutoff = (now - dt.timedelta(days=keep_days)).isoformat(timespec="minutes")
+    memory = {}
+    with open(LOG_FILE, newline="", encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            if row.get("run_utc", "") < cutoff or not row.get("title"):
+                continue
+            fid = row.get("fund") or "jpm_taiwan"
+            sid = row.get("story") or item_key(row["title"])
+            stories = memory.setdefault(fid, {})
+            m = stories.setdefault(sid, {"id": sid, "lead": row["title"], "first_seen": row["run_utc"],
+                                         "last_seen": row["run_utc"], "max_score": 0, "max_severity": 0,
+                                         "n_articles": 0, "headlines": [], "categories": []})
+            m["last_seen"] = max(m["last_seen"], row["run_utc"])
+            m["first_seen"] = min(m["first_seen"], row["run_utc"])
+            m["max_score"] = max(m["max_score"], int(row.get("score") or 0))
+            m["max_severity"] = max(m["max_severity"], severity.get(row.get("severity"), 0))
+            m["n_articles"] += 1
+            m["categories"] = sorted(set(m["categories"]) | {c for c in row.get("categories", "").split(";") if c})
+            m["headlines"] = (m["headlines"] + [sorted(headline_words(row["title"]))])[-20:]
+    return {fid: list(stories.values()) for fid, stories in memory.items()}
+
+
+def save_stories(memory: dict, keep_days: int, now: dt.datetime) -> None:
+    STORIES_FILE.write_text(json.dumps(_recent(memory, keep_days, now), indent=0, ensure_ascii=False),
+                            encoding="utf-8")
+
+
+def _match_memory(story: dict, remembered: list[dict], weight: dict, threshold: float) -> dict | None:
+    """The earlier story this one continues: shares a risk category and one of today's headlines
+    is similar enough (>= threshold) to one of its earlier headlines."""
+    today = [headline_words(i["title"]) for i in [story, *story.get("similar", [])]]
+    best, best_sim = None, threshold
+    for m in remembered:
+        if not set(story["categories"]) & set(m["categories"]):
+            continue
+        sim = max(_similarity(a, set(b), weight) for a in today for b in m["headlines"])
+        if sim >= best_sim:
+            best, best_sim = m, sim
+    return best
+
+
+def apply_story_memory(results: list[dict], memory: dict, weight: dict, threshold: float,
+                       now: dt.datetime, max_headlines: int = 20) -> None:
+    """Mark each story new / update / escalated against the fund's earlier stories and update
+    the memory. Flagged keeps new and escalated stories; flagged-level updates move to
+    r["developing"]. An update is escalated when it scores or rates higher than before."""
+    stamp = now.isoformat(timespec="minutes")
+    for r in results:
+        remembered = memory.setdefault(r["fund"]["id"], [])
+        for story in r["flagged"] + r["watch"]:
+            m = _match_memory(story, remembered, weight, threshold)
+            words = [sorted(headline_words(i["title"])) for i in [story, *story.get("similar", [])]]
+            n = 1 + len(story.get("similar", []))
+            if m is None:
+                m = {"id": item_key(story["title"]), "lead": story["title"], "first_seen": stamp,
+                     "max_score": story["score"], "max_severity": story["severity"],
+                     "n_articles": 0, "headlines": [], "categories": []}
+                remembered.append(m)
+                story["status"] = "new"
+            elif story["score"] > m["max_score"] or story["severity"] > m["max_severity"]:
+                story["status"] = "escalated"
+            else:
+                story["status"] = "update"
+            story["story_id"], story["first_seen"] = m["id"], m["first_seen"]
+            m["last_seen"] = stamp
+            m["max_score"] = max(m["max_score"], story["score"])
+            m["max_severity"] = max(m["max_severity"], story["severity"])
+            m["n_articles"] += n
+            m["categories"] = sorted(set(m["categories"]) | set(story["categories"]))
+            m["headlines"] = (m["headlines"] + words)[-max_headlines:]
+        r["developing"] = [s for s in r["flagged"] if s["status"] == "update"]
+        r["flagged"] = [s for s in r["flagged"] if s["status"] != "update"]
+
+
 def classify_funds(items: list[dict], cfg: dict, now: dt.datetime) -> list[dict]:
     """Per fund: {"fund", "flagged", "watch"}: stories ranked by score (see group_stories)."""
     cats = compile_categories(cfg)
@@ -374,6 +476,20 @@ def _n_articles(stories) -> int:
     return sum(1 + len(s.get("similar", [])) for s in stories)
 
 
+def _first_seen(story) -> str:
+    """'Tue 6 Oct' for the day the story was first seen (Stockholm time)."""
+    try:
+        d = dt.datetime.fromisoformat(story["first_seen"])
+        try:
+            from zoneinfo import ZoneInfo
+            d = d.astimezone(ZoneInfo("Europe/Stockholm"))
+        except Exception:
+            pass
+        return f"{d:%a} {d.day} {d:%b}"
+    except (KeyError, ValueError, TypeError):
+        return ""
+
+
 def _similar_sources(story, limit: int = 4) -> str:
     srcs = list(dict.fromkeys(i["source"] for i in story.get("similar", []) if i["source"]))
     return ", ".join(srcs[:limit]) + ("…" if len(srcs) > limit else "")
@@ -391,11 +507,14 @@ def build_html(results, now_local, n_queries, n_raw) -> str:
             more = (f"<details><summary><small>+{len(sim)} similar ({escape(_similar_sources(i))})</small></summary>"
                     + "".join(f"<small>· <a href=\"{escape(o['link'])}\">{escape(o['title'])}</a></small><br>"
                               for o in sim) + "</details>") if sim else ""
+            esc = (f"<br><small><b>⬆️ escalated</b> · first seen {escape(_first_seen(i))}</small>"
+                   if i.get("status") == "escalated" else
+                   f"<br><small>🔁 first seen {escape(_first_seen(i))}</small>" if i.get("status") == "update" else "")
             out.append(
                 f"<tr class=s{i['severity']}><td class=n>{i['score']}</td>"
                 f"<td><span class=sev>{SEVERITY_LABEL[i['severity']]}</span></td>"
                 f"<td><a href=\"{escape(i['link'])}\">{escape(i['title'])}</a>"
-                f"<br><small>{escape(i['source'])} · {when} UTC</small>{more}</td>"
+                f"<br><small>{escape(i['source'])} · {when} UTC</small>{esc}{more}</td>"
                 f"<td>{ents}</td><td><small>{cats}</small></td></tr>")
         return "\n".join(out)
 
@@ -404,6 +523,8 @@ def build_html(results, now_local, n_queries, n_raw) -> str:
         f"""<h2>{escape(r['fund']['icon'])} {escape(r['fund']['name'])} <small>ISIN {escape(r['fund']['isin'])}</small></h2>
 <h3>Flagged · {len(r['flagged'])} {'story' if len(r['flagged']) == 1 else 'stories'}</h3>
 <div class=box><table>{head}{rows(r['flagged']) or '<tr><td colspan=5>Nothing new above the flag threshold.</td></tr>'}</table></div>
+<h3>Still developing (earlier stories, new headlines, not worse) · {len(r.get('developing', []))}</h3>
+<div class=box><table>{head}{rows(r.get('developing', [])) or '<tr><td colspan=5>None.</td></tr>'}</table></div>
 <h3>Watch (lower score) · {len(r['watch'])} {'story' if len(r['watch']) == 1 else 'stories'}</h3>
 <div class=box><table>{head}{rows(r['watch']) or '<tr><td colspan=5>None.</td></tr>'}</table></div>"""
         for r in results)
@@ -445,6 +566,10 @@ def _md_items(items, empty: str) -> str:
         why = "<br>".join(f"**{cat_label(c)}:** {_md(', '.join(k))}" for c, k in i["categories"].items())
         sim = i.get("similar", [])
         more = f"<br><sub>➕ {len(sim)} similar: {_md(_similar_sources(i))}</sub>" if sim else ""
+        if i.get("status") == "escalated":
+            more += f"<br><sub>⬆️ **escalated** · first seen {_first_seen(i)}</sub>"
+        elif i.get("status") == "update":
+            more += f"<br><sub>🔁 first seen {_first_seen(i)}</sub>"
         out.append(f"| **{i['score']}** | {SEVERITY_ICON[i['severity']]} | [{_md(i['title'])}](<{i['link']}>)"
                    f"<br><sub>{_md(i['source'])} · {when} UTC</sub>{more} | {_md(', '.join(i['entities'])) or '–'} | {why} |")
     grouped = [i for i in items if i.get("similar")]
@@ -464,15 +589,15 @@ def build_page_md(results, now_local, n_queries, n_raw) -> str:
     """The report as a Markdown page (GitHub shows Markdown, not HTML, in a private repo)."""
     back = ("[![Dashboard](https://img.shields.io/badge/Dashboard-24292f?style=for-the-badge)]"
             "(../../DASHBOARD.md)")
-    glance = (["| Fund | 🚩 Flagged stories | 🔴 High | 👀 Watch |", "|:---|:---:|:---:|:---:|"]
+    glance = (["| Fund | 🚩 Flagged stories | 🔴 High | 🔁 Developing | 👀 Watch |", "|:---|:---:|:---:|:---:|:---:|"]
               + [f"| {r['fund']['icon']} **{_md(r['fund']['short'])}** | **{len(r['flagged'])}**"
                  + (f"<br><sub>{_n_articles(r['flagged'])} articles</sub>"
                     if _n_articles(r["flagged"]) != len(r["flagged"]) else "") + " | "
-                 f"**{_n_high(r['flagged'])}** | {len(r['watch'])} |" for r in results])
+                 f"**{_n_high(r['flagged'])}** | {len(r.get('developing', []))} | {len(r['watch'])} |" for r in results])
     out = ["# 🛡️ Fund risk watch", "", back, "",
            f"<sub>Updated **{now_local:%a %d %b %Y, %H:%M}** (Stockholm) · {n_raw} articles from "
            f"{n_queries} searches · new articles only · each article is scored for every fund · "
-           "headlines about the same story are grouped</sub>", "",
+           "headlines about the same story are grouped · stories from the last days are remembered</sub>", "",
            "\n".join(glance), "",
            "<sub>Score = severity (HIGH 3, MEDIUM 2, LOW 1) + 2 for a top holding (+1 another holding) "
            "+ 1 dependency + 1 relevance word (e.g. Taiwan, Wall Street, krona). Flagged = score 3 or more "
@@ -483,8 +608,12 @@ def build_page_md(results, now_local, n_queries, n_raw) -> str:
         out += [f"## {f['icon']} {_md(f['name'])}", "", f"<sub>ISIN {f['isin']}</sub>", ""]
         if high:
             out += [f"> [!WARNING]\n> **{high} high-severity item(s)** among the new articles. Read the sources.", ""]
-        out += [_md_items(r["flagged"], "✅ Nothing new above the flag threshold."),
-                f"<details><summary>👀 Watch: lower score or not clearly linked to the fund "
+        out += [_md_items(r["flagged"], "✅ Nothing new above the flag threshold.")]
+        dev = r.get("developing", [])
+        if dev:
+            out += [f"<details><summary>🔁 Still developing: earlier stories with new headlines, not worse "
+                    f"({len(dev)})</summary>", "", _md_items(dev, ""), "</details>", ""]
+        out += [f"<details><summary>👀 Watch: lower score or not clearly linked to the fund "
                 f"({len(r['watch'])} stories)</summary>", "", _md_items(r["watch"], "None."), "</details>", ""]
     return "\n".join(out + ["---", "<sub>Research and alerting only. Not investment advice.</sub>", ""])
 
@@ -494,11 +623,12 @@ def write_summary(results, now, now_local, n_raw) -> None:
     funds = [{"id": r["fund"]["id"], "short": r["fund"]["short"], "icon": r["fund"]["icon"],
               "name": r["fund"]["name"], "isin": r["fund"]["isin"],
               "n_flagged": len(r["flagged"]), "n_high": _n_high(r["flagged"]), "n_watch": len(r["watch"]),
-              "n_flagged_articles": _n_articles(r["flagged"]),
+              "n_flagged_articles": _n_articles(r["flagged"]), "n_developing": len(r.get("developing", [])),
               "top": [{"score": i["score"], "severity": SEVERITY_LABEL[i["severity"]], "title": i["title"],
                        "link": i["link"], "source": i["source"], "entities": i["entities"],
                        "categories": list(i["categories"]), "similar": len(i.get("similar", [])),
-                       "similar_sources": _similar_sources(i)} for i in r["flagged"][:10]]}
+                       "similar_sources": _similar_sources(i), "status": i.get("status", "new"),
+                       "first_seen": i.get("first_seen", "")} for i in r["flagged"][:10]]}
              for r in results]
     SUMMARY_FILE.write_text(json.dumps({
         "run_utc": now.isoformat(timespec="minutes"), "run_local": f"{now_local:%Y-%m-%d %H:%M}",
@@ -511,12 +641,14 @@ def build_markdown(results, now_local) -> str:
     for r in results:
         f = r["fund"]
         lines += [f"### {f['icon']} {f['name']}", "",
-                  f"**Flagged:** {len(r['flagged'])} · **Watch:** {len(r['watch'])}", ""]
+                  f"**Flagged:** {len(r['flagged'])} · **Still developing:** {len(r.get('developing', []))} "
+                  f"· **Watch:** {len(r['watch'])}", ""]
         if r["flagged"]:
             lines += ["| Score | Severity | Headline | Affects | Categories |", "|---|---|---|---|---|"]
             for i in r["flagged"][:25]:
                 t = i["title"].replace("|", "/")
                 more = f" (+{len(i['similar'])} similar)" if i.get("similar") else ""
+                more += " ⬆️ escalated" if i.get("status") == "escalated" else ""
                 lines.append(f"| {i['score']} | {SEVERITY_LABEL[i['severity']]} | [{t}]({i['link']}){more} "
                              f"| {', '.join(i['entities']) or '–'} | {', '.join(map(cat_label, i['categories']))} |")
             lines.append("")
@@ -543,10 +675,10 @@ def append_log(results, now) -> None:
         if new:
             w.writerow(LOG_COLUMNS)
         for r in results:
-            for story in r["flagged"] + r["watch"]:
-                sid = item_key(story["title"])
+            for story in r["flagged"] + r.get("developing", []) + r["watch"]:
+                sid = story.get("story_id") or item_key(story["title"])
                 for i in [story, *story.get("similar", [])]:
-                    w.writerow([now.isoformat(timespec="minutes"), r["fund"]["id"], sid,
+                    w.writerow([now.isoformat(timespec="minutes"), r["fund"]["id"], sid, story.get("status", ""),
                                 i["ts"].isoformat(timespec="minutes") if i["ts"] else "",
                                 i["score"], SEVERITY_LABEL[i["severity"]], ";".join(i["categories"]),
                                 ";".join(i["entities"]), i["source"], i["title"], i["link"]])
@@ -619,11 +751,15 @@ def main(argv=None) -> int:
             time.sleep(cfg["news"]["pause_seconds"])
 
     results = classify_funds(list(unique.values()), cfg, now)
+    memory = {} if args.all else load_stories(cfg["news"].get("story_memory_days", 7), now)
+    apply_story_memory(results, memory, word_weights(list(unique.values())),
+                       cfg["news"].get("story_similarity", 0.5), now)
     for k in unique:
         seen[k] = now.isoformat()   # mark every new item as seen, flagged or not
 
-    if not args.all:  # --all is a look-around run: don't touch the seen-store, log or summary
+    if not args.all:  # --all is a look-around run: don't touch the seen-store, memory, log or summary
         save_seen(seen, cfg["news"]["seen_retention_days"], now)
+        save_stories(memory, cfg["news"].get("story_memory_days", 7), now)
         append_log(results, now)
         write_summary(results, now, now_local, raw)
 
