@@ -249,3 +249,67 @@ def test_email_only_when_flagged(monkeypatch, cfg):
     assert len(sent) == 1 and "1 flagged (1 high)" in sent[0]
     fw.main(["--no-email"])
     assert len(sent) == 1
+
+
+# --------------------------------------------------------------------------- e-mail
+
+SMTP_ENV = {"SMTP_HOST": "smtp.gmail.com", "SMTP_PORT": "587", "SMTP_USER": "alerts@example.test",
+            "SMTP_PASS": "app-password", "EMAIL_TO": "me@example.test"}
+
+
+class FakeSMTP:
+    instances = []
+
+    def __init__(self, host, port, timeout=None):
+        self.host, self.port, self.calls = host, port, []
+        FakeSMTP.instances.append(self)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def starttls(self, context=None):
+        self.calls.append("starttls")
+
+    def login(self, user, pwd):
+        self.calls.append(("login", user))
+
+    def send_message(self, msg):
+        self.calls.append(("send", msg["From"], msg["To"], msg["Subject"]))
+
+
+def test_send_email_uses_starttls_and_login(monkeypatch):
+    FakeSMTP.instances = []
+    for k, v in SMTP_ENV.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(fw.smtplib, "SMTP", FakeSMTP)
+    fw.send_email("<p>x</p>", "Subject")
+    s = FakeSMTP.instances[0]
+    assert (s.host, s.port) == ("smtp.gmail.com", 587)
+    assert s.calls == ["starttls", ("login", "alerts@example.test"),
+                       ("send", "alerts@example.test", "me@example.test", "Subject")]
+
+
+def test_missing_settings_skip_normally_but_fail_a_test_email(monkeypatch, capsys):
+    for k in SMTP_ENV:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("SMTP_HOST", "smtp.gmail.com")
+    fw.send_email("x", "s")
+    assert "e-mail skipped, not set: SMTP_USER, SMTP_PASS, EMAIL_TO" in capsys.readouterr().out
+    with pytest.raises(SystemExit, match="SMTP_USER, SMTP_PASS, EMAIL_TO"):
+        fw.send_email("x", "s", required=True)
+
+
+def test_test_email_sends_even_with_nothing_flagged(monkeypatch):
+    sent = []
+    monkeypatch.setattr(fw, "send_email", lambda html, subject, required=False: sent.append((subject, required)))
+    monkeypatch.setattr(fw, "fetch_feed", lambda q, c: [])
+    monkeypatch.setattr(fw.dt, "datetime", _FrozenDatetime)
+    fw.main(["--test-email"])
+    assert sent == [("[TEST] Taiwan fund risk watch 07 Oct: 0 flagged (0 high)", True)]
+
+
+def test_shipped_config_emails_only_when_flagged(cfg):
+    assert cfg["email"] == {"enabled": True, "send_when": "flagged"}

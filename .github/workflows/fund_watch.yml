@@ -5,7 +5,12 @@ on:
     # Every day (news happens at weekends too). 07:13 Stockholm summer / 06:13 winter.
     # Off the hour: GitHub can drop scheduled runs at busy times such as :00.
     - cron: "13 5 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      test_email:
+        description: "Send this run's report by e-mail even if nothing is flagged (checks the SMTP setup)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -40,7 +45,7 @@ jobs:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
-        run: python fund_watch.py
+        run: python fund_watch.py ${{ inputs.test_email && '--test-email' || '' }}
 
       - uses: actions/upload-artifact@v4
         with:

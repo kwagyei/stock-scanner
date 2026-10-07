@@ -52,8 +52,30 @@ earlier runs are shown. It's keyword-based, so expect some false positives, and 
 - GitHub: `.github/workflows/fund_watch.yml` (in the repository root) runs every day at
   05:13 UTC, after the tests in `fund-watch/tests`. The *Run workflow* button on the
   **fund-risk-watch** workflow triggers a manual run.
-- E-mail: set `email.enabled: true` and add the SMTP secrets. By default it sends only when
-  something is flagged.
+- E-mail: on (`email.enabled: true`), and it sends only when something is flagged. It needs
+  five repository secrets (see below). The stock scanner uses the same secrets, but its own
+  e-mail stays off (`email.enabled: false` in the root `config.yaml`).
+
+## E-mail setup (Gmail, separate mailbox)
+1. Create a new Gmail account for the alerts.
+2. In that account, turn on 2-Step Verification, then create an **app password**
+   (Google Account → Security → App passwords). Copy the 16-character password.
+3. Add the repository secrets (*Settings → Secrets and variables → Actions*, or the `gh` CLI):
+
+   | Secret | Value |
+   |---|---|
+   | `SMTP_HOST` | `smtp.gmail.com` |
+   | `SMTP_PORT` | `587` |
+   | `SMTP_USER` | the new Gmail address (it is also the sender) |
+   | `SMTP_PASS` | the app password (not the account password) |
+   | `EMAIL_TO` | the address that should receive the alerts |
+
+4. Test: *Actions → fund-risk-watch → Run workflow*, tick **test_email**. You get the current
+   report even if nothing is flagged, and the run fails with a clear message if a secret is
+   missing or Gmail rejects the login. Check the spam folder the first time.
+
+If an e-mail fails during a normal run, the run fails and the seen-store is not saved, so the
+next run reports the same items again (GitHub e-mails you about the failed run).
 
 ## Maintain
 - Update `holdings` from the fund's monthly factsheet.

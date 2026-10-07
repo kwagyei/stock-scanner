@@ -13,6 +13,7 @@ Usage:
   python fund_watch.py              # normal run
   python fund_watch.py --no-email
   python fund_watch.py --all        # ignore seen-store (show everything in window); writes no log
+  python fund_watch.py --test-email # send this run's report even if nothing is flagged (checks SMTP)
 """
 from __future__ import annotations
 
@@ -278,12 +279,16 @@ def append_log(items, now) -> None:
                         ";".join(i["entities"]), i["source"], i["title"], i["link"]])
 
 
-def send_email(html: str, subject: str) -> None:
+def send_email(html: str, subject: str, required: bool = False) -> None:
+    """required: fail instead of skipping when the SMTP settings are missing (test e-mails)."""
     host, to = os.environ.get("SMTP_HOST"), os.environ.get("EMAIL_TO")
     user, pwd = os.environ.get("SMTP_USER"), os.environ.get("SMTP_PASS")
-    port = int(os.environ.get("SMTP_PORT", "587"))
+    port = int(os.environ.get("SMTP_PORT") or "587")
     if not (host and to and user and pwd):
-        print("[info] e-mail skipped: SMTP_HOST/SMTP_USER/SMTP_PASS/EMAIL_TO not set")
+        missing = [k for k in ("SMTP_HOST", "SMTP_USER", "SMTP_PASS", "EMAIL_TO") if not os.environ.get(k)]
+        if required:
+            sys.exit(f"[error] cannot send test e-mail, not set: {', '.join(missing)}")
+        print(f"[info] e-mail skipped, not set: {', '.join(missing)}")
         return
     msg = EmailMessage()
     msg["Subject"], msg["From"], msg["To"] = subject, user, to
@@ -303,6 +308,7 @@ def main(argv=None) -> int:
     ap.add_argument("--config", default=str(ROOT / "fund_watch.yaml"))
     ap.add_argument("--no-email", action="store_true")
     ap.add_argument("--all", action="store_true", help="ignore seen-store")
+    ap.add_argument("--test-email", action="store_true", help="send the report even if nothing is flagged")
     args = ap.parse_args(argv)
 
     cfg = load_config(Path(args.config))
@@ -357,9 +363,12 @@ def main(argv=None) -> int:
     print(md)
 
     e = cfg.get("email", {})
-    if e.get("enabled") and not args.no_email and (flagged or e.get("send_when") == "always"):
-        high = sum(1 for f in flagged if f["severity"] == 3)
-        send_email(html, f"Taiwan fund risk watch {now_local:%d %b}: {len(flagged)} flagged ({high} high)")
+    high = sum(1 for f in flagged if f["severity"] == 3)
+    subject = f"Taiwan fund risk watch {now_local:%d %b}: {len(flagged)} flagged ({high} high)"
+    if args.test_email:
+        send_email(html, "[TEST] " + subject, required=True)
+    elif e.get("enabled") and not args.no_email and (flagged or e.get("send_when") == "always"):
+        send_email(html, subject)
     return 0
 
 

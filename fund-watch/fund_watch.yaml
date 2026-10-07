@@ -128,5 +128,5 @@ news:
   seen_retention_days: 30
 
 email:
-  enabled: false           # set true + SMTP_* / EMAIL_TO secrets
+  enabled: true            # needs the SMTP_* / EMAIL_TO repository secrets (see FUND_WATCH.md)
   send_when: flagged       # always | flagged
