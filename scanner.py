@@ -1944,7 +1944,12 @@ def main(argv=None) -> int:
     active_tickers = set(paper.loc[paper["status"].isin(["pending", "open"])
                                    | (paper["pe_status"] == "open"), "ticker"])
     weekly = weekly_due(now_local, cfg, args.weekly)
-    signal_tickers = set(load_signals()["ticker"]) if weekly else set()
+    # Evening runs also refresh the weekly page ("the week so far": new signals and their
+    # 1/5/20-day results so far). The Friday evening run (weekly) is the week's final version
+    # and the only one that goes to the job summary and e-mail.
+    refresh_weekly = weekly or (bool((cfg.get("weekly_summary") or {}).get("enabled"))
+                                and today_bar_complete(now_local, cfg))
+    signal_tickers = set(load_signals()["ticker"]) if refresh_weekly else set()
     tickers = list(dict.fromkeys(list(wl["ticker"]) + sorted(active_tickers | signal_tickers)))
 
     print(f"[info] fetching prices for {len(tickers)} tickers …")
@@ -2071,6 +2076,8 @@ def main(argv=None) -> int:
     print(md)
 
     weekly_html = None
+    if refresh_weekly and not weekly:
+        run_weekly(paper, histories, bench, cfg, now_local)
     if weekly:
         weekly_html, weekly_md = run_weekly(paper, histories, bench, cfg, now_local)
         if gh_summary:

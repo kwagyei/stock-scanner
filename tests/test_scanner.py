@@ -1481,3 +1481,35 @@ def test_fill_entries_skips_without_todays_bar(cfg):
     p = scanner.fill_entries_at_open(pending_trade("X.ST", signal.index[-1].date().isoformat()),
                                      {"X.ST": signal}, flat(3, px=1000))
     assert p.iloc[0]["status"] == "pending"
+
+
+def test_evening_runs_refresh_weekly_page_but_only_friday_sends(cfg, tmp_paths, monkeypatch):
+    wl = tmp_paths / "watchlist.csv"
+    wl.write_text("ticker,name,query\nX.ST,X,X\n")
+    start = pd.bdate_range(end="2026-10-07", periods=70)[0]
+    h = flat(70, start=start)
+    h.iloc[-1] = (100, 112, 100, 111, 6000)
+    monkeypatch.setattr(scanner, "fetch_history", lambda t, p: h if t == "X.ST" else flat(70, 1000, start=start))
+    monkeypatch.setattr(scanner, "fetch_news", lambda q, c: [])
+    monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: 1e9)
+    monkeypatch.setattr(scanner.time, "sleep", lambda s: None)
+    sent = []
+    monkeypatch.setattr(scanner, "send_email", lambda html, subject: sent.append(subject))
+    cfg_mail = {**cfg, "email": {**cfg.get("email", {}), "enabled": True, "send_when": "alerts"}}
+    monkeypatch.setattr(scanner, "load_config", lambda p: cfg_mail)
+    page = tmp_paths / "reports" / "weekly_latest.md"
+
+    # Wednesday morning (before the close): no refresh
+    monkeypatch.setattr(scanner, "_now", lambda: dt.datetime(2026, 10, 7, 6, 7, tzinfo=UTC))
+    scanner.main(["--watchlist", str(wl)])
+    assert not page.exists()
+    # Wednesday evening: page refreshed, no weekly e-mail
+    monkeypatch.setattr(scanner, "_now", lambda: dt.datetime(2026, 10, 7, 16, 52, tzinfo=UTC))
+    scanner.main(["--watchlist", str(wl)])
+    assert page.exists() and "X.ST" in page.read_text()
+    assert not any(s.startswith("Scanner weekly") for s in sent)
+    # Friday evening: the week's final version, e-mailed
+    monkeypatch.setattr(scanner, "_now", lambda: dt.datetime(2026, 10, 9, 16, 52, tzinfo=UTC))
+    scanner.main(["--watchlist", str(wl)])
+    assert any(s.startswith("Scanner weekly") for s in sent)
+    assert len(pd.read_csv(scanner.WEEKLY_LOG, dtype=str)) == 1          # one row per week
