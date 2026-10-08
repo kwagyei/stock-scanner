@@ -50,11 +50,12 @@ All thresholds are in `config.yaml`.
 
 ## Option A: run it in the cloud with GitHub Actions (recommended)
 
-Runs on weekdays at about 08:07 (before the open) and 18:52 (after the close),
-Stockholm summer time. That's an hour earlier in winter. Your PC doesn't need to be on.
-GitHub sometimes drops scheduled runs at busy times, so there is a backup morning run at
-08:37 that does nothing if the 08:07 run already completed. Both stay before the 09:00
-open, because new paper trades buy at the next open.
+Runs on weekdays at 08:07 (before the open) and 18:52 (after the close), Stockholm time
+all year, plus the fund watch every day at 07:13. Your PC doesn't need to be on. The runs
+are started by a free external timer, cron-job.org (see [Scheduling](#scheduling-cron-joborg)),
+because GitHub's own schedule proved unreliable for this repo. A backup morning run at 08:37
+does nothing if the 08:07 run already completed. Both morning runs stay before the 09:00 open,
+because new paper trades buy at the next open (a run after the open buys at that day's open).
 
 1. Create a free GitHub account, then a **private** repository (e.g. `stock-scanner`).
 2. Upload all files from this folder, keeping the `.github/workflows/scan.yml` path.
@@ -76,28 +77,60 @@ open, because new paper trades buy at the next open.
 The workflow commits the updated logs back to the repo after each run, so the history
 builds up over time.
 
-### If GitHub's schedule doesn't fire: an external timer (cron-job.org, free)
+### Scheduling (cron-job.org)
 
-GitHub's own schedule never fired for this repo, so the runs are started from cron-job.org.
-It calls GitHub's "Run workflow" API, the same as pressing the button.
+GitHub's own `schedule:` never fired for this repo for two days, then fired about 7 hours
+late. So the runs are started by cron-job.org (free), which calls GitHub's "Run workflow" API
+at fixed times, the same as pressing the button. Runs started this way begin within seconds.
+The `schedule:` lines stay in the workflows as a fallback; their late runs skip themselves.
 
-- Token: a fine-grained GitHub token for this repository only, with *Actions: Read and write*.
-  It lives only in cron-job.org; never commit it. Renew it before it expires.
-- Each job: `POST https://api.github.com/repos/kwagyei/stock-scanner/actions/workflows/<file>/dispatches`
-  with headers `Accept: application/vnd.github+json`, `Authorization: Bearer <token>`,
-  `X-GitHub-Api-Version: 2022-11-28`, `Content-Type: application/json`. Success is HTTP 204.
+**Setup** (done 8 Oct 2026; repeat if you ever move the repo)
 
-  | Job | `<file>` | Body | Time (Europe/Stockholm) |
-  |---|---|---|---|
-  | Fund watch | `fund_watch.yml` | `{"ref":"main","inputs":{"slot":"daily"}}` | every day 07:13 |
-  | Morning scan | `scan.yml` | `{"ref":"main","inputs":{"slot":"morning"}}` | Mon–Fri 08:07 |
-  | Morning backup | `scan.yml` | `{"ref":"main","inputs":{"slot":"morning"}}` | Mon–Fri 08:37 |
-  | Evening scan | `scan.yml` | `{"ref":"main","inputs":{"slot":"evening"}}` | Mon–Fri 18:52 |
+1. **GitHub token.** <https://github.com/settings/personal-access-tokens/new> (fine-grained):
+   repository access *Only select repositories → stock-scanner*, permission
+   *Actions: Read and write*, nothing else. Copy it; GitHub shows it once. It lives only in
+   cron-job.org. Never commit it or paste it anywhere else. It can start this repo's
+   workflows but not read or change the code.
+2. **cron-job.org account.** Set the account time zone to *Europe/Stockholm*.
+3. **Four jobs.** All four are `POST` with the same four headers (Advanced tab, one key/value
+   row each):
 
-The `slot` input makes a run skip itself when that slot already has a run, so the backup
-and GitHub's schedule (if it ever starts firing) never cause a second scan. The times are in
-Stockholm time, so they stay right through summer/winter time changes. Manual runs (no `slot`)
-always run.
+   | Key | Value |
+   |---|---|
+   | `Accept` | `application/vnd.github+json` |
+   | `Authorization` | `Bearer <token>` (one space after Bearer, no quotes) |
+   | `X-GitHub-Api-Version` | `2022-11-28` |
+   | `Content-Type` | `application/json` |
+
+   URL: `https://api.github.com/repos/kwagyei/stock-scanner/actions/workflows/<file>/dispatches`
+
+   | Job | `<file>` | Request body | Schedule (Europe/Stockholm) |
+   |---|---|---|---|
+   | Fund watch | `fund_watch.yml` | `{"ref":"main","inputs":{"slot":"daily"}}` | every day 07:13 |
+   | Morning scan | `scan.yml` | `{"ref":"main","inputs":{"slot":"morning"}}` | Mon–Fri 08:07 |
+   | Morning backup | `scan.yml` | `{"ref":"main","inputs":{"slot":"morning"}}` | Mon–Fri 08:37 |
+   | Evening scan | `scan.yml` | `{"ref":"main","inputs":{"slot":"evening"}}` | Mon–Fri 18:52 |
+
+   Make one, then use *Duplicate* for the rest and change the title, time, body and (for the
+   fund watch) the URL. Turn on "notify me when an execution fails".
+4. **Test.** Use *Test run* on each job; it should return **204**. On GitHub, *Actions* shows
+   a new run of the right workflow. Test while that slot has already run today (e.g. in the
+   evening), and the run skips itself instead of scanning.
+
+**How the slot works.** A run with `slot` skips itself when that slot already has a run today
+(Stockholm time): morning = a scan commit since 05:00, evening = since 17:30, daily = a fund
+watch commit since midnight. That stops the backup, a retry or a late GitHub run from scanning
+twice. A run without `slot` (the *Run workflow* button) always runs.
+
+**When something goes wrong**
+
+| Symptom | Cause / fix |
+|---|---|
+| cron-job.org shows **401** | Token expired or mistyped: create a new one (step 1) and paste it into the `Authorization` header of all four jobs. Set a reminder before the expiry date. |
+| **404** | Wrong URL: check the repo name and `scan.yml` / `fund_watch.yml`. |
+| **422** | Request body isn't valid JSON, or `ref` isn't `main`. |
+| 204 but no new data | Open the run on GitHub: "Already scanned in this slot; skipping" is normal. Otherwise read the failed step. |
+| No call at all | cron-job.org's execution history for the job; the job may be disabled. |
 
 ## Option B: run it locally on Windows
 
