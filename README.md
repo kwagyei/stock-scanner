@@ -76,6 +76,29 @@ open, because new paper trades buy at the next open.
 The workflow commits the updated logs back to the repo after each run, so the history
 builds up over time.
 
+### If GitHub's schedule doesn't fire: an external timer (cron-job.org, free)
+
+GitHub's own schedule never fired for this repo, so the runs are started from cron-job.org.
+It calls GitHub's "Run workflow" API, the same as pressing the button.
+
+- Token: a fine-grained GitHub token for this repository only, with *Actions: Read and write*.
+  It lives only in cron-job.org; never commit it. Renew it before it expires.
+- Each job: `POST https://api.github.com/repos/kwagyei/stock-scanner/actions/workflows/<file>/dispatches`
+  with headers `Accept: application/vnd.github+json`, `Authorization: Bearer <token>`,
+  `X-GitHub-Api-Version: 2022-11-28`, `Content-Type: application/json`. Success is HTTP 204.
+
+  | Job | `<file>` | Body | Time (Europe/Stockholm) |
+  |---|---|---|---|
+  | Fund watch | `fund_watch.yml` | `{"ref":"main","inputs":{"slot":"daily"}}` | every day 07:13 |
+  | Morning scan | `scan.yml` | `{"ref":"main","inputs":{"slot":"morning"}}` | Mon–Fri 08:07 |
+  | Morning backup | `scan.yml` | `{"ref":"main","inputs":{"slot":"morning"}}` | Mon–Fri 08:37 |
+  | Evening scan | `scan.yml` | `{"ref":"main","inputs":{"slot":"evening"}}` | Mon–Fri 18:52 |
+
+The `slot` input makes a run skip itself when that slot already has a run, so the backup
+and GitHub's schedule (if it ever starts firing) never cause a second scan. The times are in
+Stockholm time, so they stay right through summer/winter time changes. Manual runs (no `slot`)
+always run.
+
 ## Option B: run it locally on Windows
 
 ```powershell
