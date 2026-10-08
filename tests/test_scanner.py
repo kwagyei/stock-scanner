@@ -1448,3 +1448,36 @@ def test_llm_off_by_default_makes_no_api_call(cfg, tmp_paths, monkeypatch):
     assert new == [] and warnings == []
     html = scanner.build_llm_html([], [], rel, None, [], cfg)
     assert "LLM scoring is off" in html and "Blocked v1 buys" not in html
+
+
+def test_fill_entries_at_open_during_session_then_evening_run_matches(cfg):
+    signal = flat(3)                                             # signal on the last complete bar
+    today = pd.bdate_range(signal.index[-1] + pd.Timedelta(days=1), periods=1)
+    forming = pd.concat([signal, pd.DataFrame([(104, 105, 80, 81, 500)], index=today, columns=signal.columns)])
+    bench_forming = pd.concat([flat(3, px=1000), pd.DataFrame([(1010, 1010, 1000, 1005, 0)], index=today,
+                                                              columns=signal.columns)])
+    p = pending_trade("X.ST", signal.index[-1].date().isoformat())
+    # midday: update on complete bars (nothing to do), then fill at today's open
+    p = scanner.update_paper(p, {"X.ST": signal}, flat(3, px=1000), cfg)
+    p = scanner.fill_entries_at_open(p, {"X.ST": forming}, bench_forming, bench_forming)
+    r = p.iloc[0]
+    assert (r["status"], r["entry_price"], r["bench_entry"], r["bench_primary_entry"]) == ("open", "104.0000", "1010.0000", "1010.0000")
+    assert r["exit_date"] == "" and r["bench_primary_return_pct"] == ""   # today's low (80) not used yet
+    # another midday run keeps it open and untouched
+    again = scanner.update_paper(p.copy(), {"X.ST": signal}, flat(3, px=1000), cfg, flat(3, px=1000))
+    assert again.iloc[0]["status"] == "open" and again.iloc[0]["exit_date"] == ""
+    # evening: the complete bar arrives; same result as a trade filled only in the evening
+    evening = scanner.update_paper(p.copy(), {"X.ST": forming}, bench_forming, cfg, bench_forming)
+    direct = scanner.update_paper(pending_trade("X.ST", signal.index[-1].date().isoformat()),
+                                  {"X.ST": forming}, bench_forming, cfg, bench_forming)
+    cols = ["status", "entry_date", "entry_price", "exit_price", "exit_reason", "return_pct", "bench_entry",
+            "bench_return_pct", "bench_primary_return_pct"]
+    assert list(evening.iloc[0][cols]) == list(direct.iloc[0][cols])
+    assert evening.iloc[0]["exit_reason"] == "stop"
+
+
+def test_fill_entries_skips_without_todays_bar(cfg):
+    signal = flat(3)
+    p = scanner.fill_entries_at_open(pending_trade("X.ST", signal.index[-1].date().isoformat()),
+                                     {"X.ST": signal}, flat(3, px=1000))
+    assert p.iloc[0]["status"] == "pending"

@@ -544,10 +544,38 @@ def _update_primary_bench(paper, idx, h, bench_primary) -> None:
         paper.at[idx, "bench_primary_entry"] = f"{b0:.4f}"
     b0 = float(paper.at[idx, "bench_primary_entry"])
     end = pd.Timestamp(row["exit_date"]) if row["exit_date"] else h.index[-1]
+    if end < entry_day:          # bought at today's open; no complete bar since the entry yet
+        return
     bx = _price_on(bench_primary, end, "Close")
     if bx:
         paper.at[idx, "bench_primary_exit"] = f"{bx:.4f}"
         paper.at[idx, "bench_primary_return_pct"] = f"{(bx / b0 - 1) * 100:.2f}"
+
+
+def fill_entries_at_open(paper: pd.DataFrame, histories: dict, bench: pd.DataFrame,
+                         bench_primary: pd.DataFrame | None = None) -> pd.DataFrame:
+    """During the session: buy pending trades at today's open, which is already known, using
+    the histories that still include today's forming bar. Only the entry is recorded; stops,
+    targets, last price and returns wait for the complete bar, and the next run evaluates
+    them from this same entry. The entry is the one the evening run would record."""
+    for idx, row in paper[paper["status"] == "pending"].iterrows():
+        h = histories.get(row["ticker"])
+        if h is None or h.empty:
+            continue
+        after = h[h.index > pd.Timestamp(row["signal_date"])]
+        if after.empty or pd.isna(after.iloc[0]["Open"]) or not float(after.iloc[0]["Open"]):
+            continue
+        day, px = after.index[0], float(after.iloc[0]["Open"])
+        paper.at[idx, "status"] = "open"
+        paper.at[idx, "entry_date"] = day.date().isoformat()
+        paper.at[idx, "entry_price"] = f"{px:.4f}"
+        paper.at[idx, "last_price"] = f"{px:.4f}"
+        be = _price_on(bench, day, "Open") if bench is not None and day in bench.index else None
+        paper.at[idx, "bench_entry"] = f"{be:.4f}" if be else ""
+        bp = (_price_on(bench_primary, day, "Open")
+              if bench_primary is not None and not bench_primary.empty and day in bench_primary.index else None)
+        paper.at[idx, "bench_primary_entry"] = f"{bp:.4f}" if bp else ""
+    return paper
 
 
 def simulate_partial(bars: pd.DataFrame, entry: float, pc: dict) -> dict:
@@ -1926,6 +1954,7 @@ def main(argv=None) -> int:
     if not today_bar_complete(now_local, cfg):
         print(f"[info] before {cfg.get('complete_bar_after', '18:00')} Stockholm time: "
               "ignoring today's still-forming daily bar")
+        live = (histories, bench, bench_primary)          # with today's forming bar, for entries only
         histories = {t: completed_bars(h, now_local) for t, h in histories.items()}
         bench = completed_bars(bench, now_local)
         bench_primary = completed_bars(bench_primary, now_local)
@@ -1999,6 +2028,8 @@ def main(argv=None) -> int:
     if cfg["paper_trading"]["enabled"]:
         paper = backfill_signal_moves(paper, histories)
         paper = update_paper(paper, histories, bench, cfg, bench_primary)
+        if not today_bar_complete(now_local, cfg):
+            paper = fill_entries_at_open(paper, *live)
         for strategy in st.strategy_labels(cfg) if cfg.get("llm") else [st.V0]:
             paper = add_paper_signals(paper, rows, cfg, watchlist_version(Path(args.watchlist)), strategy)
         paper.to_csv(PAPER_LOG, index=False)
