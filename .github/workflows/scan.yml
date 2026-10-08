@@ -9,8 +9,12 @@ on:
     - cron: "37 6 * * 1-5"    # backup: 08:37 summer / 07:37 winter, skipped if 08:07 ran
     - cron: "52 16 * * 1-5"   # 18:52 summer / 17:52 winter (after the 17:30 close)
   pull_request:               # tests only (the tests job below); no scan, no commit
-  workflow_dispatch:          # "Run workflow" button for manual runs
+  workflow_dispatch:          # "Run workflow" button, and the external timer (cron-job.org, see README)
     inputs:
+      slot:
+        description: "morning / evening: skip if that slot already has a scan (set by the external timer). Empty = always run"
+        type: string
+        default: ""
       weekly:
         description: "Also build the weekly summary now"
         type: boolean
@@ -39,24 +43,33 @@ jobs:
 
   slot:
     if: github.event_name != 'pull_request'
-    # Morning runs only: skip if a scan already completed this morning (it leaves a "scan ..."
-    # commit). The concurrency group makes a second run wait until the first has finished.
+    # Timed runs (GitHub's schedule, or the external timer with slot=morning/evening) are skipped
+    # if that slot already has a scan: a "scan ..." commit since 05:00 (morning) or 17:30
+    # (evening) Stockholm time today. Manual runs always run. The concurrency group makes a
+    # second run wait until the first has finished, so it sees the first one's commit.
     runs-on: ubuntu-latest
     outputs:
       skip: ${{ steps.check.outputs.skip }}
     steps:
       - id: check
-        if: >-
-          github.event_name == 'schedule' &&
-          (github.event.schedule == '7 6 * * 1-5' || github.event.schedule == '37 6 * * 1-5')
         env:
           GH_TOKEN: ${{ github.token }}
+          SLOT: >-
+            ${{ inputs.slot
+                || (github.event.schedule == '52 16 * * 1-5' && 'evening')
+                || (github.event_name == 'schedule' && 'morning') || '' }}
         run: |
-          since="$(date -u +%Y-%m-%d)T05:00:00Z"
+          case "$SLOT" in
+            morning) from="05:00" ;;
+            evening) from="17:30" ;;
+            *) echo "Manual run: no slot check."; exit 0 ;;
+          esac
+          day=$(TZ=Europe/Stockholm date +%Y-%m-%d)
+          since=$(date -u -d "TZ=\"Europe/Stockholm\" $day $from" +%Y-%m-%dT%H:%M:%SZ)
           n=$(gh api "repos/$GITHUB_REPOSITORY/commits?sha=main&since=$since&per_page=100" \
                 --jq '[.[] | select(.commit.message | startswith("scan "))] | length')
-          echo "scan commits since $since: $n"
-          if [ "$n" -gt 0 ]; then echo "skip=true" >> "$GITHUB_OUTPUT"; echo "Already scanned this morning; skipping."; fi
+          echo "$SLOT slot: scan commits since $since: $n"
+          if [ "$n" -gt 0 ]; then echo "skip=true" >> "$GITHUB_OUTPUT"; echo "Already scanned in this slot; skipping."; fi
 
   scan:
     needs: slot

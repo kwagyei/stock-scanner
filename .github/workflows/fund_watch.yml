@@ -5,8 +5,12 @@ on:
     # Every day (news happens at weekends too). 07:13 Stockholm summer / 06:13 winter.
     # Off the hour: GitHub can drop scheduled runs at busy times such as :00.
     - cron: "13 5 * * *"
-  workflow_dispatch:
+  workflow_dispatch:          # "Run workflow" button, and the external timer (cron-job.org, see README)
     inputs:
+      slot:
+        description: "daily: skip if the fund watch already ran today (set by the external timer). Empty = always run"
+        type: string
+        default: ""
       test_email:
         description: "Send this run's report by e-mail even if nothing is flagged (checks the SMTP setup)"
         type: boolean
@@ -20,7 +24,29 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  slot:
+    # Timed runs (GitHub's schedule, or the external timer with slot=daily) are skipped if a
+    # "fund watch ..." commit already landed today (Stockholm time). Manual runs always run.
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SLOT: ${{ inputs.slot || (github.event_name == 'schedule' && 'daily') || '' }}
+        run: |
+          if [ "$SLOT" != "daily" ]; then echo "Manual run: no slot check."; exit 0; fi
+          day=$(TZ=Europe/Stockholm date +%Y-%m-%d)
+          since=$(date -u -d "TZ=\"Europe/Stockholm\" $day 00:00" +%Y-%m-%dT%H:%M:%SZ)
+          n=$(gh api "repos/$GITHUB_REPOSITORY/commits?sha=main&since=$since&per_page=100" \
+                --jq '[.[] | select(.commit.message | startswith("fund watch "))] | length')
+          echo "fund watch commits since $since: $n"
+          if [ "$n" -gt 0 ]; then echo "skip=true" >> "$GITHUB_OUTPUT"; echo "Already ran today; skipping."; fi
+
   watch:
+    needs: slot
+    if: needs.slot.outputs.skip != 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
