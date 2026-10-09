@@ -161,7 +161,8 @@ def parse_nasdaq_chart(payload: dict) -> pd.DataFrame:
             continue
         rows.append({"date": pd.Timestamp(z["dateTime"]).normalize(),
                      "Open": _nasdaq_number(z.get("open")), "High": _nasdaq_number(z.get("high")),
-                     "Low": _nasdaq_number(z.get("low")), "Close": close})
+                     "Low": _nasdaq_number(z.get("low")), "Close": close,
+                     **({"Volume": _nasdaq_number(z.get("volume")) or 0.0} if "volume" in z else {})})
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows).drop_duplicates("date", keep="last").set_index("date").sort_index()
@@ -169,12 +170,16 @@ def parse_nasdaq_chart(payload: dict) -> pd.DataFrame:
     return df
 
 
-def fetch_nasdaq_index(orderbook_id: str, period: str, today: dt.date | None = None) -> pd.DataFrame:
+def fetch_nasdaq_index(orderbook_id: str, period: str, today: dt.date | None = None,
+                       asset_class: str = "INDEXES", start: dt.date | None = None) -> pd.DataFrame:
     """Daily OHLC for a Nasdaq Nordic index (e.g. IX3364 = OMX Stockholm Small Cap PI), from
-    Nasdaq's public chart endpoint. Yahoo has no usable history for the small-cap index."""
+    Nasdaq's public chart endpoint. Yahoo has no usable history for the small-cap index.
+    asset_class="SHARES" gives a share's daily OHLCV (used to repair Yahoo gaps)."""
     end = today or _now().date()
-    start = end - dt.timedelta(days=_period_days(period))
+    start = start or end - dt.timedelta(days=_period_days(period))
     url = NASDAQ_CHART_URL.format(id=urllib.parse.quote(orderbook_id), start=start, end=end)
+    if asset_class != "INDEXES":
+        url = url.replace("assetClass=INDEXES", f"assetClass={asset_class}")
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (stock-attention-scanner)",
                                                "Accept": "application/json"})
     try:
@@ -202,20 +207,35 @@ def parse_spreads(payload: dict) -> dict:
     return out
 
 
-def fetch_spreads(segments: list[str]) -> dict:
-    """Bid-ask spreads for the watchlist universe, a snapshot at run time (an approximation of
-    the spread at entry; the evaluation falls back to costs.half_spread_pct when missing)."""
-    out = {}
+def parse_share_ids(payload: dict) -> dict:
+    """{ticker: Nasdaq orderbook id} from one Nasdaq share-list response."""
+    rows = (((payload or {}).get("data") or {}).get("instrumentListing") or {}).get("rows") or []
+    return {r["symbol"].replace(" ", "-") + ".ST": r["orderbookId"] for r in rows
+            if r.get("symbol") and r.get("orderbookId")}
+
+
+# Ticker -> Nasdaq orderbook id, filled once per run by fetch_share_list(). fetch_history uses
+# it to repair days where Yahoo has no closing price.
+NASDAQ_SHARE_IDS: dict = {}
+
+
+def fetch_share_list(segments: list[str]) -> tuple[dict, dict]:
+    """(spreads, orderbook ids) for the watchlist universe from Nasdaq's share list, one request
+    per segment. The spreads are a snapshot at run time (an approximation of the spread at entry;
+    the evaluation falls back to costs.half_spread_pct when missing)."""
+    spreads, ids = {}, {}
     for seg in segments:
         url = SCREENER_URL.format(category="FIRST_NORTH", segment="") if seg == "FIRST_NORTH" else \
             SCREENER_URL.format(category="MAIN_MARKET", segment=f"&segment={seg}")
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
-                out.update(parse_spreads(json.loads(resp.read())))
+                payload = json.loads(resp.read())
+            spreads.update(parse_spreads(payload))
+            ids.update(parse_share_ids(payload))
         except Exception as exc:
-            print(f"[warn] spread fetch failed for {seg}: {exc}", file=sys.stderr)
-    return out
+            print(f"[warn] Nasdaq share list failed for {seg}: {exc}", file=sys.stderr)
+    return spreads, ids
 
 
 def fetch_history(ticker: str, period: str) -> pd.DataFrame:
@@ -230,11 +250,36 @@ def fetch_history(ticker: str, period: str) -> pd.DataFrame:
         return pd.DataFrame()
     if hist is None or hist.empty:
         return pd.DataFrame()
-    hist = hist.dropna(subset=["Close"])
     idx = pd.to_datetime(hist.index)
     if idx.tz is not None:
         idx = idx.tz_localize(None)
     hist.index = idx.normalize()
+    hist = repair_missing_closes(ticker, hist)
+    return hist.dropna(subset=["Close"])
+
+
+def repair_missing_closes(ticker: str, hist: pd.DataFrame) -> pd.DataFrame:
+    """Yahoo sometimes blanks the latest closes for hours (seen overnight and in the morning:
+    the row is there, Close is NaN). Fill those days from Nasdaq Nordic's daily data for the
+    same share (open, high, low, close and volume, so the volume ratio isn't from a partial
+    figure). Days Nasdaq doesn't have stay empty and are dropped as before."""
+    gaps = hist.index[hist["Close"].isna()]
+    oid = NASDAQ_SHARE_IDS.get(ticker)
+    if gaps.empty or not oid:
+        return hist
+    nq = fetch_nasdaq_index(oid, "", today=gaps.max().date(), asset_class="SHARES", start=gaps.min().date())
+    fill = [d for d in gaps if not nq.empty and d in nq.index]
+    if not fill:
+        print(f"[warn] {ticker}: Yahoo has no close for {', '.join(d.date().isoformat() for d in gaps)} "
+              "and Nasdaq couldn't fill it", file=sys.stderr)
+        return hist
+    hist = hist.copy()
+    for d in fill:
+        for col in ("Open", "High", "Low", "Close", "Volume"):
+            if col in nq.columns and col in hist.columns and pd.notna(nq.at[d, col]):
+                hist.at[d, col] = nq.at[d, col]
+    print(f"[info] {ticker}: filled {len(fill)} missing Yahoo close(s) from Nasdaq "
+          f"({', '.join(d.date().isoformat() for d in fill)})")
     return hist
 
 
@@ -1952,6 +1997,11 @@ def main(argv=None) -> int:
     signal_tickers = set(load_signals()["ticker"]) if refresh_weekly else set()
     tickers = list(dict.fromkeys(list(wl["ticker"]) + sorted(active_tickers | signal_tickers)))
 
+    # Mid Cap too: some hand-picked watchlist stocks (e.g. NCAB, MilDef) are listed there.
+    segments = list(dict.fromkeys([*cfg.get("universe", {}).get("segments", []), "MID_CAP"]))
+    share_spreads, share_ids = fetch_share_list(segments)
+    NASDAQ_SHARE_IDS.clear()
+    NASDAQ_SHARE_IDS.update(share_ids)
     print(f"[info] fetching prices for {len(tickers)} tickers …")
     histories = {t: fetch_history(t, cfg["history_period"]) for t in tickers}
     bench = fetch_history(bench_symbol(cfg), cfg["history_period"])
@@ -2025,7 +2075,7 @@ def main(argv=None) -> int:
     llm_scores, llm_new = score_releases(stored_releases, wl, cfg, run_warnings)
     usable = ls.usable_scores(llm_scores, cfg["llm"]["prompt_version"]) if cfg.get("llm") else llm_scores.iloc[0:0]
     complete_today = today_bar_complete(now_local, cfg)
-    spreads = fetch_spreads(cfg.get("universe", {}).get("segments", [])) if rows and cfg.get("llm") else {}
+    spreads = share_spreads
     for r in rows:
         r.update(st.strategy_scores(r, stored_releases, usable, cfg, now, complete_today))
         r["spread_pct"] = spreads.get(r["ticker"])

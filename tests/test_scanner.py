@@ -1513,3 +1513,54 @@ def test_evening_runs_refresh_weekly_page_but_only_friday_sends(cfg, tmp_paths, 
     scanner.main(["--watchlist", str(wl)])
     assert any(s.startswith("Scanner weekly") for s in sent)
     assert len(pd.read_csv(scanner.WEEKLY_LOG, dtype=str)) == 1          # one row per week
+
+
+# --------------------------------------------------------------------------- Yahoo gaps repaired from Nasdaq
+
+def _yahoo(rows):
+    idx = pd.DatetimeIndex(["2026-10-06", "2026-10-07", "2026-10-08"]).tz_localize("Europe/Stockholm")
+    return pd.DataFrame(rows, index=idx, columns=["Open", "High", "Low", "Close", "Volume"])
+
+
+NQ_SHARE = {"data": {"CP": [
+    {"z": {"dateTime": "2026-10-08", "open": "98.00", "high": "101.00", "low": "96.80", "close": "99.80",
+           "volume": "205,140"}}]}}
+
+
+def test_missing_yahoo_close_is_filled_from_nasdaq(monkeypatch, capsys):
+    y = _yahoo([(113.4, 115, 110.6, 111.8, 57007), (105.2, 105.4, 95.8, 97.8, 772515),
+                (98.0, 101.0, 96.8, float("nan"), 202928)])
+    monkeypatch.setattr(scanner.yf, "Ticker", lambda t: type("T", (), {"history": lambda self, **k: y})())
+    monkeypatch.setattr(scanner, "NASDAQ_SHARE_IDS", {"CHEF.ST": "TX3775430"})
+    urls = []
+
+    class Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return json.dumps(NQ_SHARE).encode()
+    monkeypatch.setattr(scanner.urllib.request, "urlopen", lambda req, timeout: urls.append(req.full_url) or Resp())
+    h = scanner.fetch_history("CHEF.ST", "6mo")
+    assert h.index[-1] == pd.Timestamp("2026-10-08")
+    assert (h.iloc[-1]["Close"], h.iloc[-1]["Volume"]) == (99.8, 205140)
+    assert h.iloc[-2]["Close"] == 97.8                                   # Yahoo rows untouched
+    assert "assetClass=SHARES" in urls[0] and "TX3775430" in urls[0] and "fromDate=2026-10-08" in urls[0]
+    assert "filled 1 missing Yahoo close" in capsys.readouterr().out
+
+
+def test_missing_close_without_nasdaq_is_dropped_as_before(monkeypatch, capsys):
+    y = _yahoo([(1, 1, 1, 1.0, 1), (1, 1, 1, 1.0, 1), (1, 1, 1, float("nan"), 1)])
+    monkeypatch.setattr(scanner.yf, "Ticker", lambda t: type("T", (), {"history": lambda self, **k: y})())
+    monkeypatch.setattr(scanner, "NASDAQ_SHARE_IDS", {})
+    assert scanner.fetch_history("X.ST", "6mo").index[-1] == pd.Timestamp("2026-10-07")
+    monkeypatch.setattr(scanner, "NASDAQ_SHARE_IDS", {"X.ST": "TX1"})
+    def down(*a, **k):
+        raise OSError("down")
+    monkeypatch.setattr(scanner.urllib.request, "urlopen", down)
+    assert scanner.fetch_history("X.ST", "6mo").index[-1] == pd.Timestamp("2026-10-07")
+    assert "Nasdaq couldn't fill it" in capsys.readouterr().err
+
+
+def test_parse_share_ids():
+    payload = {"data": {"instrumentListing": {"rows": [{"symbol": "SAAB B", "orderbookId": "SSE1"},
+                                                       {"symbol": "X", "orderbookId": ""}]}}}
+    assert scanner.parse_share_ids(payload) == {"SAAB-B.ST": "SSE1"}
