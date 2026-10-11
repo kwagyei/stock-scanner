@@ -80,6 +80,26 @@ worse, i.e. it scores or rates higher than before, it is flagged again and marke
 shared category as the grouping. The first run without a memory file starts from the articles
 in the log of the last 7 days.
 
+**Direction: ▲ positive, ▼ negative, ↕ mixed, · unclear.** Each flagged story gets a rough guess
+at which way the news points for the fund, from phrase lists in `direction:` in
+`fund_watch.yaml`, matched in the headline and summary like the risk keywords:
+- only positive phrases ("beats estimates", "raises guidance", "lifts ban", "strike ends") = ▲;
+- only negative phrases ("cuts outlook", "export controls", "probe", "order cuts") = ▼;
+- both = ↕ mixed, e.g. "Micron's buyback meets a Munich sales ban and a Taiwan strike".
+  A phrase inside a longer phrase of the other kind doesn't count: "lifts ban" is positive and
+  its "ban" isn't negative; "debt soars" is negative and its "soars" isn't positive;
+- no phrase: the category decides if all the story's categories lean the same way
+  (`category_lean`: geopolitics, trade restrictions, disasters, infrastructure, cyber and labour
+  lean negative), shown as "Direction: (Geopolitics)"; otherwise · unclear.
+
+A grouped story combines its headlines: they agree, or it's ↕ mixed. The phrases behind each label
+are shown under *Why flagged*. Because the watch looks for risks, most flagged stories are ▼; the
+useful signals are the ▲ and ↕ ones and the unexpected ▼ ones. It reads words, not meaning, so
+commentary trips it up ("Forget the selloff: …" reads ▼; "How to avoid war over Taiwan" reads ▼
+from the category). The log keeps `direction` and `direction_terms` for every article, so the
+labels can later be checked against the funds' prices. When a headline is labelled wrongly, add
+the phrase to the right list and a test case in `tests/test_fund_watch.py`.
+
 **Flagged** = score ≥ 3 (≥ 4 for Avanza Global) and the article is tied to the fund: a relevance
 word, the fund, a holding or a dependency (`require_relevance`). Everything else goes under
 **Watch**. Only articles not seen in earlier runs are shown. It's keyword-based, so expect some
@@ -130,5 +150,5 @@ next run reports the same items again (GitHub e-mails you about the failed run).
 - Each fund is one entry under `funds:` in `fund_watch.yaml`. To add a fund, copy an entry and
   change the id, names, ISIN, holdings, dependencies, relevance words and topics.
 - Update `holdings` from the fund's monthly factsheet.
-- Add or remove keywords and topics freely.
+- Add or remove keywords and topics freely; the same for the `direction:` phrase lists.
 - Lower `flag_min_score` for more alerts; raise it for fewer.

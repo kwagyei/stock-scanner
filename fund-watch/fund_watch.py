@@ -53,9 +53,10 @@ LOG_FILE = DATA_DIR / "fund_watch_log.csv"
 SUMMARY_FILE = DATA_DIR / "fund_watch_latest.json"   # read by the stock scanner's dashboard
 STORIES_FILE = DATA_DIR / "fund_watch_stories.json"  # stories of earlier runs, per fund
 LOG_COLUMNS = ["run_utc", "fund", "story", "story_status", "published_utc", "score", "severity",
-               "categories", "entities", "source", "title", "link"]
+               "categories", "entities", "source", "title", "link", "direction", "direction_terms"]
 UTC = dt.timezone.utc
 SEVERITY_LABEL = {3: "HIGH", 2: "MEDIUM", 1: "LOW"}
+DIRECTION_ICON = {"positive": "▲", "negative": "▼", "mixed": "↕", "unclear": "·"}
 
 
 # --------------------------------------------------------------------------- config / queries
@@ -210,7 +211,53 @@ def match_categories(item: dict, cats: dict) -> dict:
     return hits
 
 
-def classify(item: dict, cats: dict, name_sets: dict, cfg: dict, matched=None, fund: dict | None = None) -> dict | None:
+def compile_direction(cfg: dict) -> dict:
+    """{"positive": [(phrase, pattern)], "negative": [...], "lean": {category: positive|negative}}."""
+    d = cfg.get("direction") or {}
+    pat = lambda k: re.compile(r"(?<![\w-])" + re.escape(k) + r"(?![\w-])", re.IGNORECASE)
+    return {"positive": [(k, pat(k)) for k in d.get("positive", [])],
+            "negative": [(k, pat(k)) for k in d.get("negative", [])],
+            "lean": dict(d.get("category_lean") or {})}
+
+
+def news_direction(item: dict, categories, rules: dict) -> tuple[str, list[str]]:
+    """Likely direction of an article for the fund: positive, negative, mixed or unclear, with
+    the phrases behind it. A phrase inside a longer phrase of the other kind doesn't count
+    ("lifts ban" is positive; its "ban" isn't negative). With no phrase, the categories' lean
+    decides if they all lean the same way ("(geopolitics)" in the terms marks that case)."""
+    text = article_text(item)
+    found = [(m.start(), m.end(), pol, k) for pol in ("positive", "negative")
+             for k, p in rules[pol] for m in p.finditer(text)]
+    keep = [f for f in found
+            if not any(g[2] != f[2] and g[0] <= f[0] and f[1] <= g[1] and g[1] - g[0] > f[1] - f[0]
+                       for g in found)]
+    pos = sorted({f[3] for f in keep if f[2] == "positive"})
+    neg = sorted({f[3] for f in keep if f[2] == "negative"})
+    if pos and neg:
+        return "mixed", pos + neg
+    if pos or neg:
+        return ("positive", pos) if pos else ("negative", neg)
+    leans = {rules["lean"].get(c) for c in categories}
+    if len(leans) == 1 and None not in leans:
+        return leans.pop(), [f"({', '.join(cat_label(c) for c in categories)})"]
+    return "unclear", []
+
+
+def story_direction(story: dict) -> tuple[str, list[str]]:
+    """One label for a story from its headlines: they agree -> that; both ways -> mixed."""
+    members = [story, *story.get("similar", [])]
+    labels = {m.get("direction", "unclear") for m in members} - {"unclear"}
+    terms = sorted({t for m in members for t in m.get("direction_terms", [])},
+                   key=lambda t: (t.startswith("("), t))
+    if not labels:
+        return "unclear", []
+    if len(labels) > 1 or "mixed" in labels:
+        return "mixed", terms
+    return labels.pop(), terms
+
+
+def classify(item: dict, cats: dict, name_sets: dict, cfg: dict, matched=None, fund: dict | None = None,
+             direction_rules: dict | None = None) -> dict | None:
     """Score an article for one fund (name_sets from build_name_sets). None if no risk keyword.
 
     fund: its `severity` overrides per category apply (e.g. legal news is LOW for an index fund).
@@ -239,8 +286,10 @@ def classify(item: dict, cats: dict, name_sets: dict, cfg: dict, matched=None, f
     if region:
         score += s["region_bonus"]
     named = any(p.search(text) for p in name_sets["fund"])
+    direction, terms = news_direction(item, hits, direction_rules or compile_direction(cfg))
     return {**item, "categories": hits, "severity": max_sev, "score": score,
-            "entities": sorted(set(tags)), "relevant": bool(tags or region or named)}
+            "entities": sorted(set(tags)), "relevant": bool(tags or region or named),
+            "direction": direction, "direction_terms": terms}
 
 
 def split_flagged(classified: list[dict], cfg: dict, fund: dict | None = None) -> tuple[list[dict], list[dict]]:
@@ -323,7 +372,9 @@ def group_stories(items: list[dict], weight: dict, threshold: float) -> list[dic
     stories = []
     for members in sorted(groups.values(), key=lambda m: m[0]):   # keeps the ranking
         lead = items[members[0]]
-        stories.append({**lead, "similar": [items[k] for k in members[1:]]})
+        story = {**lead, "similar": [items[k] for k in members[1:]]}
+        story["direction"], story["direction_terms"] = story_direction(story)
+        stories.append(story)
     return stories
 
 
@@ -431,6 +482,7 @@ def apply_story_memory(results: list[dict], memory: dict, weight: dict, threshol
 def classify_funds(items: list[dict], cfg: dict, now: dt.datetime) -> list[dict]:
     """Per fund: {"fund", "flagged", "watch"}: stories ranked by score (see group_stories)."""
     cats = compile_categories(cfg)
+    rules = compile_direction(cfg)
     matched = [(it, match_categories(it, cats)) for it in items]
     weight = word_weights(items)
     threshold = cfg["news"].get("story_similarity", 0.5)
@@ -438,7 +490,7 @@ def classify_funds(items: list[dict], cfg: dict, now: dt.datetime) -> list[dict]
     for f in cfg["funds"]:
         names = build_name_sets(f)
         cl = [c for it, m in matched
-              if m and _considered(it, f, names) and (c := classify(it, cats, names, cfg, m, f))]
+              if m and _considered(it, f, names) and (c := classify(it, cats, names, cfg, m, f, rules))]
         cl.sort(key=lambda x: (x["score"], x["severity"], x["ts"] or now), reverse=True)
         flagged, watch = split_flagged(group_stories(cl, weight, threshold), cfg, f)
         results.append({"fund": f, "flagged": flagged, "watch": watch})
@@ -463,6 +515,12 @@ def save_seen(seen: dict, retention_days: int, now: dt.datetime) -> None:
 
 
 # --------------------------------------------------------------------------- reporting
+
+def direction_label(i: dict) -> str:
+    """▼ negative, ▲ positive ... for the reports."""
+    d = i.get("direction", "unclear")
+    return f"{DIRECTION_ICON[d]} {d}"
+
 
 def cat_label(cat: str) -> str:
     return cat.replace("_", " ").capitalize()
@@ -501,6 +559,8 @@ def build_html(results, now_local, n_queries, n_raw) -> str:
         for i in items:
             cats = "<br>".join(f"<b>{escape(cat_label(c))}</b>: {escape(', '.join(k))}"
                                for c, k in i["categories"].items())
+            if i.get("direction_terms"):
+                cats += f"<br><i>Direction: {escape(', '.join(i['direction_terms']))}</i>"
             when = i["ts"].strftime("%d %b %H:%M") if i["ts"] else ""
             ents = escape(", ".join(i["entities"])) or "–"
             sim = i.get("similar", [])
@@ -513,20 +573,22 @@ def build_html(results, now_local, n_queries, n_raw) -> str:
             out.append(
                 f"<tr class=s{i['severity']}><td class=n>{i['score']}</td>"
                 f"<td><span class=sev>{SEVERITY_LABEL[i['severity']]}</span></td>"
+                f"<td class=dir-{i.get('direction', 'unclear')}>{escape(direction_label(i))}</td>"
                 f"<td><a href=\"{escape(i['link'])}\">{escape(i['title'])}</a>"
                 f"<br><small>{escape(i['source'])} · {when} UTC</small>{esc}{more}</td>"
                 f"<td>{ents}</td><td><small>{cats}</small></td></tr>")
         return "\n".join(out)
 
-    head = "<tr><th>Score</th><th>Severity</th><th>Headline</th><th>Affects</th><th>Why flagged</th></tr>"
+    head = ("<tr><th>Score</th><th>Severity</th><th>Direction</th><th>Headline</th><th>Affects</th>"
+            "<th>Why flagged</th></tr>")
     sections = "\n".join(
         f"""<h2>{escape(r['fund']['icon'])} {escape(r['fund']['name'])} <small>ISIN {escape(r['fund']['isin'])}</small></h2>
 <h3>Flagged · {len(r['flagged'])} {'story' if len(r['flagged']) == 1 else 'stories'}</h3>
-<div class=box><table>{head}{rows(r['flagged']) or '<tr><td colspan=5>Nothing new above the flag threshold.</td></tr>'}</table></div>
+<div class=box><table>{head}{rows(r['flagged']) or '<tr><td colspan=6>Nothing new above the flag threshold.</td></tr>'}</table></div>
 <h3>Still developing (earlier stories, new headlines, not worse) · {len(r.get('developing', []))}</h3>
-<div class=box><table>{head}{rows(r.get('developing', [])) or '<tr><td colspan=5>None.</td></tr>'}</table></div>
+<div class=box><table>{head}{rows(r.get('developing', [])) or '<tr><td colspan=6>None.</td></tr>'}</table></div>
 <h3>Watch (lower score) · {len(r['watch'])} {'story' if len(r['watch']) == 1 else 'stories'}</h3>
-<div class=box><table>{head}{rows(r['watch']) or '<tr><td colspan=5>None.</td></tr>'}</table></div>"""
+<div class=box><table>{head}{rows(r['watch']) or '<tr><td colspan=6>None.</td></tr>'}</table></div>"""
         for r in results)
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -541,10 +603,13 @@ td.n{{text-align:right}} small{{color:#666}}
 .sev{{font-weight:600;font-size:11px;padding:2px 6px;border-radius:4px}}
 tr.s3 .sev{{background:#fde2e1;color:#a4000f}} tr.s2 .sev{{background:#fff1d6;color:#8a5300}}
 tr.s1 .sev{{background:#e8eef7;color:#24476b}}
+td.dir-negative{{color:#a4000f;white-space:nowrap}} td.dir-positive{{color:#1a7f37;white-space:nowrap}}
+td.dir-mixed,td.dir-unclear{{color:#666;white-space:nowrap}}
 </style></head><body>
 <h1>Fund risk watch · {now_local:%a %d %b %Y, %H:%M}</h1>
 <p><small>{n_queries} searches, {n_raw} articles scanned, new items only. Keyword-based flagging: expect some
-false positives; read the source.</small></p>
+false positives; read the source. Direction (▲ positive, ▼ negative, ↕ mixed, · unclear) is a rough guide
+from keywords in the headline, not a forecast.</small></p>
 {sections}
 <p><small>Not investment advice.</small></p>
 </body></html>"""
@@ -560,17 +625,20 @@ def _md(text) -> str:
 def _md_items(items, empty: str) -> str:
     if not items:
         return f"_{empty}_\n"
-    out = ["| Score | Severity | Headline | Affects | Why flagged |", "|:---:|:---|:---|:---|:---|"]
+    out = ["| Score | Severity | Direction | Headline | Affects | Why flagged |", "|:---:|:---|:---|:---|:---|:---|"]
     for i in items:
         when = i["ts"].strftime("%d %b %H:%M") if i["ts"] else ""
         why = "<br>".join(f"**{cat_label(c)}:** {_md(', '.join(k))}" for c, k in i["categories"].items())
+        if i.get("direction_terms"):
+            why += f"<br><sub>Direction: {_md(', '.join(i['direction_terms']))}</sub>"
         sim = i.get("similar", [])
         more = f"<br><sub>➕ {len(sim)} similar: {_md(_similar_sources(i))}</sub>" if sim else ""
         if i.get("status") == "escalated":
             more += f"<br><sub>⬆️ **escalated** · first seen {_first_seen(i)}</sub>"
         elif i.get("status") == "update":
             more += f"<br><sub>🔁 first seen {_first_seen(i)}</sub>"
-        out.append(f"| **{i['score']}** | {SEVERITY_ICON[i['severity']]} | [{_md(i['title'])}](<{i['link']}>)"
+        out.append(f"| **{i['score']}** | {SEVERITY_ICON[i['severity']]} | {direction_label(i)} "
+                   f"| [{_md(i['title'])}](<{i['link']}>)"
                    f"<br><sub>{_md(i['source'])} · {when} UTC</sub>{more} | {_md(', '.join(i['entities'])) or '–'} | {why} |")
     grouped = [i for i in items if i.get("similar")]
     if grouped:
@@ -628,7 +696,8 @@ def write_summary(results, now, now_local, n_raw) -> None:
                        "link": i["link"], "source": i["source"], "entities": i["entities"],
                        "categories": list(i["categories"]), "similar": len(i.get("similar", [])),
                        "similar_sources": _similar_sources(i), "status": i.get("status", "new"),
-                       "first_seen": i.get("first_seen", "")} for i in r["flagged"][:10]]}
+                       "first_seen": i.get("first_seen", ""), "direction": i.get("direction", "unclear"),
+                       "direction_terms": i.get("direction_terms", [])} for i in r["flagged"][:10]]}
              for r in results]
     SUMMARY_FILE.write_text(json.dumps({
         "run_utc": now.isoformat(timespec="minutes"), "run_local": f"{now_local:%Y-%m-%d %H:%M}",
@@ -644,12 +713,13 @@ def build_markdown(results, now_local) -> str:
                   f"**Flagged:** {len(r['flagged'])} · **Still developing:** {len(r.get('developing', []))} "
                   f"· **Watch:** {len(r['watch'])}", ""]
         if r["flagged"]:
-            lines += ["| Score | Severity | Headline | Affects | Categories |", "|---|---|---|---|---|"]
+            lines += ["| Score | Severity | Direction | Headline | Affects | Categories |", "|---|---|---|---|---|---|"]
             for i in r["flagged"][:25]:
                 t = i["title"].replace("|", "/")
                 more = f" (+{len(i['similar'])} similar)" if i.get("similar") else ""
                 more += " ⬆️ escalated" if i.get("status") == "escalated" else ""
-                lines.append(f"| {i['score']} | {SEVERITY_LABEL[i['severity']]} | [{t}]({i['link']}){more} "
+                lines.append(f"| {i['score']} | {SEVERITY_LABEL[i['severity']]} | {direction_label(i)} "
+                             f"| [{t}]({i['link']}){more} "
                              f"| {', '.join(i['entities']) or '–'} | {', '.join(map(cat_label, i['categories']))} |")
             lines.append("")
     return "\n".join(lines) + "\n"
@@ -681,7 +751,8 @@ def append_log(results, now) -> None:
                     w.writerow([now.isoformat(timespec="minutes"), r["fund"]["id"], sid, story.get("status", ""),
                                 i["ts"].isoformat(timespec="minutes") if i["ts"] else "",
                                 i["score"], SEVERITY_LABEL[i["severity"]], ";".join(i["categories"]),
-                                ";".join(i["entities"]), i["source"], i["title"], i["link"]])
+                                ";".join(i["entities"]), i["source"], i["title"], i["link"],
+                                i.get("direction", ""), ";".join(i.get("direction_terms", []))])
 
 
 def send_email(html: str, subject: str, required: bool = False) -> None:

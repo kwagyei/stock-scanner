@@ -193,6 +193,53 @@ risk_categories:
     keywords: ["manager change", "portfolio manager leaves", "fund suspended", "suspends dealing",
                "liquidation", "fund merger", "merged", "closes fund"]
 
+# Direction: is a flagged story likely good (▲) or bad (▼) for the fund? Keyword rules on the
+# headline and summary, matched like the risk keywords (whole words, any case).
+#   positive and negative phrases both found -> mixed (↕); none -> the category lean below,
+#   if all the story's categories lean the same way; otherwise unclear (·).
+# A phrase inside a longer phrase of the other kind doesn't count: "lifts ban" is positive, its
+# "ban" isn't negative. It's a rough guide from headlines, not a forecast; the log keeps every
+# label so it can be checked against the funds' prices later.
+direction:
+  positive: ["beats estimates", "beat estimates", "beats expectations", "tops estimates", "record revenue",
+             "record profit", "record sales", "record high", "raises guidance", "raises forecast",
+             "raises outlook", "lifts guidance", "lifts forecast", "upgrade", "upgraded", "buyback",
+             "share repurchase", "wins order", "wins contract", "new orders", "orders surge", "demand surges",
+             "strong demand", "sales rise", "sales jump", "revenue rises", "revenue jumps", "revenue grows",
+             "profit rises", "profit jumps", "profit surges", "rallies", "stocks rally", "shares rally", "rebounds", "rebound",
+             "surges", "soars", "soar", "surge", "jumps", "climbs", "gains", "blockbuster", "record year",
+             "record quarter", "strike suspension", "suspends strike", "strike suspended", "lifts ban", "lifted ban", "ban lifted",
+             "eases restrictions", "eased restrictions", "removes tariffs", "tariff cut", "tariff cuts",
+             "cuts tariffs", "lowers tariffs", "tariff exemption", "exempted", "exemption", "trade deal",
+             "truce", "ceasefire", "de-escalation", "tensions ease", "talks resume", "strike ends",
+             "ends strike", "end strike", "ended strike", "calls off strike", "called off strike", "averts strike", "strike averted", "deal reached", "settles lawsuit",
+             "settlement", "approval", "approved", "cuts rates", "rate cut", "rate cuts", "inflation cools",
+             "inflation eases", "soft landing", "stimulus", "expands capacity", "new fab", "invests"]
+  negative: ["misses estimates", "missed estimates", "cuts guidance", "lowers guidance", "cuts forecast",
+             "lowers forecast", "cuts outlook", "weak outlook", "profit warning", "downgrade", "downgraded",
+             "revenue falls", "revenue drops", "sales fall", "sales decline", "profit falls", "loss widens",
+             "plunges", "plunge", "tumbles", "slumps", "slump", "slides", "slide", "sinks", "falls sharply",
+             "sell-off", "selloff", "rout", "market crash", "shares crash", "stocks crash", "limit-down", "ban", "banned", "export controls",
+             "export ban", "sanctions", "tariff", "tariffs", "entity list", "restrictions", "probe",
+             "investigation", "lawsuit", "sued", "fined", "indicted", "raid", "strike", "walkout",
+             "layoffs", "job cuts", "cuts orders", "cut orders", "orders cut", "order cuts", "cancels orders", "inventory glut",
+             "oversupply", "delays", "delayed", "halts production", "suspends production", "outage",
+             "blackout", "explosion", "factory fire", "plant fire", "fab fire", "recall", "defect", "cyberattack", "ransomware", "hacked",
+             "data breach", "blockade", "invasion", "military drills", "live-fire", "missile", "incursion",
+             "embargo", "escalates", "escalation", "tensions rise", "earthquake", "quake", "typhoon",
+             "flood", "flooding", "drought", "water shortage", "recession", "stagflation", "hikes rates",
+             "raises rates", "rate hike", "inflation surges", "inflation jumps", "debt crisis",
+             "delinquencies", "defaults", "debt soars", "debt surges", "debt jumps", "costs soar", "costs surge",
+             "prices soar", "prices surge", "inflation soars", "yields soar", "yields jump", "bank failure", "credit crunch", "yields surge"]
+  # Used only when no phrase above matched.
+  category_lean:
+    geopolitics: negative
+    trade_restrictions: negative
+    natural_disaster: negative
+    infrastructure: negative
+    cyber_operations: negative
+    labour: negative
+
 # Scoring
 scoring:
   holding_bonus: 2         # headline names a top-5 holding (weight >= 3%)

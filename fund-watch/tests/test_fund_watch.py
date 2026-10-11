@@ -706,3 +706,70 @@ def test_market_crashes_still_count(cfg, title):
 def test_august_2026_holdings(cfg, title, entity, bonus):
     c = classify(title, cfg)
     assert c["entities"] == [entity] and c["score"] == 2 + cfg["scoring"][bonus]
+
+
+# --------------------------------------------------------------------------- direction (▲ / ▼)
+
+def direction(title, cfg, cats=("company_results",), summary=""):
+    return fw.news_direction(item(title, summary), list(cats), fw.compile_direction(cfg))
+
+
+@pytest.mark.parametrize("title, expected", [
+    ("TSMC beats estimates as AI demand surges", "positive"),
+    ("MediaTek raises guidance for the fourth quarter", "positive"),
+    ("US lifts ban on chip tool exports to Taiwan", "positive"),          # "ban" inside "lifts ban"
+    ("Micron workers end strike after deal reached", "positive"),
+    ("Delta cuts outlook as fuel costs bite", "negative"),
+    ("King Slide plunges limit-down as revenue falls", "negative"),
+    ("US widens export controls on AI chips", "negative"),
+    ("Micron's $35 Billion Buyback Meets a Munich Sales Ban and a Taiwan Strike", "mixed"),
+    # real headlines from 11 Oct 2026 that the first phrase lists got wrong
+    ("Global stocks soar on Nvidia earnings, Samsung strike suspension", "positive"),
+    ("Micron's Blockbuster Guidance Collides With a 99% Strike Mandate in Taiwan", "mixed"),
+    ("Micron's Record Year Meets a Taiwan Strike Mandate and a $600 Million Patent Bill", "mixed"),
+    ("Apple Raised iPhone Prices and Then Cut Orders", "negative"),
+    ("Americans' debt soars near Great Recession levels: Fed data", "negative"),   # not "soars" = positive
+])
+def test_direction_from_phrases(cfg, title, expected):
+    assert direction(title, cfg)[0] == expected
+
+
+def test_direction_lists_the_phrases_and_ignores_the_publisher(cfg):
+    label, terms = direction("TSMC shares rally on record revenue", cfg)
+    assert (label, terms) == ("positive", ["record revenue", "shares rally"])
+    assert fw.news_direction(item("Taiwan update", source="Rally Daily"), ["macro"],
+                             fw.compile_direction(cfg)) == ("unclear", [])
+
+
+def test_category_lean_only_without_phrases(cfg):
+    label, terms = direction("PLA warships near Taiwan", cfg, cats=["geopolitics"])
+    assert label == "negative" and len(terms) == 1 and terms[0].startswith("(")
+    # a phrase beats the lean
+    assert direction("Tensions ease as talks resume over Taiwan", cfg, cats=["geopolitics"])[0] == "positive"
+    # categories that don't lean, or lean differently -> unclear
+    assert direction("Fed meeting in focus", cfg, cats=["macro"])[0] == "unclear"
+    assert direction("Taiwan news roundup", cfg, cats=["geopolitics", "macro"])[0] == "unclear"
+
+
+def test_story_direction_combines_its_headlines():
+    s = {"direction": "negative", "direction_terms": ["strike"],
+         "similar": [{"direction": "negative", "direction_terms": ["walkout"]},
+                     {"direction": "unclear", "direction_terms": []}]}
+    assert fw.story_direction(s) == ("negative", ["strike", "walkout"])
+    s["similar"].append({"direction": "positive", "direction_terms": ["strike ends"]})
+    assert fw.story_direction(s)[0] == "mixed"
+    assert fw.story_direction({"direction": "unclear", "similar": []}) == ("unclear", [])
+
+
+def test_classify_and_outputs_carry_direction(monkeypatch, cfg):
+    c = classify("TSMC hit by export controls on AI chips", cfg)
+    assert c["direction"] == "negative" and "export controls" in c["direction_terms"]
+    feeds = {"": [item("TSMC hit by new US export controls on AI chips in Taiwan")]}
+    run(monkeypatch, feeds)
+    page = (fw.REPORT_DIR / "fund_watch_latest.md").read_text()
+    assert "| Direction |" in page and "▼ negative" in page and "Direction: export controls" in page
+    summary = json.loads(fw.SUMMARY_FILE.read_text())
+    top = summary["funds"][0]["top"][0]
+    assert top["direction"] == "negative" and "export controls" in top["direction_terms"]
+    log = _log()
+    assert log[0]["direction"] == "negative" and "export controls" in log[0]["direction_terms"]
