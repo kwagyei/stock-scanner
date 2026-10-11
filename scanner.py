@@ -1537,6 +1537,8 @@ def load_fund_summary() -> dict | None:
 
 
 FUND_SEVERITY = {"HIGH": "🔴&nbsp;HIGH", "MEDIUM": "🟠&nbsp;MEDIUM", "LOW": "🔵&nbsp;LOW"}
+FUND_DIRECTION = {"positive": "▲&nbsp;positive", "negative": "▼&nbsp;negative", "mixed": "↕&nbsp;mixed",
+                  "unclear": "·&nbsp;unclear"}   # fund watch's keyword guess at the news' direction
 
 
 def _fund_totals(fs: dict | None) -> tuple[int, int]:
@@ -1570,15 +1572,16 @@ def _fund_section(fs: dict | None, now_local: dt.datetime) -> list[str]:
             continue
         out.append(f"**{f['icon']} {_md(f['short'])}**" + (f" · {f['n_high']} high-severity" if f["n_high"] else ""))
         out.append("")
-        out.append(_md_table(["Severity", "Headline", "Affects"],
+        out.append(_md_table(["Severity", "Direction", "Headline", "Affects"],
                              [[FUND_SEVERITY.get(i["severity"], i["severity"]),
+                               FUND_DIRECTION.get(i.get("direction", "unclear"), "·"),
                                f"[{_md(i['title'])}](<{i['link']}>)"
                                + (f"<br><sub>➕ {i['similar']} similar: {_md(i.get('similar_sources', ''))}</sub>"
                                   if i.get("similar") else "")
                                + (f"<br><sub>⬆️ **escalated** · first seen {_day(i['first_seen'][:10])}</sub>"
                                   if i.get("status") == "escalated" and i.get("first_seen") else ""),
                                _md(", ".join(i["entities"])) or "–"]
-                              for i in f["top"][:3]], align="lll"))
+                              for i in f["top"][:3]], align="llll"))
     if not _fund_totals(fs)[0]:
         dev = sum(f.get("n_developing", 0) for f in fs["funds"])
         out.append("✅ Nothing new flagged on the last run." + (f" {dev} earlier story(ies) still developing."

@@ -1135,7 +1135,7 @@ def test_weekly_page_has_direction_split(cfg):
 def _fund_summary(run_utc="2026-10-07T05:13+00:00", flagged=2, high=1, single=False):
     top = [{"score": 6, "severity": "HIGH", "title": "TSMC | halts production", "link": "https://x.test/a",
             "source": "Reuters", "entities": ["TSMC"], "categories": ["infrastructure"],
-            "similar": 3, "similar_sources": "Bloomberg, Nikkei Asia, Focus Taiwan"},
+            "similar": 3, "similar_sources": "Bloomberg, Nikkei Asia, Focus Taiwan", "direction": "negative"},
            {"score": 3, "severity": "MEDIUM", "title": "Quanta revenue falls", "link": "https://x.test/b",
             "source": "digitimes", "entities": ["Quanta Computer"], "categories": ["company_results"],
             "status": "escalated", "first_seen": "2026-10-05T05:13+00:00"}][:flagged]
@@ -1170,9 +1170,9 @@ def test_dashboard_fund_watch_section(cfg, tmp_paths, monkeypatch):
     assert "⬆️ **escalated** · first seen Mon&nbsp;5&nbsp;Oct" in sec
     assert "➕ 3 similar: Bloomberg, Nikkei Asia, Focus Taiwan" in sec
     assert "**🇹🇼 Taiwan** · 1 high-severity" in sec and "**🌍 Global**" in sec
-    assert ("| 🔴&nbsp;HIGH | [TSMC \\| halts production](<https://x.test/a>)"
+    assert ("| 🔴&nbsp;HIGH | ▼&nbsp;negative | [TSMC \\| halts production](<https://x.test/a>)"
             "<br><sub>➕ 3 similar: Bloomberg, Nikkei Asia, Focus Taiwan</sub> | TSMC |") in sec
-    assert "[Fed raises interest rates](<https://x.test/c>)" in sec
+    assert "| 🟠&nbsp;MEDIUM | ·&nbsp;unclear | [Fed raises interest rates](<https://x.test/c>)" in sec   # older summary: no direction
     assert "[Full fund watch →](fund-watch/reports/fund_watch_latest.md)" in sec
     assert "last ran" not in sec                                                  # fresh: no stale warning
 
