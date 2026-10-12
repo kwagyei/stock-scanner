@@ -109,9 +109,10 @@ false positives, and read the source.
 - Locally, from the `fund-watch/` folder: `python fund_watch.py` (requires
   `pip install feedparser PyYAML`). Report: `reports/fund_watch_latest.html`.
   `--all` shows everything in the news window without touching the seen-store or the log.
-- GitHub: `.github/workflows/fund_watch.yml` (in the repository root) runs every day at
-  05:13 UTC, after the tests in `fund-watch/tests`. The *Run workflow* button on the
-  **fund-risk-watch** workflow triggers a manual run.
+- GitHub: the **fund-risk-watch** workflow in the private data repository (deployed copy in
+  `deploy/data-repo/.github/workflows/fund_watch.yml`) runs every day at 07:13 Stockholm,
+  started by the external timer, after the tests in `fund-watch/tests`. Its *Run workflow*
+  button triggers a manual run.
 - E-mail: on (`email.enabled: true`), and it sends only when something is flagged. It needs
   five repository secrets (see below). The stock scanner uses the same secrets, but its own
   e-mail stays off (`email.enabled: false` in the root `config.yaml`).
@@ -129,7 +130,7 @@ top flagged items with a link to the full page. It warns if the fund watch hasn'
    (Google Account → Security → App passwords). Copy the 16-character password.
    An app password gives full access to that mailbox: revoke it there if the repository
    ever becomes public or gets other collaborators.
-3. Add the repository secrets (*Settings → Secrets and variables → Actions*, or the `gh` CLI):
+3. Add the secrets to the **data** repository (*Settings → Secrets and variables → Actions*, or the `gh` CLI):
 
    | Secret | Value |
    |---|---|
