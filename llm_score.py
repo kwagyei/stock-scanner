@@ -31,9 +31,9 @@ import news_sources as ns
 
 ROOT = Path(__file__).resolve().parent
 PROMPT_DIR = ROOT / "prompts"
-DATA_DIR = ROOT / "data"
+DATA_DIR = Path(os.environ.get("SCANNER_STATE_DIR") or ROOT) / "data"   # see scanner.STATE_DIR
 SCORES_PATH = DATA_DIR / "llm_scores.csv"
-PROMPT_REGISTRY = PROMPT_DIR / "used_prompts.json"   # sha256 of each prompt version once used live
+PROMPT_REGISTRY = DATA_DIR / "used_prompts.json"   # sha256 of each prompt version once used live
 UTC = dt.timezone.utc
 
 EVENT_TYPES = ["report", "order_contract", "guidance", "capital_raise", "insider", "m_and_a",
@@ -81,7 +81,7 @@ def prompt_fingerprint(prompt: str, effort: str) -> str:
 
 def check_prompt_unchanged(version: str, prompt: str, effort: str, register: bool) -> None:
     """Refuse to score with a prompt whose text (or user template / effort) changed after it was
-    used live. The first live use records its fingerprint in prompts/used_prompts.json."""
+    used live. The first live use records its fingerprint in data/used_prompts.json."""
     reg = json.loads(PROMPT_REGISTRY.read_text()) if PROMPT_REGISTRY.exists() else {}
     fp = prompt_fingerprint(prompt, effort)
     if version in reg and reg[version] != fp:

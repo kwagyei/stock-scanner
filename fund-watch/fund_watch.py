@@ -46,8 +46,11 @@ except ImportError:
     pass
 
 ROOT = Path(__file__).resolve().parent
-DATA_DIR = ROOT / "data"
-REPORT_DIR = ROOT / "reports"
+# Where runs write their data and reports: this folder, or <SCANNER_STATE_DIR>/fund-watch when
+# the scheduled runs keep their output in the separate data repository (see scanner.STATE_DIR).
+STATE_DIR = Path(os.environ["SCANNER_STATE_DIR"]) / "fund-watch" if os.environ.get("SCANNER_STATE_DIR") else ROOT
+DATA_DIR = STATE_DIR / "data"
+REPORT_DIR = STATE_DIR / "reports"
 SEEN_FILE = DATA_DIR / "fund_watch_seen.json"
 LOG_FILE = DATA_DIR / "fund_watch_log.csv"
 SUMMARY_FILE = DATA_DIR / "fund_watch_latest.json"   # read by the stock scanner's dashboard

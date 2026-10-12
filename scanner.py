@@ -57,8 +57,15 @@ except ImportError:
     pass
 
 ROOT = Path(__file__).resolve().parent
-DATA_DIR = ROOT / "data"
-REPORT_DIR = ROOT / "reports"
+# Where runs write their data, reports and dashboard. Defaults to this folder; the scheduled
+# runs set SCANNER_STATE_DIR to a checkout of the separate (private) data repository, so this
+# code repository only holds code.
+STATE_DIR = Path(os.environ.get("SCANNER_STATE_DIR") or ROOT)
+# Links from the generated pages to code files (README, config): relative when the pages sit
+# next to the code, else this URL (e.g. https://github.com/<user>/stock-scanner/blob/main).
+CODE_URL = os.environ.get("SCANNER_CODE_URL", "").rstrip("/")
+DATA_DIR = STATE_DIR / "data"
+REPORT_DIR = STATE_DIR / "reports"
 SIGNALS_LOG = DATA_DIR / "signals_log.csv"
 SCORES_LOG = DATA_DIR / "scores_log.csv"    # every stock, every run, with each score component
 PAPER_LOG = DATA_DIR / "paper_trades.csv"
@@ -66,8 +73,8 @@ RELEASES_LOG = DATA_DIR / "releases.csv"     # primary + aggregator releases for
 LLM_SCORES_LOG = DATA_DIR / "llm_scores.csv"  # one row per release and prompt version
 LLM_EVENTS_LOG = DATA_DIR / "llm_events.csv"  # returns after each scored release (event study)
 WEEKLY_LOG = DATA_DIR / "weekly_summary.csv"
-DASHBOARD = ROOT / "DASHBOARD.md"
-FUND_SUMMARY = ROOT / "fund-watch" / "data" / "fund_watch_latest.json"   # written by fund-watch/fund_watch.py
+DASHBOARD = STATE_DIR / "DASHBOARD.md"
+FUND_SUMMARY = STATE_DIR / "fund-watch" / "data" / "fund_watch_latest.json"   # written by fund-watch/fund_watch.py
 UTC = dt.timezone.utc
 USER_AGENT = "Mozilla/5.0 (stock-attention-scanner)"
 
@@ -1321,6 +1328,14 @@ def _button(label: str, colour: str, href: str) -> str:
     return f"[![{label}](https://img.shields.io/badge/{text}-{colour}?style=for-the-badge)]({href})"
 
 
+def code_link(path: str, here: str = "") -> str:
+    """Link from a generated page at `here` to a code file (path from the code repo root):
+    absolute under SCANNER_CODE_URL when the pages live in the data repo, else relative."""
+    if CODE_URL:
+        return f"{CODE_URL}/{path}"
+    return "../" * here.count("/") + path
+
+
 def _nav(here: str) -> str:
     """The button row. `here` = this page's path from the repo root (shown greyed out)."""
     up = "../" * here.count("/")
@@ -1328,7 +1343,7 @@ def _nav(here: str) -> str:
     repo = _repo_url()
     if repo:
         btns.append(_button("Runs", "57606a", f"{repo}/actions"))
-    btns.append(_button("Watchlist", "57606a", up + "watchlist.csv"))
+    btns.append(_button("Watchlist", "57606a", code_link("watchlist.csv", here)))
     return " ".join(btns) + "\n"
 
 
@@ -1621,7 +1636,7 @@ def build_dashboard(rows, missing, paper, cfg, now_local, eval_res) -> str:
         out += ["**Waiting to buy**", "", _pending_table(paper)]
     out += ["[All paper trades →](reports/paper_trades.md)", "", _eval_callout(eval_res),
             "[Full evaluation →](reports/evaluation.md) · "
-            "[How to read it](README.md#judging-the-results-evaluatepy)", ""]
+            f"[How to read it]({code_link('README.md')}#judging-the-results-evaluatepy)", ""]
     out += _fund_section(fs, now_local)
     out += ["## More", ""]
 
@@ -1655,7 +1670,7 @@ def build_dashboard(rows, missing, paper, cfg, now_local, eval_res) -> str:
             "- [Paper trades](data/paper_trades.csv): all trades, both rule sets",
             "- [Weekly summaries](data/weekly_summary.csv): one row per week",
             "- [Watchlist review](data/watchlist_review.csv): stocks the watchlist builder skipped",
-            "- [Settings](config.yaml)", "", "</details>", FOOTER]
+            f"- [Settings]({code_link('config.yaml')})", "", "</details>", FOOTER]
     return "\n".join(out)
 
 
@@ -1724,13 +1739,14 @@ def build_evaluation_md(res, pe_res, cfg, now_local, cmp: dict | None = None, wa
     out = ["# ⚖️ Evaluation", "", _nav("reports/evaluation.md"), _updated(now_local),
            f"<sub>Do the closed paper trades beat the Stockholm small-cap index over the same days "
            f"(OMX Stockholm 30 shown too), after costs (about {res['cost']:.1f}% per trade), by enough that it's "
-           "unlikely to be luck? [How to read this](../README.md#judging-the-results-evaluatepy)</sub>", "",
+           f"unlikely to be luck? [How to read this]({code_link('README.md', 'reports/x')}#judging-the-results-evaluatepy)"
+           "</sub>", "",
            "## Main rules", "", _eval_callout(res), ev.format_markdown(res)]
     if cmp is not None:
         out += ["## LLM experiment: v0 / v0b / v1", "",
                 "<sub>v0 = the rules above; v0b = only MFN/Cision releases count; v1 = v0b with LLM points "
                 "and blocking. Same exits and costs for all three; judged against small caps. "
-                "[How to read this](../README.md#llm-release-scoring)</sub>", ""]
+                f"[How to read this]({code_link('README.md', 'reports/x')}#llm-release-scoring)</sub>", ""]
         if warnings:
             out += [_callout("WARNING", "Problems in the last run: " + "; ".join(_md(w) for w in warnings)), ""]
         out.append(ev.format_compare_markdown(cmp))
