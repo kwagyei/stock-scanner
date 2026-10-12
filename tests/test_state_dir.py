@@ -60,3 +60,13 @@ def test_code_links(reloaded):
     sc = reloaded(SCANNER_CODE_URL="https://github.com/u/stock-scanner/blob/main/")["scanner"]
     assert sc.code_link("config.yaml", "reports/x.md") == "https://github.com/u/stock-scanner/blob/main/config.yaml"
     assert "https://github.com/u/stock-scanner/blob/main/watchlist.csv" in sc._nav("reports/latest.md")
+
+
+def test_fund_watch_creates_a_fresh_state_folder(reloaded, tmp_path, monkeypatch):
+    """A brand-new state folder (no fund-watch/data yet) must not crash the first run."""
+    fw = reloaded(SCANNER_STATE_DIR=str(tmp_path / "fresh"))["fund_watch"]
+    monkeypatch.setattr(fw, "fetch_feed", lambda q, c: [])
+    monkeypatch.setattr(fw.time, "sleep", lambda s: None)
+    assert fw.main(["--no-email"]) == 0
+    assert (tmp_path / "fresh" / "fund-watch" / "data" / "fund_watch_latest.json").exists()
+    assert (tmp_path / "fresh" / "fund-watch" / "reports" / "fund_watch_latest.md").exists()

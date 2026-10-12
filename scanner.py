@@ -2608,8 +2608,8 @@ def main(argv=None) -> int:
     if args.pages_only:
         return pages_only(cfg)
     wl = load_watchlist(Path(args.watchlist))
-    DATA_DIR.mkdir(exist_ok=True)
-    REPORT_DIR.mkdir(exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
     now = _now()
     try:

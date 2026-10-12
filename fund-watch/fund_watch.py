@@ -1048,8 +1048,8 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     cfg = load_config(Path(args.config))
-    DATA_DIR.mkdir(exist_ok=True)
-    REPORT_DIR.mkdir(exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
     now = dt.datetime.now(UTC)
     try:
         from zoneinfo import ZoneInfo
