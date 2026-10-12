@@ -1982,7 +1982,7 @@ def build_dashboard(rows, missing, paper, cfg, now_local, eval_res) -> str:
         "",
         _eval_callout(eval_res),
         "[Full evaluation →](reports/evaluation.md) · "
-        f"[How to read it]({code_link('README.md')}#judging-the-results-evaluatepy)",
+        f"[How to read it]({code_link('docs/OPERATIONS.md')}#judging-the-results-evaluatepy)",
         "",
     ]
     out += _fund_section(fs, now_local)
@@ -2209,7 +2209,8 @@ def build_evaluation_md(res, pe_res, cfg, now_local, cmp: dict | None = None, wa
         _updated(now_local),
         f"<sub>Do the closed paper trades beat the Stockholm small-cap index over the same days "
         f"(OMX Stockholm 30 shown too), after costs (about {res['cost']:.1f}% per trade), by enough that it's "
-        f"unlikely to be luck? [How to read this]({code_link('README.md', 'reports/x')}#judging-the-results-evaluatepy)"
+        f"unlikely to be luck? [How to read this]"
+        f"({code_link('docs/OPERATIONS.md', 'reports/x')}#judging-the-results-evaluatepy)"
         "</sub>",
         "",
         "## Main rules",
@@ -2223,7 +2224,7 @@ def build_evaluation_md(res, pe_res, cfg, now_local, cmp: dict | None = None, wa
             "",
             "<sub>v0 = the rules above; v0b = only MFN/Cision releases count; v1 = v0b with LLM points "
             "and blocking. Same exits and costs for all three; judged against small caps. "
-            f"[How to read this]({code_link('README.md', 'reports/x')}#llm-release-scoring)</sub>",
+            f"[How to read this]({code_link('docs/OPERATIONS.md', 'reports/x')}#llm-release-scoring)</sub>",
             "",
         ]
         if warnings:
@@ -2608,8 +2609,8 @@ def main(argv=None) -> int:
     if args.pages_only:
         return pages_only(cfg)
     wl = load_watchlist(Path(args.watchlist))
-    DATA_DIR.mkdir(exist_ok=True)
-    REPORT_DIR.mkdir(exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
     now = _now()
     try:
