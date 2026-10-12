@@ -54,25 +54,41 @@ because GitHub's own schedule proved unreliable for this repo. A backup morning 
 does nothing if the 08:07 run already completed. Both morning runs stay before the 09:00 open,
 because new paper trades buy at the next open (a run after the open buys at that day's open).
 
-1. Create a free GitHub account, then a **private** repository (e.g. `stock-scanner`).
-2. Upload all files from this folder, keeping the `.github/workflows/scan.yml` path.
-   Easiest way: on the repo page, *Add file → Upload files* and drag the whole folder in.
-3. Go to the repo's *Actions* tab and enable workflows if prompted.
-4. Open *attention-scan → Run workflow* to do a first run manually.
+The work is split over two repositories:
+
+| Repository | Holds | Runs |
+|---|---|---|
+| `stock-scanner` (public) | Code, tests, docs | CI only (lint + tests on every push) |
+| `stock-scanner-data` (private) | Everything the runs write: `data/`, `reports/`, `DASHBOARD.md`, `fund-watch/data/`, `fund-watch/reports/` | The scheduled scan and fund watch |
+
+The data repository's workflows check out the latest code into `code/`, run it with
+`SCANNER_STATE_DIR` set to the data repository, and commit the output there. Because the code
+repository is public, no token is needed to read it. The deployed workflow files are kept,
+versioned with the code, in [`deploy/data-repo/`](../deploy/data-repo/).
+
+**Setting it up from scratch**
+
+1. Create a **private** repository, e.g. `stock-scanner-data`.
+2. Copy everything in `deploy/data-repo/` into it (keep the `.github/workflows/` paths).
+   If your code repository isn't `kwagyei/stock-scanner`, change `repository:` in both workflows.
+3. Go to its *Actions* tab and enable workflows if prompted.
+4. Open *attention-scan → Run workflow* to do a first run manually. The first run creates the
+   folders and the dashboard.
 5. Read the result in one of these places:
+   - **Dashboard:** `DASHBOARD.md` in the data repository.
    - **Job summary:** *Actions → latest run → Summary*. Shows the alerts table.
-   - **Full digest:** `reports/latest.html` in the repo, or the *digest* artifact on the run page.
-     Download and open it in a browser.
+   - **Full digest:** `reports/latest.html`, or the *digest* artifact on the run page.
 6. Optional e-mail: set `email.enabled: true` in `config.yaml` and add these secrets under
-   *Settings → Secrets and variables → Actions*:
+   *Settings → Secrets and variables → Actions* of the **data** repository:
    `SMTP_HOST`, `SMTP_PORT` (587), `SMTP_USER`, `SMTP_PASS`, `EMAIL_TO`.
    - For Outlook/Microsoft 365, use host `smtp.office365.com`. SMTP auth must be allowed
      on the account.
    - For Gmail, use host `smtp.gmail.com` with an app password.
    - Using a separate mailbox for this is a good idea.
 
-The workflow commits the updated logs back to the repo after each run, so the history
-builds up over time.
+Each run commits its output to the data repository, so the history builds up there, and the
+code repository's history stays code only. To run locally instead, leave `SCANNER_STATE_DIR`
+unset: the output then goes into the code folder, where it is git-ignored.
 
 ### Scheduling (cron-job.org)
 
@@ -84,7 +100,7 @@ The `schedule:` lines stay in the workflows as a fallback; their late runs skip 
 **Setup** (done 8 Oct 2026; repeat if you ever move the repo)
 
 1. **GitHub token.** <https://github.com/settings/personal-access-tokens/new> (fine-grained):
-   repository access *Only select repositories → stock-scanner*, permission
+   repository access *Only select repositories → stock-scanner-data*, permission
    *Actions: Read and write*, nothing else. Copy it; GitHub shows it once. It lives only in
    cron-job.org. Never commit it or paste it anywhere else. It can start this repo's
    workflows but not read or change the code.
@@ -99,7 +115,7 @@ The `schedule:` lines stay in the workflows as a fallback; their late runs skip 
    | `X-GitHub-Api-Version` | `2022-11-28` |
    | `Content-Type` | `application/json` |
 
-   URL: `https://api.github.com/repos/kwagyei/stock-scanner/actions/workflows/<file>/dispatches`
+   URL: `https://api.github.com/repos/kwagyei/stock-scanner-data/actions/workflows/<file>/dispatches`
 
    | Job | `<file>` | Request body | Schedule (Europe/Stockholm) |
    |---|---|---|---|

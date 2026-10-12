@@ -6,3 +6,10 @@ __pycache__/
 .env
 reports/digest_*.html
 fund-watch/reports/fund_watch_20*.html
+
+# Output of local runs (scheduled runs write to the private data repository instead)
+/data/
+/reports/
+/DASHBOARD.md
+fund-watch/data/
+fund-watch/reports/

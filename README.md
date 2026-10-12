@@ -83,6 +83,7 @@ same days, after costs.
 | `fund-watch/` | Fund news risk watch (see [`fund-watch/FUND_WATCH.md`](fund-watch/FUND_WATCH.md)) |
 | `config.yaml`, `watchlist.csv` | All thresholds and the universe |
 | `tests/`, `fund-watch/tests/` | Offline test suite: every network call is mocked |
+| `deploy/data-repo/` | The scheduled workflows, as deployed in the private data repository |
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | Setup, scheduling, reading the results, maintenance |
 
 ## Running it
