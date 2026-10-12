@@ -21,6 +21,7 @@ Verdict:
   PASS     enough trades, average excess > 0, still > 0 without the best trade, t > 2
   FAIL     otherwise
 """
+
 from __future__ import annotations
 
 import argparse
@@ -34,7 +35,7 @@ import pandas as pd
 import yaml
 
 ROOT = Path(__file__).resolve().parent
-STATE_DIR = Path(os.environ.get("SCANNER_STATE_DIR") or ROOT)   # see scanner.STATE_DIR
+STATE_DIR = Path(os.environ.get("SCANNER_STATE_DIR") or ROOT)  # see scanner.STATE_DIR
 PAPER_LOG = STATE_DIR / "data" / "paper_trades.csv"
 EVENTS_LOG = STATE_DIR / "data" / "llm_events.csv"
 DEFAULTS = {"cost_pct": 1.2, "stake": 0.10, "min_trades": 30}
@@ -55,6 +56,8 @@ def direction(move, threshold: float = 0.10) -> str:
     if math.isnan(m):
         return "unknown"
     return "drop" if m <= -threshold else "jump" if m >= threshold else "flat"
+
+
 RESAMPLES = 10_000
 SEED = 42
 
@@ -66,8 +69,14 @@ def defaults_from_config(path: Path = ROOT / "config.yaml") -> dict:
         cfg = {}
     move = ((cfg.get("thresholds") or {}).get("price_move_1d")) or 0.10
     costs = {**COST_DEFAULTS, **(cfg.get("costs") or {})}
-    out = {**DEFAULTS, "move_threshold": move, **(cfg.get("evaluation") or {}), "costs": costs,
-           **EVENT_DEFAULTS, **{k: v for k, v in (cfg.get("eval") or {}).items() if k in EVENT_DEFAULTS}}
+    out = {
+        **DEFAULTS,
+        "move_threshold": move,
+        **(cfg.get("evaluation") or {}),
+        "costs": costs,
+        **EVENT_DEFAULTS,
+        **{k: v for k, v in (cfg.get("eval") or {}).items() if k in EVENT_DEFAULTS},
+    }
     out["cost_pct"] = round_trip(costs)
     if (cfg.get("eval") or {}).get("min_trades"):
         out["min_trades"] = cfg["eval"]["min_trades"]
@@ -90,8 +99,9 @@ def trade_costs(spread: pd.Series, costs: dict) -> pd.Series:
 TRADE_COLUMNS = ["ticker", "ret", "bench", "bench_secondary", "reason", "exit_date", "move", "cost"]
 
 
-def closed_trades(paper: pd.DataFrame, variant: bool = False, strategy: str | None = None,
-                  costs: dict | None = None) -> pd.DataFrame:
+def closed_trades(
+    paper: pd.DataFrame, variant: bool = False, strategy: str | None = None, costs: dict | None = None
+) -> pd.DataFrame:
     """Closed trades as numbers, oldest first: ret, bench (primary benchmark where known, else the
     secondary; missing -> 0), bench_secondary, reason, exit_date, move and cost (per-trade round
     trip from `costs`, or NaN = use evaluate's flat cost). `strategy` picks one paper book
@@ -109,21 +119,24 @@ def closed_trades(paper: pd.DataFrame, variant: bool = False, strategy: str | No
 
     secondary = pd.to_numeric(col(f"{p}bench_return_pct"), errors="coerce")
     primary = pd.to_numeric(col("bench_primary_return_pct"), errors="coerce") if not variant else secondary * np.nan
-    out = pd.DataFrame({
-        "ticker": col("ticker"),
-        "ret": pd.to_numeric(col(f"{p}return_pct"), errors="coerce"),
-        "bench": primary.fillna(secondary).fillna(0.0),
-        "bench_secondary": secondary.fillna(0.0),
-        "reason": col(f"{p}exit_reason").replace("", "unknown"),
-        "exit_date": col(f"{p}exit_date"),
-        "move": pd.to_numeric(col("signal_move"), errors="coerce"),   # same signal for both rule sets
-        "cost": trade_costs(col("spread_pct"), costs) if costs is not None else np.nan,
-    }).dropna(subset=["ret"])
+    out = pd.DataFrame(
+        {
+            "ticker": col("ticker"),
+            "ret": pd.to_numeric(col(f"{p}return_pct"), errors="coerce"),
+            "bench": primary.fillna(secondary).fillna(0.0),
+            "bench_secondary": secondary.fillna(0.0),
+            "reason": col(f"{p}exit_reason").replace("", "unknown"),
+            "exit_date": col(f"{p}exit_date"),
+            "move": pd.to_numeric(col("signal_move"), errors="coerce"),  # same signal for both rule sets
+            "cost": trade_costs(col("spread_pct"), costs) if costs is not None else np.nan,
+        }
+    ).dropna(subset=["ret"])
     return out.sort_values(["exit_date"], kind="stable").reset_index(drop=True)
 
 
-def load_trades(path: Path = PAPER_LOG, variant: bool = False, strategy: str | None = None,
-                costs: dict | None = None) -> pd.DataFrame | None:
+def load_trades(
+    path: Path = PAPER_LOG, variant: bool = False, strategy: str | None = None, costs: dict | None = None
+) -> pd.DataFrame | None:
     """None if the file does not exist."""
     if not Path(path).exists():
         return None
@@ -146,12 +159,17 @@ def _max_drawdown(net: pd.Series, stake: float) -> float:
     return float(((equity / peak) - 1).min() * 100) if len(equity) else 0.0
 
 
-def evaluate(trades: pd.DataFrame | None, cost: float = DEFAULTS["cost_pct"],
-             stake: float = DEFAULTS["stake"], min_trades: int = DEFAULTS["min_trades"],
-             resamples: int = RESAMPLES, seed: int = SEED, move_threshold: float = 0.10) -> dict:
+def evaluate(
+    trades: pd.DataFrame | None,
+    cost: float = DEFAULTS["cost_pct"],
+    stake: float = DEFAULTS["stake"],
+    min_trades: int = DEFAULTS["min_trades"],
+    resamples: int = RESAMPLES,
+    seed: int = SEED,
+    move_threshold: float = 0.10,
+) -> dict:
     """All statistics plus the verdict. Percent values are in percent (2.5 = 2.5%)."""
-    res = {"n": 0, "cost": cost, "stake": stake, "min_trades": min_trades,
-           "file_missing": trades is None}
+    res = {"n": 0, "cost": cost, "stake": stake, "min_trades": min_trades, "file_missing": trades is None}
     if trades is None or trades.empty:
         res.update(verdict="NOT YET", checks={})
         return res
@@ -172,29 +190,49 @@ def evaluate(trades: pd.DataFrame | None, cost: float = DEFAULTS["cost_pct"],
         p_pos = float((boot > 0).mean())
     else:
         p_pos = None
-    by_reason = (pd.DataFrame({"reason": trades["reason"], "net": net, "excess": excess})
-                 .groupby("reason").agg(trades=("net", "size"), avg_net=("net", "mean"),
-                                        avg_excess=("excess", "mean"))
-                 .sort_values("trades", ascending=False))
+    by_reason = (
+        pd.DataFrame({"reason": trades["reason"], "net": net, "excess": excess})
+        .groupby("reason")
+        .agg(trades=("net", "size"), avg_net=("net", "mean"), avg_excess=("excess", "mean"))
+        .sort_values("trades", ascending=False)
+    )
     dirs = trades["move"].map(lambda m: direction(m, move_threshold)) if "move" in trades else "unknown"
-    by_direction = (pd.DataFrame({"direction": dirs, "net": net, "excess": excess})
-                    .groupby("direction").agg(trades=("net", "size"), win_rate=("net", lambda x: (x > 0).mean() * 100),
-                                              avg_net=("net", "mean"), avg_excess=("excess", "mean"))
-                    .reindex([d for d in DIRECTIONS if d in set(dirs)]))
-    res.update({
-        "n": n,
-        "avg_net": float(net.mean()), "avg_bench": float(trades["bench"].mean()),
-        "avg_excess": float(excess.mean()), "median_excess": float(excess.median()),
-        "avg_excess_secondary": float((net - trades["bench_secondary"]).mean()) if "bench_secondary" in trades else None,
-        "excess_wo_best": without(1), "excess_wo_best2": without(2),
-        "win_rate": float((net > 0).mean() * 100), "n_wins": len(wins),
-        "avg_win": float(wins.mean()) if len(wins) else None,
-        "avg_loss": float(losses.mean()) if len(losses) else None,
-        "losing_streak": _longest_losing_streak(net),
-        "max_drawdown": _max_drawdown(net, stake),
-        "t_stat": t, "p_positive": p_pos,
-        "by_reason": by_reason, "by_direction": by_direction, "move_threshold": move_threshold,
-    })
+    by_direction = (
+        pd.DataFrame({"direction": dirs, "net": net, "excess": excess})
+        .groupby("direction")
+        .agg(
+            trades=("net", "size"),
+            win_rate=("net", lambda x: (x > 0).mean() * 100),
+            avg_net=("net", "mean"),
+            avg_excess=("excess", "mean"),
+        )
+        .reindex([d for d in DIRECTIONS if d in set(dirs)])
+    )
+    res.update(
+        {
+            "n": n,
+            "avg_net": float(net.mean()),
+            "avg_bench": float(trades["bench"].mean()),
+            "avg_excess": float(excess.mean()),
+            "median_excess": float(excess.median()),
+            "avg_excess_secondary": float((net - trades["bench_secondary"]).mean())
+            if "bench_secondary" in trades
+            else None,
+            "excess_wo_best": without(1),
+            "excess_wo_best2": without(2),
+            "win_rate": float((net > 0).mean() * 100),
+            "n_wins": len(wins),
+            "avg_win": float(wins.mean()) if len(wins) else None,
+            "avg_loss": float(losses.mean()) if len(losses) else None,
+            "losing_streak": _longest_losing_streak(net),
+            "max_drawdown": _max_drawdown(net, stake),
+            "t_stat": t,
+            "p_positive": p_pos,
+            "by_reason": by_reason,
+            "by_direction": by_direction,
+            "move_threshold": move_threshold,
+        }
+    )
     checks = {
         "enough trades": n >= min_trades,
         "beats the index on average": res["avg_excess"] > 0,
@@ -208,8 +246,17 @@ def evaluate(trades: pd.DataFrame | None, cost: float = DEFAULTS["cost_pct"],
 
 # --------------------------------------------------------------------------- LLM event study
 
-EVENT_KEYS = ["release_id", "ticker", "published_at", "entry_date", "event_type", "direction", "surprise",
-              "material", "confidence"]
+EVENT_KEYS = [
+    "release_id",
+    "ticker",
+    "published_at",
+    "entry_date",
+    "event_type",
+    "direction",
+    "surprise",
+    "material",
+    "confidence",
+]
 GROUPS = ["direction", "surprise", "event_type"]
 
 
@@ -223,6 +270,7 @@ def event_outcomes(scored: pd.DataFrame, histories: dict, bench: pd.DataFrame, h
     benchmark over the same days, minus the round-trip `cost`; all in percent. Horizons not yet
     reached stay empty. `scored` = releases joined with usable LLM scores."""
     import strategies as st
+
     rows = []
     for _, e in scored.iterrows():
         rec = {k: e.get(k, "") for k in EVENT_KEYS}
@@ -251,9 +299,13 @@ def _stats(x: pd.Series) -> dict:
     x = pd.to_numeric(x, errors="coerce").dropna()
     n = len(x)
     sd = float(x.std(ddof=1)) if n > 1 else float("nan")
-    return {"n": n, "mean": float(x.mean()) if n else None, "median": float(x.median()) if n else None,
-            "t": float(x.mean() / (sd / np.sqrt(n))) if n > 1 and sd > 0 else None,
-            "hit_rate": float((x > 0).mean() * 100) if n else None}
+    return {
+        "n": n,
+        "mean": float(x.mean()) if n else None,
+        "median": float(x.median()) if n else None,
+        "t": float(x.mean() / (sd / np.sqrt(n))) if n > 1 and sd > 0 else None,
+        "hit_rate": float((x > 0).mean() * 100) if n else None,
+    }
 
 
 def _long_short(ev_: pd.DataFrame, col: str) -> float | None:
@@ -286,8 +338,11 @@ def event_study(events: pd.DataFrame | None, horizons=(1, 5, 20), min_events: in
         keys = ev_[g].astype(str)
         order = sorted(set(keys), key=lambda k: (float(k) if k.lstrip("-").isdigit() else 99, k))
         res["groups"][g] = {k: {h: _stats(ev_.loc[keys == k, f"abn_{h}d"]) for h in horizons} for k in order}
-    means = [v[focus]["mean"] for k, v in sorted(res["groups"]["direction"].items(), key=lambda kv: int(kv[0]))
-             if k.lstrip("-").isdigit() and v[focus]["n"]]
+    means = [
+        v[focus]["mean"]
+        for k, v in sorted(res["groups"]["direction"].items(), key=lambda kv: int(kv[0]))
+        if k.lstrip("-").isdigit() and v[focus]["n"]
+    ]
     res["monotonic"] = len(means) >= 2 and all(a <= b for a, b in zip(means, means[1:]))
     res["spread"] = _long_short(done, col)
     half = len(done) // 2
@@ -312,8 +367,7 @@ def event_study(events: pd.DataFrame | None, horizons=(1, 5, 20), min_events: in
         "holds without the best event": pos(res["spread_wo_best"]),
         "unlikely to be luck (t > 2)": res["spread_t"] is not None and res["spread_t"] > 2,
     }
-    res["verdict"] = ("NOT YET" if res["n"] < min_events else
-                      "PASS" if all(res["checks"].values()) else "FAIL")
+    res["verdict"] = "NOT YET" if res["n"] < min_events else "PASS" if all(res["checks"].values()) else "FAIL"
     return res
 
 
@@ -328,8 +382,9 @@ def compare(paper: pd.DataFrame | None, events: pd.DataFrame | None, strategies:
     out = {"strategies": {}, "min_trades": d["min_trades"]}
     for s in strategies:
         trades = closed_trades(paper, strategy=s, costs=d.get("costs")) if paper is not None else None
-        out["strategies"][s] = evaluate(trades, d["cost_pct"], d["stake"], d["min_trades"],
-                                        move_threshold=d["move_threshold"])
+        out["strategies"][s] = evaluate(
+            trades, d["cost_pct"], d["stake"], d["min_trades"], move_threshold=d["move_threshold"]
+        )
         if paper is not None and not paper.empty:
             strat = paper["strategy"].replace("", "v0") if "strategy" in paper else pd.Series("v0", index=paper.index)
             book = paper[strat == s]
@@ -375,28 +430,39 @@ def format_compare_markdown(cmp: dict) -> str:
     out += ["", "#### Event study: do the LLM scores predict returns?", ""]
     if not e.get("n_scored"):
         return "\n".join(out + ["_No scored releases yet._"]) + "\n"
-    out.append(f"**{e['verdict']}** · {e['n']} of {e['min_events']} events with a {e['focus']}-day outcome "
-               f"({e['n_scored']} scored). Abnormal return = return minus the small-cap index, after costs.")
+    out.append(
+        f"**{e['verdict']}** · {e['n']} of {e['min_events']} events with a {e['focus']}-day outcome "
+        f"({e['n_scored']} scored). Abnormal return = return minus the small-cap index, after costs."
+    )
     out += ["", "| | Check | Result |", "|:---:|:---|:---|"]
-    det = {"enough events": f"{e['n']} (need {e['min_events']})",
-           "returns rise with direction": "yes" if e.get("monotonic") else "no",
-           "up minus down is positive": _p(e.get("spread")),
-           "holds in both halves": f"{_p(e.get('spread_first_half'))} / {_p(e.get('spread_second_half'))}",
-           "holds without the best event": _p(e.get("spread_wo_best")),
-           "unlikely to be luck (t > 2)": "–" if e.get("spread_t") is None else f"t = {e['spread_t']:.2f}"}
+    det = {
+        "enough events": f"{e['n']} (need {e['min_events']})",
+        "returns rise with direction": "yes" if e.get("monotonic") else "no",
+        "up minus down is positive": _p(e.get("spread")),
+        "holds in both halves": f"{_p(e.get('spread_first_half'))} / {_p(e.get('spread_second_half'))}",
+        "holds without the best event": _p(e.get("spread_wo_best")),
+        "unlikely to be luck (t > 2)": "–" if e.get("spread_t") is None else f"t = {e['spread_t']:.2f}",
+    }
     icon = lambda ok: "✅" if ok else ("⏳" if e["verdict"] == "NOT YET" else "❌")
     out += [f"| {icon(ok)} | {k[0].upper() + k[1:]} | {det[k]} |" for k, ok in e["checks"].items()]
     for g in GROUPS:
-        out += ["", f"**By {g.replace('_', ' ')}**", "",
-                "| " + g + " | " + " | ".join(f"N / mean / median / t / hit {h}d" for h in e["horizons"]) + " |",
-                "|:---|" + ":---:|" * len(e["horizons"])]
+        out += [
+            "",
+            f"**By {g.replace('_', ' ')}**",
+            "",
+            "| " + g + " | " + " | ".join(f"N / mean / median / t / hit {h}d" for h in e["horizons"]) + " |",
+            "|:---|" + ":---:|" * len(e["horizons"]),
+        ]
         for k, by_h in e["groups"][g].items():
             cells = []
             for h in e["horizons"]:
                 s_ = by_h[h]
                 t = "–" if s_["t"] is None else f"{s_['t']:.1f}"
-                cells.append("–" if not s_["n"] else
-                             f"{s_['n']} / {_p(s_['mean'])} / {_p(s_['median'])} / {t} / {s_['hit_rate']:.0f}%")
+                cells.append(
+                    "–"
+                    if not s_["n"]
+                    else f"{s_['n']} / {_p(s_['mean'])} / {_p(s_['median'])} / {t} / {s_['hit_rate']:.0f}%"
+                )
             out.append(f"| {k} | " + " | ".join(cells) + " |")
     return "\n".join(out) + "\n"
 
@@ -406,18 +472,23 @@ def one_line(res: dict) -> str:
     if res["verdict"] == "NOT YET":
         return f"Evaluation: NOT YET – {res['n']} of {res['min_trades']} trades"
     t = "–" if res["t_stat"] is None else f"{res['t_stat']:.1f}"
-    return (f"Evaluation: {res['verdict']} – {res['n']} trades, "
-            f"{res['avg_excess']:+.1f}% vs index per trade after costs, t = {t}")
+    return (
+        f"Evaluation: {res['verdict']} – {res['n']} trades, "
+        f"{res['avg_excess']:+.1f}% vs index per trade after costs, t = {t}"
+    )
 
 
 def callout(res: dict) -> tuple[str, str]:
     """(GitHub callout kind, one-sentence explanation) for the verdict."""
     if res["verdict"] == "NOT YET":
-        return "NOTE", ("Too early to judge. Keep the rules unchanged and let closed trades build up to "
-                        f"{res['min_trades']}.")
+        return "NOTE", (
+            f"Too early to judge. Keep the rules unchanged and let closed trades build up to {res['min_trades']}."
+        )
     if res["verdict"] == "PASS":
-        return "TIP", ("On paper the signals beat the index after costs, and it is unlikely to be luck. "
-                       "This describes the past, not the future.")
+        return "TIP", (
+            "On paper the signals beat the index after costs, and it is unlikely to be luck. "
+            "This describes the past, not the future."
+        )
     failed = [k for k, ok in res["checks"].items() if not ok]
     return "WARNING", ("On paper the signals do not reliably beat the index. Failed: " + ", ".join(failed) + ".")
 
@@ -425,8 +496,11 @@ def callout(res: dict) -> tuple[str, str]:
 def format_markdown(res: dict) -> str:
     """The full report as Markdown tables (GitHub pages). Same numbers as format_report."""
     if res["n"] == 0:
-        return ("_No closed paper trades yet. The numbers appear here once the first trade closes._\n"
-                if not res["file_missing"] else "_No paper-trade log yet. Run the scanner first._\n")
+        return (
+            "_No closed paper trades yet. The numbers appear here once the first trade closes._\n"
+            if not res["file_missing"]
+            else "_No paper-trade log yet. Run the scanner first._\n"
+        )
     t = "–" if res["t_stat"] is None else f"{res['t_stat']:.2f}"
     pp = "–" if res["p_positive"] is None else f"{res['p_positive']:.0%}"
     detail = {
@@ -442,32 +516,73 @@ def format_markdown(res: dict) -> str:
     out += [f"| {icon(ok)} | {name[0].upper() + name[1:]} | {detail[name]} |" for name, ok in res["checks"].items()]
     if res["verdict"] == "NOT YET":
         out += ["", "<sub>⏳ = not decided until there are enough trades. Early numbers can change a lot.</sub>"]
-    out += ["", f"### Per trade, after {res['cost']:.1f}% cost", "", head + rows([
-        ("Average return", _p(res["avg_net"]), ""),
-        ("Index over the same days", _p(res["avg_bench"]), ""),
-        ("Average excess over the index", _p(res["avg_excess"]), "the edge per trade; the number that matters"),
-        ("Median excess", _p(res["median_excess"]), "a typical trade, ignoring extremes"),
-        ("Excess without the best trade", _p(res["excess_wo_best"]), "does it rest on one lucky trade?"),
-        ("Excess without the best two", _p(res["excess_wo_best2"]), ""),
-    ]), "", "### Wins and losses", "", head + rows([
-        ("Win rate", f"{res['win_rate']:.0f}%", f"{res['n_wins']} of {res['n']} trades made money"),
-        ("Average win", "–" if res["avg_win"] is None else f"{res['avg_win']:+.1f}%", ""),
-        ("Average loss", "–" if res["avg_loss"] is None else f"{res['avg_loss']:+.1f}%", ""),
-        ("Longest losing streak", f"{res['losing_streak']} trade(s)", "losses in a row to sit through"),
-        (f"Worst drawdown at {res['stake']:.0%} per trade", f"{res['max_drawdown']:+.1f}%",
-         "biggest fall from a high point"),
-    ]), "", "### Is it more than luck?", "", head + rows([
-        ("t-statistic", t, "above 2 = unlikely to be chance alone"),
-        ("Chance the true excess is above 0", pp, f"from {RESAMPLES:,} reshuffles of the trades"),
-    ]), "", "### By exit reason", "", "| Exit | Trades | Avg return | Avg vs index |", "|:---|:---:|---:|---:|"]
-    out += [f"| {reason} | {int(r['trades'])} | {r['avg_net']:+.1f}% | {r['avg_excess']:+.1f}% |"
-            for reason, r in res["by_reason"].iterrows()]
-    out += ["", "### By signal-day move", "",
-            f"<sub>Did the trade follow a big drop, a big jump ({res['move_threshold']:.0%} or more) or no big move "
-            "on the signal day?</sub>", "",
-            "| Signal day | Trades | Win rate | Avg return | Avg vs index |", "|:---|:---:|:---:|---:|---:|"]
-    out += [f"| {DIRECTIONS[d]} | {int(r['trades'])} | {r['win_rate']:.0f}% | {r['avg_net']:+.1f}% | "
-            f"{r['avg_excess']:+.1f}% |" for d, r in res["by_direction"].iterrows()]
+    out += [
+        "",
+        f"### Per trade, after {res['cost']:.1f}% cost",
+        "",
+        head
+        + rows(
+            [
+                ("Average return", _p(res["avg_net"]), ""),
+                ("Index over the same days", _p(res["avg_bench"]), ""),
+                ("Average excess over the index", _p(res["avg_excess"]), "the edge per trade; the number that matters"),
+                ("Median excess", _p(res["median_excess"]), "a typical trade, ignoring extremes"),
+                ("Excess without the best trade", _p(res["excess_wo_best"]), "does it rest on one lucky trade?"),
+                ("Excess without the best two", _p(res["excess_wo_best2"]), ""),
+            ]
+        ),
+        "",
+        "### Wins and losses",
+        "",
+        head
+        + rows(
+            [
+                ("Win rate", f"{res['win_rate']:.0f}%", f"{res['n_wins']} of {res['n']} trades made money"),
+                ("Average win", "–" if res["avg_win"] is None else f"{res['avg_win']:+.1f}%", ""),
+                ("Average loss", "–" if res["avg_loss"] is None else f"{res['avg_loss']:+.1f}%", ""),
+                ("Longest losing streak", f"{res['losing_streak']} trade(s)", "losses in a row to sit through"),
+                (
+                    f"Worst drawdown at {res['stake']:.0%} per trade",
+                    f"{res['max_drawdown']:+.1f}%",
+                    "biggest fall from a high point",
+                ),
+            ]
+        ),
+        "",
+        "### Is it more than luck?",
+        "",
+        head
+        + rows(
+            [
+                ("t-statistic", t, "above 2 = unlikely to be chance alone"),
+                ("Chance the true excess is above 0", pp, f"from {RESAMPLES:,} reshuffles of the trades"),
+            ]
+        ),
+        "",
+        "### By exit reason",
+        "",
+        "| Exit | Trades | Avg return | Avg vs index |",
+        "|:---|:---:|---:|---:|",
+    ]
+    out += [
+        f"| {reason} | {int(r['trades'])} | {r['avg_net']:+.1f}% | {r['avg_excess']:+.1f}% |"
+        for reason, r in res["by_reason"].iterrows()
+    ]
+    out += [
+        "",
+        "### By signal-day move",
+        "",
+        f"<sub>Did the trade follow a big drop, a big jump ({res['move_threshold']:.0%} or more) or no big move "
+        "on the signal day?</sub>",
+        "",
+        "| Signal day | Trades | Win rate | Avg return | Avg vs index |",
+        "|:---|:---:|:---:|---:|---:|",
+    ]
+    out += [
+        f"| {DIRECTIONS[d]} | {int(r['trades'])} | {r['win_rate']:.0f}% | {r['avg_net']:+.1f}% | "
+        f"{r['avg_excess']:+.1f}% |"
+        for d, r in res["by_direction"].iterrows()
+    ]
     return "\n".join(out) + "\n"
 
 
@@ -476,19 +591,36 @@ def _p(x, digits=1) -> str:
 
 
 def format_report(res: dict, source: str = "data/paper_trades.csv", label: str = "main rules") -> str:
-    lines = [f"Paper-trade evaluation ({label})",
-             f"Source: {source} · cost {res['cost']:.2f}% per round trip · "
-             f"{res['stake']:.0%} of the account per trade", ""]
+    lines = [
+        f"Paper-trade evaluation ({label})",
+        f"Source: {source} · cost {res['cost']:.2f}% per round trip · {res['stake']:.0%} of the account per trade",
+        "",
+    ]
     if res["file_missing"]:
-        return "\n".join(lines + ["No paper-trade log found yet. Run the scanner first.", "",
-                                  f"VERDICT: NOT YET – 0 of {res['min_trades']} trades"]) + "\n"
+        return (
+            "\n".join(
+                lines
+                + [
+                    "No paper-trade log found yet. Run the scanner first.",
+                    "",
+                    f"VERDICT: NOT YET – 0 of {res['min_trades']} trades",
+                ]
+            )
+            + "\n"
+        )
     if res["n"] == 0:
-        return "\n".join(lines + ["No closed paper trades yet.", "",
-                                  f"VERDICT: NOT YET – 0 of {res['min_trades']} trades"]) + "\n"
+        return (
+            "\n".join(
+                lines + ["No closed paper trades yet.", "", f"VERDICT: NOT YET – 0 of {res['min_trades']} trades"]
+            )
+            + "\n"
+        )
 
     mark = lambda ok: "✓" if ok else "✗"
-    lines.append(f"VERDICT: {res['verdict']}" + (f" – {res['n']} of {res['min_trades']} trades so far"
-                                                  if res["verdict"] == "NOT YET" else ""))
+    lines.append(
+        f"VERDICT: {res['verdict']}"
+        + (f" – {res['n']} of {res['min_trades']} trades so far" if res["verdict"] == "NOT YET" else "")
+    )
     detail = {
         "enough trades": f"{res['n']} (need {res['min_trades']})",
         "beats the index on average": _p(res["avg_excess"]) + " per trade",
@@ -527,12 +659,16 @@ def format_report(res: dict, source: str = "data/paper_trades.csv", label: str =
         "By exit reason",
     ]
     for reason, r in res["by_reason"].iterrows():
-        lines.append(f"  {reason:<16} {int(r['trades']):>3} trade(s)   avg {r['avg_net']:+6.1f}%   "
-                     f"vs index {r['avg_excess']:+6.1f}%")
+        lines.append(
+            f"  {reason:<16} {int(r['trades']):>3} trade(s)   avg {r['avg_net']:+6.1f}%   "
+            f"vs index {r['avg_excess']:+6.1f}%"
+        )
     lines += ["", f"By signal-day move (big = {res['move_threshold']:.0%} or more)"]
     for d, r in res["by_direction"].iterrows():
-        lines.append(f"  {DIRECTIONS[d]:<16} {int(r['trades']):>3} trade(s)   win {r['win_rate']:3.0f}%   "
-                     f"avg {r['avg_net']:+6.1f}%   vs index {r['avg_excess']:+6.1f}%")
+        lines.append(
+            f"  {DIRECTIONS[d]:<16} {int(r['trades']):>3} trade(s)   win {r['win_rate']:3.0f}%   "
+            f"avg {r['avg_net']:+6.1f}%   vs index {r['avg_excess']:+6.1f}%"
+        )
     lines += ["", "Paper results ignore spread and slippage beyond the cost above. Not investment advice."]
     return "\n".join(lines) + "\n"
 
@@ -541,38 +677,63 @@ def main(argv=None) -> int:
     d = defaults_from_config()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--file", default=str(PAPER_LOG))
-    ap.add_argument("--cost", type=float, default=d["cost_pct"],
-                    help=f"round-trip cost in percent (default {d['cost_pct']})")
-    ap.add_argument("--stake", type=float, default=d["stake"],
-                    help=f"share of the account per trade, for the drawdown (default {d['stake']})")
-    ap.add_argument("--min-trades", type=int, default=d["min_trades"],
-                    help=f"closed trades needed before a verdict (default {d['min_trades']})")
+    ap.add_argument(
+        "--cost", type=float, default=d["cost_pct"], help=f"round-trip cost in percent (default {d['cost_pct']})"
+    )
+    ap.add_argument(
+        "--stake",
+        type=float,
+        default=d["stake"],
+        help=f"share of the account per trade, for the drawdown (default {d['stake']})",
+    )
+    ap.add_argument(
+        "--min-trades",
+        type=int,
+        default=d["min_trades"],
+        help=f"closed trades needed before a verdict (default {d['min_trades']})",
+    )
     ap.add_argument("--variant", action="store_true", help="evaluate the partial-exit variant")
-    ap.add_argument("--direction", choices=["drop", "jump", "flat"],
-                    help="only trades whose signal day had a big drop / big jump / no big move")
+    ap.add_argument(
+        "--direction",
+        choices=["drop", "jump", "flat"],
+        help="only trades whose signal day had a big drop / big jump / no big move",
+    )
     ap.add_argument("--strategy", default="v0", help="paper book: v0 (default), v0b or v1_<prompt version>")
-    ap.add_argument("--compare", action="store_true",
-                    help="all strategies side by side, plus the LLM event study (data/llm_events.csv)")
+    ap.add_argument(
+        "--compare",
+        action="store_true",
+        help="all strategies side by side, plus the LLM event study (data/llm_events.csv)",
+    )
     ap.add_argument("--events", default=str(EVENTS_LOG))
     args = ap.parse_args(argv)
     costs = None if "--cost" in (argv if argv is not None else sys.argv) else d["costs"]
 
     if args.compare:
         paper = pd.read_csv(args.file, dtype=str).fillna("") if Path(args.file).exists() else None
-        if costs is None:                       # --cost given: one flat round-trip cost for every trade
+        if costs is None:  # --cost given: one flat round-trip cost for every trade
             d = {**d, "cost_pct": args.cost, "costs": None}
         labels = strategy_labels(paper)
-        sys.stdout.write(format_compare_markdown(compare(paper, load_events(Path(args.events)), labels,
-                                                         {**d, "min_trades": args.min_trades, "stake": args.stake})))
+        sys.stdout.write(
+            format_compare_markdown(
+                compare(
+                    paper,
+                    load_events(Path(args.events)),
+                    labels,
+                    {**d, "min_trades": args.min_trades, "stake": args.stake},
+                )
+            )
+        )
         return 0
 
     trades = load_trades(Path(args.file), args.variant, args.strategy, costs)
     if trades is not None and args.direction:
         trades = trades[trades["move"].map(lambda m: direction(m, d["move_threshold"])) == args.direction]
     res = evaluate(trades, args.cost, args.stake, args.min_trades, move_threshold=d["move_threshold"])
-    label = ("partial-exit variant" if args.variant else "main rules") + (
-        f", strategy {args.strategy}" if args.strategy != "v0" else "") + (
-        f", signal day: {DIRECTIONS[args.direction]}" if args.direction else "")
+    label = (
+        ("partial-exit variant" if args.variant else "main rules")
+        + (f", strategy {args.strategy}" if args.strategy != "v0" else "")
+        + (f", signal day: {DIRECTIONS[args.direction]}" if args.direction else "")
+    )
     path = Path(args.file).resolve()
     source = str(path.relative_to(STATE_DIR)) if path.is_relative_to(STATE_DIR) else str(path)
     sys.stdout.write(format_report(res, source, label))

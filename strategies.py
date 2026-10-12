@@ -14,6 +14,7 @@ the entry day, so a release belongs to bar D when it was published from 09:00 on
 to 09:00 on the next trading day. Paper trades enter at the first open after the signal
 bar, as v0 already does.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -41,6 +42,7 @@ def strategy_labels(cfg: dict) -> list[str]:
 
 
 # --------------------------------------------------------------------------- timing
+
 
 def _local(ts) -> pd.Timestamp:
     t = pd.Timestamp(ts)
@@ -74,8 +76,9 @@ def signal_bar_for(published_at, trading_days) -> pd.Timestamp | None:
     return days[i - 1] if i > 0 else None
 
 
-def releases_for_bar(releases: pd.DataFrame, ticker: str, bar_date, now: dt.datetime,
-                     bar_complete_today: bool = True) -> pd.DataFrame:
+def releases_for_bar(
+    releases: pd.DataFrame, ticker: str, bar_date, now: dt.datetime, bar_complete_today: bool = True
+) -> pd.DataFrame:
     """Primary releases for `ticker` that belong to signal bar `bar_date` (the latest bar in the
     data). Releases from 09:00 on that day onwards count. A session that is running right now
     (a weekday after the bar, past 09:00, before today's bar is complete) is not part of the
@@ -85,8 +88,12 @@ def releases_for_bar(releases: pd.DataFrame, ticker: str, bar_date, now: dt.date
     lo = open_at(bar_date)
     now_l = _local(now)
     hi = now_l
-    if (now_l.date() > pd.Timestamp(bar_date).date() and now_l.weekday() < 5
-            and now_l.time() >= OPEN and not bar_complete_today):
+    if (
+        now_l.date() > pd.Timestamp(bar_date).date()
+        and now_l.weekday() < 5
+        and now_l.time() >= OPEN
+        and not bar_complete_today
+    ):
         hi = open_at(now_l.date())
     r = releases[(releases["ticker"] == ticker) & (releases["source_type"] == "primary")]
     pub = pd.to_datetime(r["published_at"], utc=True).dt.tz_convert(STOCKHOLM)
@@ -94,6 +101,7 @@ def releases_for_bar(releases: pd.DataFrame, ticker: str, bar_date, now: dt.date
 
 
 # --------------------------------------------------------------------------- points
+
 
 def is_routine(title: str, cfg: dict) -> bool:
     t = (title or "").lower()
@@ -136,8 +144,14 @@ def with_release_points(pts: dict, release_pts: int, mcap, cfg: dict) -> dict:
     return out
 
 
-def strategy_scores(row: dict, releases: pd.DataFrame, scores: pd.DataFrame, cfg: dict,
-                    now: dt.datetime, bar_complete_today: bool = True) -> dict:
+def strategy_scores(
+    row: dict,
+    releases: pd.DataFrame,
+    scores: pd.DataFrame,
+    cfg: dict,
+    now: dt.datetime,
+    bar_complete_today: bool = True,
+) -> dict:
     """score_v0 / score_v0b / score_v1, block_buy and the releases behind them, for one scanner row."""
     bar = releases_for_bar(releases, row["ticker"], row["date"], now, bar_complete_today)
     bar = bar[[not is_routine(t, cfg) for t in bar["title"]]] if not bar.empty else bar
@@ -145,6 +159,11 @@ def strategy_scores(row: dict, releases: pd.DataFrame, scores: pd.DataFrame, cfg
     v0b = with_release_points(pts, RELEASE_POINTS_V0 if not bar.empty else 0, row.get("market_cap"), cfg)
     v1 = v1_release(bar, scores, cfg)
     v1_pts = with_release_points(pts, v1["points"], row.get("market_cap"), cfg)
-    return {"score_v0": sum(pts.values()), "score_v0b": sum(v0b.values()), "score_v1": sum(v1_pts.values()),
-            "block_buy": v1["block"], "release_ids": list(bar["release_id"]) if not bar.empty else [],
-            "llm_release_ids": v1["scored_ids"]}
+    return {
+        "score_v0": sum(pts.values()),
+        "score_v0b": sum(v0b.values()),
+        "score_v1": sum(v1_pts.values()),
+        "block_buy": v1["block"],
+        "release_ids": list(bar["release_id"]) if not bar.empty else [],
+        "llm_release_ids": v1["scored_ids"],
+    }

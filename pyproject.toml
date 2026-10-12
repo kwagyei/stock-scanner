@@ -1,0 +1,25 @@
+[project]
+name = "stock-scanner"
+version = "1.0.0"
+description = "Attention scanner for Stockholm small caps, with paper trading, an honest evaluation and a fund news risk watch"
+requires-python = ">=3.12"
+readme = "README.md"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = ["data", "reports", "fund-watch/data", "fund-watch/reports"]
+
+[tool.ruff.lint]
+# pycodestyle, pyflakes, isort, pyupgrade, bugbear, simplify
+select = ["E", "W", "F", "I", "UP", "B", "SIM"]
+ignore = [
+    "E731",  # short lambda helpers inside functions are a deliberate idiom here
+    "B905",  # zip() pairs lists built side by side; strict= adds noise without catching anything
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["scanner", "evaluate", "news_sources", "llm_score", "strategies", "build_watchlist", "fund_watch"]
+
+[tool.ruff.format]
+quote-style = "double"

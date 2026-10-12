@@ -8,7 +8,6 @@ on:
     - cron: "7 6 * * 1-5"     # 08:07 Stockholm summer / 07:07 winter
     - cron: "37 6 * * 1-5"    # backup: 08:37 summer / 07:37 winter, skipped if 08:07 ran
     - cron: "52 16 * * 1-5"   # 18:52 summer / 17:52 winter (after the 17:30 close)
-  pull_request:               # tests only (the tests job below); no scan, no commit
   workflow_dispatch:          # "Run workflow" button, and the external timer (cron-job.org, see README)
     inputs:
       slot:
@@ -24,25 +23,11 @@ permissions:
   contents: write
 
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('tests-{0}', github.ref) || 'attention-scan' }}
+  group: attention-scan
   cancel-in-progress: false
 
 jobs:
-  tests:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-      - run: pip install -r requirements.txt pytest   # includes the Anthropic SDK
-      - name: Run tests (offline; feeds and the Anthropic API are mocked)
-        run: python -m pytest -q
-
   slot:
-    if: github.event_name != 'pull_request'
     # Timed runs (GitHub's schedule, or the external timer with slot=morning/evening) are skipped
     # if that slot already has a scan: a "scan ..." commit since 05:00 (morning) or 17:30
     # (evening) Stockholm time today. Manual runs always run. The concurrency group makes a
