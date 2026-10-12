@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -33,8 +34,9 @@ import pandas as pd
 import yaml
 
 ROOT = Path(__file__).resolve().parent
-PAPER_LOG = ROOT / "data" / "paper_trades.csv"
-EVENTS_LOG = ROOT / "data" / "llm_events.csv"
+STATE_DIR = Path(os.environ.get("SCANNER_STATE_DIR") or ROOT)   # see scanner.STATE_DIR
+PAPER_LOG = STATE_DIR / "data" / "paper_trades.csv"
+EVENTS_LOG = STATE_DIR / "data" / "llm_events.csv"
 DEFAULTS = {"cost_pct": 1.2, "stake": 0.10, "min_trades": 30}
 COST_DEFAULTS = {"commission_pct": 0.1, "half_spread_pct": 0.5}
 EVENT_DEFAULTS = {"min_events": 300, "horizons": [1, 5, 20]}
@@ -572,7 +574,7 @@ def main(argv=None) -> int:
         f", strategy {args.strategy}" if args.strategy != "v0" else "") + (
         f", signal day: {DIRECTIONS[args.direction]}" if args.direction else "")
     path = Path(args.file).resolve()
-    source = str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path)
+    source = str(path.relative_to(STATE_DIR)) if path.is_relative_to(STATE_DIR) else str(path)
     sys.stdout.write(format_report(res, source, label))
     return 0
 

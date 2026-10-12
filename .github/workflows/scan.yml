@@ -110,7 +110,6 @@ jobs:
           git config user.name "scanner-bot"
           git config user.email "scanner-bot@users.noreply.github.com"
           git add data/ reports/ DASHBOARD.md   # digest_*.html are gitignored
-          if [ -f prompts/used_prompts.json ]; then git add prompts/used_prompts.json; fi   # prompt fingerprints
           git diff --cached --quiet && exit 0
           git commit -m "scan $(date -u +%Y-%m-%d_%H%M)"
           git pull --rebase   # the fund risk watch commits to main too

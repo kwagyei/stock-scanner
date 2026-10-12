@@ -240,7 +240,7 @@ paper trade buys at the next open as usual. The event study uses the same entry 
 |---|---|
 | `news_sources.py` | Fetches each company's MFN feed once per run (v0 parses the same bytes) and stores releases in `data/releases.csv`: primary rows with the full text, plus Google News wire matches as `aggregator` rows (no text). Deduplicated on `release_id` (hash of source + URL) and on near-identical titles per stock within 24h. |
 | `llm_score.py` | Sends each new primary release to Claude (`data/llm_scores.csv`). JSON output checked against a fixed schema; one retry on invalid output, then `status=error`. Scored once per `release_id` + prompt version. `api_error` rows (API down, rate limit, no key) are retried next run. `python llm_score.py --backfill` also scores releases before `llm.score_from_date`; those rows get `is_backfill=true` and are never used in trading or evaluation. |
-| `prompts/score_v1.md` | The prompt. **Never edit a prompt after it has been used live**: add `score_v2.md`, set `llm.prompt_version: v2` (a new strategy `v1_v2`). On first live use the prompt is fingerprinted in `prompts/used_prompts.json`; an edited prompt makes scoring stop with an error in the report. |
+| `prompts/score_v1.md` | The prompt. **Never edit a prompt after it has been used live**: add `score_v2.md`, set `llm.prompt_version: v2` (a new strategy `v1_v2`). On first live use the prompt is fingerprinted in `data/used_prompts.json`; an edited prompt makes scoring stop with an error in the report. |
 | `strategies.py` | Timing, v0b/v1 points and blocking. |
 | `data/llm_events.csv` | Return after each scored release at 1, 5 and 20 trading days, the small-cap index over the same days, and the abnormal return (difference minus costs). Rebuilt every run. |
 
