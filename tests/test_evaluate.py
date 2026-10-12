@@ -1,4 +1,5 @@
 """Tests for evaluate.py with synthetic paper-trade logs. No network."""
+
 import datetime as dt
 
 import pandas as pd
@@ -13,9 +14,17 @@ def log(tmp_path, trades, name="paper_trades.csv"):
     rows = []
     for i, t in enumerate(trades):
         ret, bench, reason, date, *status = t
-        rows.append({"id": f"T{i}", "ticker": f"T{i}.ST", "status": status[0] if status else "closed",
-                     "return_pct": "" if ret is None else f"{ret}", "bench_return_pct": bench,
-                     "exit_reason": reason, "exit_date": date})
+        rows.append(
+            {
+                "id": f"T{i}",
+                "ticker": f"T{i}.ST",
+                "status": status[0] if status else "closed",
+                "return_pct": "" if ret is None else f"{ret}",
+                "bench_return_pct": bench,
+                "exit_reason": reason,
+                "exit_date": date,
+            }
+        )
     path = tmp_path / name
     pd.DataFrame(rows).to_csv(path, index=False)
     return path
@@ -27,8 +36,12 @@ def dates(n):
 
 # Four trades, hand-computed. cost 1 -> net 10, 5, -5, 0; bench 1, 0 (missing), 0, 1
 # -> excess 9, 5, -5, -1 (exit-date order; the file is deliberately shuffled).
-HAND = [(-4, "0", "stop", "2026-01-03"), (11, "1", "target", "2026-01-01"),
-        (1, "1", "time", "2026-01-04"), (6, "", "time", "2026-01-02")]
+HAND = [
+    (-4, "0", "stop", "2026-01-03"),
+    (11, "1", "target", "2026-01-01"),
+    (1, "1", "time", "2026-01-04"),
+    (6, "", "time", "2026-01-02"),
+]
 
 
 def test_hand_computed_statistics(tmp_path):
@@ -38,12 +51,12 @@ def test_hand_computed_statistics(tmp_path):
     assert r["avg_excess"] == pytest.approx(2.0) and r["median_excess"] == pytest.approx(2.0)
     assert r["excess_wo_best"] == pytest.approx(-1 / 3) and r["excess_wo_best2"] == pytest.approx(-3.0)
     assert r["win_rate"] == 50 and r["avg_win"] == pytest.approx(7.5) and r["avg_loss"] == pytest.approx(-2.5)
-    assert r["losing_streak"] == 2                       # -5 then 0, in exit-date order
-    assert r["max_drawdown"] == pytest.approx(-0.5)     # 1.01505 -> 1.00997475
+    assert r["losing_streak"] == 2  # -5 then 0, in exit-date order
+    assert r["max_drawdown"] == pytest.approx(-0.5)  # 1.01505 -> 1.00997475
     assert r["t_stat"] == pytest.approx(2.0 / ((116 / 3) ** 0.5 / 2))
     time = r["by_reason"].loc["time"]
     assert (time["trades"], time["avg_net"], time["avg_excess"]) == (2, 2.5, 2.0)
-    assert r["verdict"] == "FAIL"                        # excess gone without the best trade
+    assert r["verdict"] == "FAIL"  # excess gone without the best trade
     assert not r["checks"]["still beats it without the best trade"]
 
 
@@ -103,7 +116,7 @@ def test_zero_closed(tmp_path):
 def test_one_closed_trade(tmp_path):
     r = ev.evaluate(ev.load_trades(log(tmp_path, [(20, "", "target", "2026-01-01")])), min_trades=1, cost=1.0)
     assert r["t_stat"] is None and r["p_positive"] is None and r["excess_wo_best"] is None
-    assert r["verdict"] == "FAIL"                     # can't show it isn't luck with one trade
+    assert r["verdict"] == "FAIL"  # can't show it isn't luck with one trade
     report = ev.format_report(r)
     assert "t-statistic of the excess          –" in report and "+19.0%" in report
 
@@ -122,10 +135,23 @@ def test_bootstrap_is_reproducible(tmp_path):
 
 
 def test_variant_uses_pe_columns():
-    paper = pd.DataFrame([{"ticker": "A", "status": "closed", "return_pct": "30", "bench_return_pct": "0",
-                           "exit_reason": "target", "exit_date": "2026-01-02",
-                           "pe_status": "closed", "pe_return_pct": "15", "pe_bench_return_pct": "1",
-                           "pe_exit_reason": "remainder stop", "pe_exit_date": "2026-01-05"}])
+    paper = pd.DataFrame(
+        [
+            {
+                "ticker": "A",
+                "status": "closed",
+                "return_pct": "30",
+                "bench_return_pct": "0",
+                "exit_reason": "target",
+                "exit_date": "2026-01-02",
+                "pe_status": "closed",
+                "pe_return_pct": "15",
+                "pe_bench_return_pct": "1",
+                "pe_exit_reason": "remainder stop",
+                "pe_exit_date": "2026-01-05",
+            }
+        ]
+    )
     main, var = ev.closed_trades(paper), ev.closed_trades(paper, variant=True)
     assert (main["ret"][0], var["ret"][0], var["reason"][0]) == (30, 15, "remainder stop")
 
@@ -140,24 +166,32 @@ def test_cli(tmp_path, capsys):
 
 
 def test_config_defaults_match_spec():
-    assert ev.defaults_from_config()["cost_pct"] == pytest.approx(1.2)   # 2 x (0.1 + 0.5), costs.* in config
+    assert ev.defaults_from_config()["cost_pct"] == pytest.approx(1.2)  # 2 x (0.1 + 0.5), costs.* in config
     assert ev.defaults_from_config()["stake"] == 0.10
     assert ev.defaults_from_config()["min_trades"] == 30
 
 
 # --------------------------------------------------------------------------- digest integration
 
+
 @pytest.fixture
 def scan_env(tmp_path, monkeypatch):
     for name, sub in [("DATA_DIR", "data"), ("REPORT_DIR", "reports")]:
         monkeypatch.setattr(scanner, name, tmp_path / sub)
-    for name, f in [("SIGNALS_LOG", "signals_log.csv"), ("PAPER_LOG", "paper_trades.csv"),
-                    ("WEEKLY_LOG", "weekly_summary.csv"), ("SCORES_LOG", "scores_log.csv")]:
+    for name, f in [
+        ("SIGNALS_LOG", "signals_log.csv"),
+        ("PAPER_LOG", "paper_trades.csv"),
+        ("WEEKLY_LOG", "weekly_summary.csv"),
+        ("SCORES_LOG", "scores_log.csv"),
+    ]:
         monkeypatch.setattr(scanner, name, tmp_path / "data" / f)
     monkeypatch.setattr(scanner, "DASHBOARD", tmp_path / "DASHBOARD.md")
     monkeypatch.setattr(scanner, "FUND_SUMMARY", tmp_path / "fund_watch_latest.json")
-    flat = pd.DataFrame([(10, 10, 10, 10, 1000)] * 70, index=pd.bdate_range("2026-06-01", periods=70),
-                        columns=["Open", "High", "Low", "Close", "Volume"])
+    flat = pd.DataFrame(
+        [(10, 10, 10, 10, 1000)] * 70,
+        index=pd.bdate_range("2026-06-01", periods=70),
+        columns=["Open", "High", "Low", "Close", "Volume"],
+    )
     monkeypatch.setattr(scanner, "fetch_history", lambda t, p: flat)
     monkeypatch.setattr(scanner, "fetch_news", lambda q, c: [])
     monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: None)
@@ -169,22 +203,35 @@ def scan_env(tmp_path, monkeypatch):
     return tmp_path, wl, summary
 
 
-@pytest.mark.parametrize("utc_hour,in_digest", [(16, True), (6, False)])   # 18:45 / 08:30 Stockholm
+@pytest.mark.parametrize("utc_hour,in_digest", [(16, True), (6, False)])  # 18:45 / 08:30 Stockholm
 def test_verdict_line_in_evening_digest(scan_env, monkeypatch, utc_hour, in_digest):
     tmp, wl, summary = scan_env
-    monkeypatch.setattr(scanner, "_now", lambda: dt.datetime(2026, 10, 7, utc_hour, 45, tzinfo=dt.timezone.utc))
+    monkeypatch.setattr(scanner, "_now", lambda: dt.datetime(2026, 10, 7, utc_hour, 45, tzinfo=dt.UTC))
     scanner.main(["--no-email", "--watchlist", str(wl)])
     line = "Evaluation: NOT YET – 0 of 30 trades"
     assert (line in (tmp / "reports" / "latest.html").read_text()) is in_digest
     assert (line in summary.read_text()) is in_digest
-    assert line in (tmp / "DASHBOARD.md").read_text()            # dashboard always shows it
+    assert line in (tmp / "DASHBOARD.md").read_text()  # dashboard always shows it
 
 
 # --------------------------------------------------------------------------- direction split
 
-@pytest.mark.parametrize("move,d", [(-0.112, "drop"), (-0.10, "drop"), (-0.0999, "flat"), (0.0, "flat"),
-                                    (0.10, "jump"), (0.25, "jump"), ("", "unknown"), (None, "unknown"),
-                                    (float("nan"), "unknown"), ("-0.15", "drop")])
+
+@pytest.mark.parametrize(
+    "move,d",
+    [
+        (-0.112, "drop"),
+        (-0.10, "drop"),
+        (-0.0999, "flat"),
+        (0.0, "flat"),
+        (0.10, "jump"),
+        (0.25, "jump"),
+        ("", "unknown"),
+        (None, "unknown"),
+        (float("nan"), "unknown"),
+        ("-0.15", "drop"),
+    ],
+)
 def test_direction(move, d):
     assert ev.direction(move, 0.10) == d
 
@@ -192,9 +239,20 @@ def test_direction(move, d):
 def _moves_log(tmp_path):
     # (return, signal move): two drops (one win), one jump (win), one flat (loss), one unknown
     rows = [(11, "-0.12"), (-9, "-0.15"), (21, "0.11"), (-4, "0.03"), (6, "")]
-    df = pd.DataFrame([{"ticker": f"T{i}", "status": "closed", "return_pct": r, "bench_return_pct": 0,
-                        "exit_reason": "time", "exit_date": f"2026-01-0{i + 1}", "signal_move": m}
-                       for i, (r, m) in enumerate(rows)])
+    df = pd.DataFrame(
+        [
+            {
+                "ticker": f"T{i}",
+                "status": "closed",
+                "return_pct": r,
+                "bench_return_pct": 0,
+                "exit_reason": "time",
+                "exit_date": f"2026-01-0{i + 1}",
+                "signal_move": m,
+            }
+            for i, (r, m) in enumerate(rows)
+        ]
+    )
     path = tmp_path / "p.csv"
     df.to_csv(path, index=False)
     return path
@@ -219,6 +277,7 @@ def test_cli_direction_filter(tmp_path, capsys):
 
 # --------------------------------------------------------------------------- costs, benchmarks, strategies
 
+
 def test_trade_costs_use_logged_spread_else_config():
     c = ev.trade_costs(pd.Series(["1.0", "", "0.4"]), {"commission_pct": 0.1, "half_spread_pct": 0.5})
     assert list(c) == pytest.approx([1.2, 1.2, 0.6])
@@ -229,19 +288,29 @@ def _books():
     rows = []
     for strat, rets in (("", [10, 4]), ("v0b", [6, -2]), ("v1_v1", [8, 8])):
         for i, r in enumerate(rets):
-            rows.append({"ticker": f"T{i}", "status": "closed", "return_pct": str(r), "bench_return_pct": "1",
-                         "bench_primary_return_pct": "2" if i == 0 else "", "exit_reason": "time",
-                         "exit_date": f"2026-11-0{i + 1}", "signal_move": "0", "strategy": strat,
-                         "spread_pct": "0.8" if i == 0 else ""})
+            rows.append(
+                {
+                    "ticker": f"T{i}",
+                    "status": "closed",
+                    "return_pct": str(r),
+                    "bench_return_pct": "1",
+                    "bench_primary_return_pct": "2" if i == 0 else "",
+                    "exit_reason": "time",
+                    "exit_date": f"2026-11-0{i + 1}",
+                    "signal_move": "0",
+                    "strategy": strat,
+                    "spread_pct": "0.8" if i == 0 else "",
+                }
+            )
     return pd.DataFrame(rows)
 
 
 def test_closed_trades_per_strategy_primary_benchmark_and_costs():
     t = ev.closed_trades(_books(), strategy="v0", costs={"commission_pct": 0.1, "half_spread_pct": 0.5})
-    assert list(t["ret"]) == [10, 4]                                  # blank strategy = v0
-    assert list(t["bench"]) == [2, 1]                                 # primary, else secondary
+    assert list(t["ret"]) == [10, 4]  # blank strategy = v0
+    assert list(t["bench"]) == [2, 1]  # primary, else secondary
     assert list(t["bench_secondary"]) == [1, 1]
-    assert list(t["cost"]) == pytest.approx([1.0, 1.2])               # 0.2 + spread 0.8 / 0.2 + 1.0
+    assert list(t["cost"]) == pytest.approx([1.0, 1.2])  # 0.2 + spread 0.8 / 0.2 + 1.0
     r = ev.evaluate(t, min_trades=2)
     assert r["cost"] == pytest.approx(1.1)
     assert r["avg_excess"] == pytest.approx(((10 - 1.0 - 2) + (4 - 1.2 - 1)) / 2)
@@ -276,6 +345,7 @@ def test_cli_strategy_and_compare(tmp_path, capsys):
 
 # --------------------------------------------------------------------------- event study
 
+
 def _prices(closes, start="2026-10-12"):
     idx = pd.bdate_range(start, periods=len(closes))
     return pd.DataFrame({"Open": [100.0] * len(closes), "Close": closes}, index=idx)
@@ -285,17 +355,28 @@ def test_event_outcomes_on_known_prices():
     # Mon 12 Oct onwards; release Mon 08:00 Stockholm (06:00 UTC) -> entry Mon open
     h = {"A": _prices([101, 102, 103, 104, 110, 111])}
     bench = _prices([100, 100, 100, 100, 101, 101])
-    scored = pd.DataFrame([{"release_id": "r", "ticker": "A", "published_at": "2026-10-12T06:00:00Z",
-                            "event_type": "report", "direction": "2", "surprise": "1", "material": "True",
-                            "confidence": "0.7"}])
+    scored = pd.DataFrame(
+        [
+            {
+                "release_id": "r",
+                "ticker": "A",
+                "published_at": "2026-10-12T06:00:00Z",
+                "event_type": "report",
+                "direction": "2",
+                "surprise": "1",
+                "material": "True",
+                "confidence": "0.7",
+            }
+        ]
+    )
     out = ev.event_outcomes(scored, h, bench, [1, 5, 20], cost=1.2)
     r = out.iloc[0]
     assert r["entry_date"] == "2026-10-12"
     assert r["ret_1d"] == pytest.approx(1.0) and r["abn_1d"] == pytest.approx(1.0 - 0 - 1.2)
     assert r["ret_5d"] == pytest.approx(10.0) and r["bench_5d"] == pytest.approx(1.0)
     assert r["abn_5d"] == pytest.approx(10.0 - 1.0 - 1.2)
-    assert pd.isna(r["abn_20d"])                                           # not reached yet
-    late = scored.assign(published_at="2026-10-12T08:00:00Z")              # 10:00 -> Tue open
+    assert pd.isna(r["abn_20d"])  # not reached yet
+    late = scored.assign(published_at="2026-10-12T08:00:00Z")  # 10:00 -> Tue open
     assert ev.event_outcomes(late, h, bench, [1], 0).iloc[0]["entry_date"] == "2026-10-13"
 
 
@@ -303,17 +384,34 @@ def _events(spec):
     """spec: list of (direction, abn_5d); published in order."""
     rows = []
     for i, (d, a) in enumerate(spec):
-        rows.append({"release_id": f"r{i}", "ticker": "A", "published_at": f"2026-10-{12 + i // 10:02d}T0{i % 10}:00:00Z",
-                     "entry_date": "", "event_type": "report" if d >= 0 else "guidance", "direction": str(d),
-                     "surprise": "1", "material": "True", "confidence": "0.5",
-                     "ret_1d": "", "bench_1d": "", "abn_1d": "", "ret_5d": "", "bench_5d": "", "abn_5d": str(a),
-                     "ret_20d": "", "bench_20d": "", "abn_20d": ""})
+        rows.append(
+            {
+                "release_id": f"r{i}",
+                "ticker": "A",
+                "published_at": f"2026-10-{12 + i // 10:02d}T0{i % 10}:00:00Z",
+                "entry_date": "",
+                "event_type": "report" if d >= 0 else "guidance",
+                "direction": str(d),
+                "surprise": "1",
+                "material": "True",
+                "confidence": "0.5",
+                "ret_1d": "",
+                "bench_1d": "",
+                "abn_1d": "",
+                "ret_5d": "",
+                "bench_5d": "",
+                "abn_5d": str(a),
+                "ret_20d": "",
+                "bench_20d": "",
+                "abn_20d": "",
+            }
+        )
     return pd.DataFrame(rows)
 
 
 def test_event_study_groups_and_checks():
     spec = [(-2, -6), (-1, -2), (0, 0), (1, 2), (2, 6)] * 4
-    spec = [(d, a + (i % 3) * 0.5) for i, (d, a) in enumerate(spec)]   # some noise
+    spec = [(d, a + (i % 3) * 0.5) for i, (d, a) in enumerate(spec)]  # some noise
     res = ev.event_study(_events(spec), horizons=[1, 5, 20], min_events=10)
     g = res["groups"]["direction"]
     assert list(g) == ["-2", "-1", "0", "1", "2"]

@@ -1,4 +1,5 @@
 """Offline tests for strategies.py (timing, points, blocking) and v0's unchanged scoring."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -11,7 +12,7 @@ import news_sources as ns
 import scanner
 import strategies as st
 
-UTC = dt.timezone.utc
+UTC = dt.UTC
 # Mon 5 – Fri 9 Oct 2026, then Tue 13 (Mon 12 treated as a holiday: missing from the price data)
 DAYS = pd.DatetimeIndex(["2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08", "2026-10-09", "2026-10-13"])
 
@@ -21,21 +22,25 @@ def cfg():
     return scanner.load_config(scanner.ROOT / "config.yaml")
 
 
-def utc(s):   # Stockholm is UTC+2 in October (CEST until 25 Oct)
+def utc(s):  # Stockholm is UTC+2 in October (CEST until 25 Oct)
     return pd.Timestamp(s, tz="UTC")
 
 
 # --------------------------------------------------------------------------- entry timing
 
-@pytest.mark.parametrize("published, entry", [
-    ("2026-10-07 06:59", "2026-10-07"),   # 08:59 Stockholm -> same day's open
-    ("2026-10-07 07:00", "2026-10-08"),   # 09:00 exactly -> next day
-    ("2026-10-07 12:00", "2026-10-08"),   # during the session -> next day
-    ("2026-10-06 22:30", "2026-10-07"),   # overnight -> next morning
-    ("2026-10-09 15:00", "2026-10-13"),   # Friday afternoon -> Tuesday (Monday holiday)
-    ("2026-10-10 09:00", "2026-10-13"),   # Saturday -> Tuesday
-    ("2026-10-12 06:00", "2026-10-13"),   # holiday morning -> Tuesday
-])
+
+@pytest.mark.parametrize(
+    "published, entry",
+    [
+        ("2026-10-07 06:59", "2026-10-07"),  # 08:59 Stockholm -> same day's open
+        ("2026-10-07 07:00", "2026-10-08"),  # 09:00 exactly -> next day
+        ("2026-10-07 12:00", "2026-10-08"),  # during the session -> next day
+        ("2026-10-06 22:30", "2026-10-07"),  # overnight -> next morning
+        ("2026-10-09 15:00", "2026-10-13"),  # Friday afternoon -> Tuesday (Monday holiday)
+        ("2026-10-10 09:00", "2026-10-13"),  # Saturday -> Tuesday
+        ("2026-10-12 06:00", "2026-10-13"),  # holiday morning -> Tuesday
+    ],
+)
 def test_entry_day_for(published, entry):
     assert st.entry_day_for(utc(published), DAYS) == pd.Timestamp(entry)
 
@@ -44,19 +49,28 @@ def test_entry_day_unknown_beyond_data_and_signal_bar():
     assert st.entry_day_for(utc("2026-10-13 08:00"), DAYS) is None
     assert st.signal_bar_for(utc("2026-10-09 15:00"), DAYS) == pd.Timestamp("2026-10-09")
     assert st.signal_bar_for(utc("2026-10-07 06:00"), DAYS) == pd.Timestamp("2026-10-06")
-    assert st.signal_bar_for(utc("2026-10-05 06:00"), DAYS) is None      # entry on the first day
+    assert st.signal_bar_for(utc("2026-10-05 06:00"), DAYS) is None  # entry on the first day
 
 
 def test_entry_day_handles_winter_time():
-    days = pd.DatetimeIndex(["2026-11-02", "2026-11-03"])                # CET, UTC+1
-    assert st.entry_day_for(utc("2026-11-02 07:30"), days) == pd.Timestamp("2026-11-02")   # 08:30 local
-    assert st.entry_day_for(utc("2026-11-02 08:00"), days) == pd.Timestamp("2026-11-03")   # 09:00 local
+    days = pd.DatetimeIndex(["2026-11-02", "2026-11-03"])  # CET, UTC+1
+    assert st.entry_day_for(utc("2026-11-02 07:30"), days) == pd.Timestamp("2026-11-02")  # 08:30 local
+    assert st.entry_day_for(utc("2026-11-02 08:00"), days) == pd.Timestamp("2026-11-03")  # 09:00 local
 
 
 def rel(rid, ticker, published, title="Order", source_type="primary"):
-    return {"release_id": rid, "ticker": ticker, "source": "mfn", "source_type": source_type,
-            "published_at": published, "title": title, "url": rid, "language": "sv", "body_text": "",
-            "fetched_at": published}
+    return {
+        "release_id": rid,
+        "ticker": ticker,
+        "source": "mfn",
+        "source_type": source_type,
+        "published_at": published,
+        "title": title,
+        "url": rid,
+        "language": "sv",
+        "body_text": "",
+        "fetched_at": published,
+    }
 
 
 def frame(*rows):
@@ -64,20 +78,22 @@ def frame(*rows):
 
 
 def test_releases_for_bar_window():
-    r = frame(rel("before", "A", "2026-10-08T06:30:00Z"),     # 08:30 Thu -> Thu's open, bar Wed
-              rel("in", "A", "2026-10-08T07:30:00Z"),         # 09:30 Thu -> bar Thu
-              rel("night", "A", "2026-10-08T20:00:00Z"),      # 22:00 Thu -> bar Thu
-              rel("other", "B", "2026-10-08T07:30:00Z"),
-              rel("agg", "A", "2026-10-08T07:30:00Z", source_type="aggregator"))
+    r = frame(
+        rel("before", "A", "2026-10-08T06:30:00Z"),  # 08:30 Thu -> Thu's open, bar Wed
+        rel("in", "A", "2026-10-08T07:30:00Z"),  # 09:30 Thu -> bar Thu
+        rel("night", "A", "2026-10-08T20:00:00Z"),  # 22:00 Thu -> bar Thu
+        rel("other", "B", "2026-10-08T07:30:00Z"),
+        rel("agg", "A", "2026-10-08T07:30:00Z", source_type="aggregator"),
+    )
     evening = dt.datetime(2026, 10, 8, 16, 52, tzinfo=UTC)
     assert list(st.releases_for_bar(r, "A", "2026-10-08", evening)["release_id"]) == ["in"]
-    morning = dt.datetime(2026, 10, 9, 6, 7, tzinfo=UTC)       # Fri 08:07, bar still Thu
+    morning = dt.datetime(2026, 10, 9, 6, 7, tzinfo=UTC)  # Fri 08:07, bar still Thu
     assert list(st.releases_for_bar(r, "A", "2026-10-08", morning, False)["release_id"]) == ["in", "night"]
 
 
 def test_releases_during_a_running_session_wait_for_that_days_bar():
-    r = frame(rel("fri", "A", "2026-10-09T08:00:00Z"))        # Fri 10:00
-    midday = dt.datetime(2026, 10, 9, 9, 0, tzinfo=UTC)        # Fri 11:00, bar = Thu
+    r = frame(rel("fri", "A", "2026-10-09T08:00:00Z"))  # Fri 10:00
+    midday = dt.datetime(2026, 10, 9, 9, 0, tzinfo=UTC)  # Fri 11:00, bar = Thu
     assert st.releases_for_bar(r, "A", "2026-10-08", midday, bar_complete_today=False).empty
     # Holiday Monday evening: no Monday bar, so a Monday release belongs to Friday's bar
     r = frame(rel("mon", "A", "2026-10-12T08:00:00Z"))
@@ -87,14 +103,30 @@ def test_releases_during_a_running_session_wait_for_that_days_bar():
 
 # --------------------------------------------------------------------------- points and blocking
 
+
 def score(rid, direction, material=True):
-    return {"release_id": rid, "direction": str(direction), "material": str(material),
-            "status": "ok", "prompt_version": "v1", "is_backfill": "false"}
+    return {
+        "release_id": rid,
+        "direction": str(direction),
+        "material": str(material),
+        "status": "ok",
+        "prompt_version": "v1",
+        "is_backfill": "false",
+    }
 
 
-@pytest.mark.parametrize("direction, material, pts", [
-    (2, True, 3), (2, False, 0), (1, True, 2), (1, False, 2), (0, True, 0), (-1, True, 0), (-2, True, 0),
-])
+@pytest.mark.parametrize(
+    "direction, material, pts",
+    [
+        (2, True, 3),
+        (2, False, 0),
+        (1, True, 2),
+        (1, False, 2),
+        (0, True, 0),
+        (-1, True, 0),
+        (-2, True, 0),
+    ],
+)
 def test_llm_points_mapping(cfg, direction, material, pts):
     assert st.llm_points(score("r", direction, material), cfg) == pts
 
@@ -103,16 +135,16 @@ def test_block_threshold_and_mixed_releases(cfg):
     bar = frame(rel("good", "A", "2026-10-08T07:30:00Z"), rel("bad", "A", "2026-10-08T08:00:00Z"))
     s = pd.DataFrame([score("good", 2), score("bad", -2)])
     out = st.v1_release(bar, s, cfg)
-    assert out["points"] == 3 and out["block"] is True              # most positive -> points, most negative -> block
+    assert out["points"] == 3 and out["block"] is True  # most positive -> points, most negative -> block
     out = st.v1_release(bar, pd.DataFrame([score("good", 1), score("bad", -2, material=False)]), cfg)
     assert out == {"points": 2, "block": False, "scored_ids": ["good", "bad"]}
     out = st.v1_release(bar, pd.DataFrame([score("bad", -1)]), cfg)
-    assert out["block"] is False                                    # -1 is above the -2 threshold
+    assert out["block"] is False  # -1 is above the -2 threshold
     assert st.v1_release(bar, pd.DataFrame(columns=["release_id"]), cfg)["points"] == 0
 
 
 def test_strategy_scores_replace_release_component(cfg):
-    pts = {"release": 2, "volume": 1, "price": 1, "news": 0, "small_cap": 1}   # v0 = 5 (via Google News wire)
+    pts = {"release": 2, "volume": 1, "price": 1, "news": 0, "small_cap": 1}  # v0 = 5 (via Google News wire)
     row = {"ticker": "A", "date": "2026-10-08", "points": pts, "market_cap": 1e9}
     now = dt.datetime(2026, 10, 8, 16, 52, tzinfo=UTC)
     none = st.strategy_scores(row, frame(), pd.DataFrame(columns=["release_id"]), cfg, now)
@@ -128,15 +160,19 @@ def test_strategy_scores_replace_release_component(cfg):
 
 
 def test_routine_releases_do_not_count(cfg):
-    row = {"ticker": "A", "date": "2026-10-08", "points": dict.fromkeys(scanner.SCORE_COMPONENTS, 0),
-           "market_cap": None}
+    row = {
+        "ticker": "A",
+        "date": "2026-10-08",
+        "points": dict.fromkeys(scanner.SCORE_COMPONENTS, 0),
+        "market_cap": None,
+    }
     r = frame(rel("r", "A", "2026-10-08T07:30:00Z", title="Antalet aktier och röster i A AB"))
     now = dt.datetime(2026, 10, 8, 16, 52, tzinfo=UTC)
     assert st.strategy_scores(row, r, pd.DataFrame(columns=["release_id"]), cfg, now)["score_v0b"] == 0
 
 
 def test_strategy_labels(cfg):
-    assert st.strategy_labels(cfg) == ["v0", "v0b"]                       # llm.enabled: false (free)
+    assert st.strategy_labels(cfg) == ["v0", "v0b"]  # llm.enabled: false (free)
     on = {**cfg, "llm": {**cfg["llm"], "enabled": True}}
     assert st.strategy_labels(on) == ["v0", "v0b", "v1_v1"]
     assert st.llm_enabled(on) and not st.llm_enabled(cfg) and not st.llm_enabled({})
@@ -149,17 +185,29 @@ GOLDEN = [  # (chg_1d, vol_ratio, chg_5d, release sources, n news 24h, mcap) -> 
     ((0.12, 6.0, 0.15, ["MFN"], 0, 1e9), ({"release": 2, "volume": 2, "price": 1, "news": 0, "small_cap": 1}, False)),
     ((0.02, 1.2, 0.60, [], 0, 1e9), ({"release": 0, "volume": 0, "price": 0, "news": 0, "small_cap": 0}, True)),
     ((-0.11, 3.5, -0.2, [], 0, 9e9), ({"release": 0, "volume": 1, "price": 1, "news": 0, "small_cap": 0}, False)),
-    ((0.00, math.nan, 0.0, ["Cision News"], 0, None), ({"release": 2, "volume": 0, "price": 0, "news": 0, "small_cap": 0}, False)),
+    (
+        (0.00, math.nan, 0.0, ["Cision News"], 0, None),
+        ({"release": 2, "volume": 0, "price": 0, "news": 0, "small_cap": 0}, False),
+    ),
 ]
 
 
 @pytest.mark.parametrize("inputs, expected", GOLDEN)
 def test_v0_scoring_golden(cfg, inputs, expected):
     chg1, vr, chg5, sources, _, mcap = inputs
-    pm = {"date": "2026-10-06", "close": 10.0, "chg_1d": chg1, "chg_5d": chg5, "volume": 1, "vol_ratio": vr,
-          "turnover_sek": 10.0}
-    items = [{"title": "Bolaget tecknar avtal", "link": f"l{i}", "source": s,
-              "ts": NOW - dt.timedelta(hours=2)} for i, s in enumerate(sources)]
+    pm = {
+        "date": "2026-10-06",
+        "close": 10.0,
+        "chg_1d": chg1,
+        "chg_5d": chg5,
+        "volume": 1,
+        "vol_ratio": vr,
+        "turnover_sek": 10.0,
+    }
+    items = [
+        {"title": "Bolaget tecknar avtal", "link": f"l{i}", "source": s, "ts": NOW - dt.timedelta(hours=2)}
+        for i, s in enumerate(sources)
+    ]
     nm = scanner.news_metrics(items, NOW, cfg)
     pts, _, hype = scanner.score_breakdown(pm, nm, mcap, cfg)
     assert (pts, hype) == expected

@@ -1,5 +1,6 @@
 """SCANNER_STATE_DIR moves every generated file out of the code folder; SCANNER_CODE_URL makes
 the generated pages link back to the code repository."""
+
 from __future__ import annotations
 
 import importlib
@@ -39,15 +40,15 @@ def test_default_state_is_the_code_folder(reloaded, monkeypatch):
 def test_state_dir_moves_all_outputs(reloaded, tmp_path):
     m = reloaded(SCANNER_STATE_DIR=str(tmp_path))
     sc, ev, ls, fw = m["scanner"], m["evaluate"], m["llm_score"], m["fund_watch"]
-    assert sc.DATA_DIR == tmp_path / "data" and sc.REPORT_DIR == tmp_path / "reports"
-    assert sc.DASHBOARD == tmp_path / "DASHBOARD.md"
-    assert sc.FUND_SUMMARY == tmp_path / "fund-watch" / "data" / "fund_watch_latest.json"
-    assert ev.PAPER_LOG == tmp_path / "data" / "paper_trades.csv"
-    assert ls.SCORES_PATH == tmp_path / "data" / "llm_scores.csv"
-    assert ls.PROMPT_REGISTRY == tmp_path / "data" / "used_prompts.json"
-    assert ls.PROMPT_DIR == ROOT / "prompts"                     # prompts are code, not state
-    assert fw.DATA_DIR == tmp_path / "fund-watch" / "data"
-    assert fw.SUMMARY_FILE == sc.FUND_SUMMARY                    # the dashboard finds the fund watch
+    assert tmp_path / "data" == sc.DATA_DIR and tmp_path / "reports" == sc.REPORT_DIR
+    assert tmp_path / "DASHBOARD.md" == sc.DASHBOARD
+    assert tmp_path / "fund-watch" / "data" / "fund_watch_latest.json" == sc.FUND_SUMMARY
+    assert tmp_path / "data" / "paper_trades.csv" == ev.PAPER_LOG
+    assert tmp_path / "data" / "llm_scores.csv" == ls.SCORES_PATH
+    assert tmp_path / "data" / "used_prompts.json" == ls.PROMPT_REGISTRY
+    assert ls.PROMPT_DIR == ROOT / "prompts"  # prompts are code, not state
+    assert tmp_path / "fund-watch" / "data" == fw.DATA_DIR
+    assert fw.SUMMARY_FILE == sc.FUND_SUMMARY  # the dashboard finds the fund watch
     # code stays where it is
     assert sc.ROOT == ROOT
 

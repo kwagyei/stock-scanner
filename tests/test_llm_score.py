@@ -1,4 +1,5 @@
 """Offline tests for llm_score.py. The Anthropic client is faked; sockets are blocked."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -15,16 +16,23 @@ import llm_score as ls
 import news_sources as ns
 import scanner
 
-UTC = dt.timezone.utc
+UTC = dt.UTC
 NOW = dt.datetime(2026, 10, 9, 6, 0, tzinfo=UTC)
-GOOD = {"event_type": "order_contract", "direction": 2, "surprise": 2, "material": True,
-        "confidence": 0.8, "rationale": "Order worth a third of annual revenue."}
+GOOD = {
+    "event_type": "order_contract",
+    "direction": 2,
+    "surprise": 2,
+    "material": True,
+    "confidence": 0.8,
+    "rationale": "Order worth a third of annual revenue.",
+}
 
 
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch):
     def guard(*a, **k):
         raise RuntimeError("network access in tests")
+
     monkeypatch.setattr(socket.socket, "connect", guard)
     monkeypatch.setattr(socket, "create_connection", guard)
 
@@ -44,8 +52,11 @@ def cfg():
 
 def resp(payload, stop="end_turn", tin=100, tout=20):
     text = payload if isinstance(payload, str) else json.dumps(payload)
-    return SimpleNamespace(stop_reason=stop, content=[SimpleNamespace(type="text", text=text)],
-                           usage=SimpleNamespace(input_tokens=tin, output_tokens=tout))
+    return SimpleNamespace(
+        stop_reason=stop,
+        content=[SimpleNamespace(type="text", text=text)],
+        usage=SimpleNamespace(input_tokens=tin, output_tokens=tout),
+    )
 
 
 class FakeClient:
@@ -61,11 +72,19 @@ class FakeClient:
         return a
 
 
-def release(rid="r1", ticker="ELTEL.ST", ts="2026-10-08T06:30:00Z", title="Eltel vinner order",
-            source_type="primary"):
-    return {"release_id": rid, "ticker": ticker, "source": "mfn", "source_type": source_type,
-            "published_at": ts, "title": title, "url": f"https://mfn.se/a/{rid}", "language": "sv",
-            "body_text": "Eltel har fått en order.", "fetched_at": ts}
+def release(rid="r1", ticker="ELTEL.ST", ts="2026-10-08T06:30:00Z", title="Eltel vinner order", source_type="primary"):
+    return {
+        "release_id": rid,
+        "ticker": ticker,
+        "source": "mfn",
+        "source_type": source_type,
+        "published_at": ts,
+        "title": title,
+        "url": f"https://mfn.se/a/{rid}",
+        "language": "sv",
+        "body_text": "Eltel har fått en order.",
+        "fetched_at": ts,
+    }
 
 
 def releases(*rows):
@@ -74,11 +93,22 @@ def releases(*rows):
 
 # --------------------------------------------------------------------------- validation
 
-@pytest.mark.parametrize("change", [
-    {"direction": 3}, {"direction": 1.5}, {"direction": True}, {"surprise": -1},
-    {"event_type": "rumour"}, {"material": "yes"}, {"confidence": 1.2},
-    {"rationale": " ".join(["word"] * 31)}, {"rationale": ""}, {"extra": 1},
-])
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"direction": 3},
+        {"direction": 1.5},
+        {"direction": True},
+        {"surprise": -1},
+        {"event_type": "rumour"},
+        {"material": "yes"},
+        {"confidence": 1.2},
+        {"rationale": " ".join(["word"] * 31)},
+        {"rationale": ""},
+        {"extra": 1},
+    ],
+)
 def test_validate_rejects_out_of_schema(change):
     assert ls.validate({**GOOD, **change}) is not None
 
@@ -94,6 +124,7 @@ def test_schema_matches_required_fields():
 
 
 # --------------------------------------------------------------------------- scoring + retry
+
 
 def test_score_release_ok_and_request_shape(cfg):
     client = FakeClient(resp(GOOD))
@@ -123,7 +154,7 @@ def test_refusal_is_error_without_retry(cfg):
 
 
 def test_max_tokens_counts_as_invalid(cfg):
-    client = FakeClient(resp("{\"event", stop="max_tokens"), resp(GOOD))
+    client = FakeClient(resp('{"event', stop="max_tokens"), resp(GOOD))
     assert ls.score_release(client, cfg, "S", release())["status"] == "ok"
 
 
@@ -138,6 +169,7 @@ def test_api_errors_are_recorded_not_raised(cfg):
 
 
 # --------------------------------------------------------------------------- run: idempotency, dates, cap
+
 
 def test_run_is_idempotent_per_release_and_prompt_version(cfg):
     rel = releases(release())
@@ -154,8 +186,9 @@ def test_run_is_idempotent_per_release_and_prompt_version(cfg):
 def test_api_error_rows_are_retried_and_replaced(cfg):
     rel = releases(release())
     req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
-    scores, new, warn = ls.run(cfg, rel, ls.load_scores(),
-                               client=FakeClient(anthropic.APIConnectionError(request=req)), now=NOW)
+    scores, new, warn = ls.run(
+        cfg, rel, ls.load_scores(), client=FakeClient(anthropic.APIConnectionError(request=req)), now=NOW
+    )
     assert new[0]["status"] == "api_error" and warn
     scores, new, _ = ls.run(cfg, rel, scores, client=FakeClient(resp(GOOD)), now=NOW)
     assert list(scores["status"]) == ["ok"]
@@ -185,7 +218,7 @@ def test_cost_cap_and_missing_key(cfg):
     rel = releases(release("a"), release("b", ts="2026-10-08T08:00:00Z"))
     scores, new, warn = ls.run(cfg, rel, ls.load_scores(), client=FakeClient(resp(GOOD)), now=NOW)
     assert len(new) == 1 and "max_calls_per_run" in warn[0]
-    scores, new, warn = ls.run(cfg, rel, scores, now=NOW)          # no client, no key
+    scores, new, warn = ls.run(cfg, rel, scores, now=NOW)  # no client, no key
     assert new == [] and "ANTHROPIC_API_KEY not set" in warn[0]
 
 
@@ -198,6 +231,7 @@ def test_save_load_roundtrip(cfg, tmp_registry):
 
 
 # --------------------------------------------------------------------------- prompt guard
+
 
 def test_prompt_guard_blocks_edits_after_live_use(cfg, monkeypatch):
     ls.run(cfg, releases(release()), ls.load_scores(), client=FakeClient(resp(GOOD)), now=NOW)

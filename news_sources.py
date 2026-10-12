@@ -10,6 +10,7 @@ Fallback: Google News items whose publisher matches config release_sources (the 
 names), stored as source_type=aggregator without body text. v0 keeps its own news logic;
 v0b and v1 use primary rows only.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -28,18 +29,30 @@ import pandas as pd
 
 try:  # python.org macOS builds ship without CA certificates; use certifi's bundle
     import certifi
+
     os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 except ImportError:
     pass
 
-UTC = dt.timezone.utc
+UTC = dt.UTC
 USER_AGENT = "Mozilla/5.0 (stock-attention-scanner)"
 MFN_NS = "{https://mfn.se/schemas/rss-ns-x/}"
-RELEASE_COLUMNS = ["release_id", "ticker", "source", "source_type", "published_at", "title", "url",
-                   "language", "body_text", "fetched_at"]
+RELEASE_COLUMNS = [
+    "release_id",
+    "ticker",
+    "source",
+    "source_type",
+    "published_at",
+    "title",
+    "url",
+    "language",
+    "body_text",
+    "fetched_at",
+]
 
 
 # --------------------------------------------------------------------------- fetching
+
 
 def mfn_url(slug: str, limit: int) -> str:
     return f"https://mfn.se/all/a/{urllib.parse.quote(slug)}.rss?limit={limit}"
@@ -58,6 +71,7 @@ def fetch_mfn_xml(slug: str, limit: int, timeout: int = 30) -> bytes | None:
 
 # --------------------------------------------------------------------------- parsing
 
+
 def release_id(source: str, url: str) -> str:
     """Stable id: hash of source + url."""
     return hashlib.sha1(f"{source}|{url}".encode()).hexdigest()[:16]
@@ -73,8 +87,9 @@ def _utc_iso(ts: dt.datetime) -> str:
     return ts.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def parse_mfn(xml: bytes, ticker: str, fetched_at: dt.datetime, max_chars: int,
-              prefer_language: str = "sv") -> list[dict]:
+def parse_mfn(
+    xml: bytes, ticker: str, fetched_at: dt.datetime, max_chars: int, prefer_language: str = "sv"
+) -> list[dict]:
     """Primary release rows from an MFN feed. Swedish and English versions of one release share
     a timestamp; only one is kept (prefer_language when present, otherwise the first)."""
     try:
@@ -96,18 +111,25 @@ def parse_mfn(xml: bytes, ticker: str, fetched_at: dt.datetime, max_chars: int,
         lang = (it.findtext(f"{MFN_NS}language") or "").strip()
         bodies = {c.get("type"): c.text or "" for c in it.findall(f"{MFN_NS}content")}
         body = bodies.get("text") or bodies.get("html") or it.findtext("description") or ""
-        row = {"release_id": release_id("mfn", link), "ticker": ticker, "source": "mfn",
-               "source_type": "primary", "published_at": _utc_iso(ts.to_pydatetime()), "title": title,
-               "url": link, "language": lang, "body_text": clean_text(body, max_chars),
-               "fetched_at": _utc_iso(fetched_at)}
+        row = {
+            "release_id": release_id("mfn", link),
+            "ticker": ticker,
+            "source": "mfn",
+            "source_type": "primary",
+            "published_at": _utc_iso(ts.to_pydatetime()),
+            "title": title,
+            "url": link,
+            "language": lang,
+            "body_text": clean_text(body, max_chars),
+            "fetched_at": _utc_iso(fetched_at),
+        }
         key = row["published_at"]
         if key not in by_ts or (lang == prefer_language and by_ts[key]["language"] != prefer_language):
             by_ts[key] = row
     return sorted(by_ts.values(), key=lambda r: r["published_at"], reverse=True)
 
 
-def aggregator_rows(items: list[dict], ticker: str, release_sources: list[str],
-                    fetched_at: dt.datetime) -> list[dict]:
+def aggregator_rows(items: list[dict], ticker: str, release_sources: list[str], fetched_at: dt.datetime) -> list[dict]:
     """Google News items from wire publishers (config release_sources), as aggregator rows."""
     keys = [s.lower() for s in release_sources]
     rows = []
@@ -115,13 +137,25 @@ def aggregator_rows(items: list[dict], ticker: str, release_sources: list[str],
         src = i.get("source") or ""
         if not i.get("ts") or not any(k in src.lower() for k in keys):
             continue
-        rows.append({"release_id": release_id(src, i["link"]), "ticker": ticker, "source": src,
-                     "source_type": "aggregator", "published_at": _utc_iso(i["ts"]), "title": i["title"],
-                     "url": i["link"], "language": "", "body_text": "", "fetched_at": _utc_iso(fetched_at)})
+        rows.append(
+            {
+                "release_id": release_id(src, i["link"]),
+                "ticker": ticker,
+                "source": src,
+                "source_type": "aggregator",
+                "published_at": _utc_iso(i["ts"]),
+                "title": i["title"],
+                "url": i["link"],
+                "language": "",
+                "body_text": "",
+                "fetched_at": _utc_iso(fetched_at),
+            }
+        )
     return rows
 
 
 # --------------------------------------------------------------------------- store
+
 
 def load_releases(path: Path) -> pd.DataFrame:
     if not Path(path).exists():
@@ -180,8 +214,10 @@ def coverage_gaps(existing: pd.DataFrame, feed_rows: list[dict], ticker: str, li
         return None
     oldest_in_feed = min(r["published_at"] for r in feed_rows)
     if oldest_in_feed > mine["published_at"].max():
-        return (f"{ticker}: MFN feed returned {limit} items, all newer than the last stored release; "
-                "releases in between may be missing (raise releases.mfn_limit)")
+        return (
+            f"{ticker}: MFN feed returned {limit} items, all newer than the last stored release; "
+            "releases in between may be missing (raise releases.mfn_limit)"
+        )
     return None
 
 

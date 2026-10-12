@@ -18,6 +18,7 @@ Steps:
 Changing the watchlist changes what the paper-trade test measures, so each build stamps a
 new "# version:" line; new paper trades are tagged with it.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -36,8 +37,7 @@ import yfinance as yf
 
 import scanner
 
-NASDAQ_URL = ("https://api.nasdaq.com/api/nordic/screener/shares"
-              "?category={category}&tableonly=true&market=STO{segment}")
+NASDAQ_URL = "https://api.nasdaq.com/api/nordic/screener/shares?category={category}&tableonly=true&market=STO{segment}"
 MFN_SEARCH = "https://mfn.se/search/companies?query={q}"
 CLASS_SUFFIX = re.compile(r"\s+(ser\.?\s*)?(A|B|C|D|SDB|A SDB|STAM|PREF|Pref)$")
 LEGAL_SUFFIX = re.compile(r"\s+(AB|\(publ\)|Plc|plc|PLC|Ltd\.?|Inc\.?|Corp\.?|ASA|A/S|Oyj|SE|N\.V\.)$")
@@ -47,8 +47,7 @@ PAUSE = 1.0
 
 
 def get_json(url: str):
-    req = urllib.request.Request(url, headers={"User-Agent": scanner.USER_AGENT,
-                                               "Accept": "application/json"})
+    req = urllib.request.Request(url, headers={"User-Agent": scanner.USER_AGENT, "Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.load(resp)
 
@@ -64,8 +63,15 @@ def fetch_universe(segments: list[str]) -> pd.DataFrame:
         if not data:
             sys.exit(f"[error] Nasdaq returned no data for {seg}: {url}")
         for r in data["instrumentListing"]["rows"]:
-            rows.append({"symbol": r["symbol"], "full_name": r["fullName"], "isin": r["isin"],
-                         "currency": r["currency"], "list": seg})
+            rows.append(
+                {
+                    "symbol": r["symbol"],
+                    "full_name": r["fullName"],
+                    "isin": r["isin"],
+                    "currency": r["currency"],
+                    "list": seg,
+                }
+            )
         time.sleep(PAUSE * 2)
     df = pd.DataFrame(rows).drop_duplicates("isin")
     df["ticker"] = df["symbol"].str.replace(" ", "-") + ".ST"
@@ -77,9 +83,10 @@ def median_turnover(tickers: list[str], days: int, batch: int = 50) -> dict[str,
     """ticker -> (median close x volume over the last `days` bars, bars available)."""
     out = {}
     for i in range(0, len(tickers), batch):
-        chunk = tickers[i:i + batch]
-        data = yf.download(chunk, period="6mo", interval="1d", group_by="ticker",
-                           auto_adjust=False, threads=False, progress=False)
+        chunk = tickers[i : i + batch]
+        data = yf.download(
+            chunk, period="6mo", interval="1d", group_by="ticker", auto_adjust=False, threads=False, progress=False
+        )
         for t in chunk:
             try:
                 h = data[t].dropna(subset=["Close"]).tail(days)
@@ -119,7 +126,7 @@ def read_current(path: Path) -> pd.DataFrame:
         return pd.DataFrame(columns=WATCHLIST_COLUMNS)
     wl = scanner.load_watchlist(path)
     if "source" not in wl.columns:
-        wl["source"] = "manual"           # pre-builder watchlist: everything was hand-picked
+        wl["source"] = "manual"  # pre-builder watchlist: everything was hand-picked
     wl["source"] = wl["source"].replace("", "manual")
     return wl
 
@@ -157,14 +164,22 @@ def main(argv=None) -> int:
     known_slugs = dict(zip(current["ticker"], current["mfn_slug"]))
 
     uni = fetch_universe(uc["segments"])
-    print(f"[info] universe: {len(uni)} instruments "
-          + ", ".join(f"{k} {v}" for k, v in uni["list"].value_counts().items()))
+    print(
+        f"[info] universe: {len(uni)} instruments "
+        + ", ".join(f"{k} {v}" for k, v in uni["list"].value_counts().items())
+    )
     review = []
 
     def flag(r, reason, turnover=None):
-        review.append({"ticker": r["ticker"], "name": r["full_name"], "list": r["list"],
-                       "reason": reason, "median_turnover_sek":
-                       "" if turnover is None else round(turnover)})
+        review.append(
+            {
+                "ticker": r["ticker"],
+                "name": r["full_name"],
+                "list": r["list"],
+                "reason": reason,
+                "median_turnover_sek": "" if turnover is None else round(turnover),
+            }
+        )
 
     skip = uni["symbol"].str.endswith(" PREF") | (uni["currency"] != "SEK")
     for _, r in uni[skip].iterrows():
@@ -173,8 +188,10 @@ def main(argv=None) -> int:
 
     print(f"[info] fetching {uc['turnover_days']}-day turnover for {len(uni)} tickers …")
     turnover = median_turnover(list(uni["ticker"]), uc["turnover_days"])
-    uni = uni.assign(turnover=uni["ticker"].map(lambda t: turnover.get(t, (None, 0))[0]),
-                     bars=uni["ticker"].map(lambda t: turnover.get(t, (None, 0))[1]))
+    uni = uni.assign(
+        turnover=uni["ticker"].map(lambda t: turnover.get(t, (None, 0))[0]),
+        bars=uni["ticker"].map(lambda t: turnover.get(t, (None, 0))[1]),
+    )
 
     liquid, n_illiquid = [], 0
     for _, r in uni.iterrows():
@@ -204,8 +221,15 @@ def main(argv=None) -> int:
             if not rel:
                 flag(r, f"MFN feed '{slug}' returned no releases", r["turnover"])
                 continue
-        auto.append({"ticker": r["ticker"], "name": r["company"], "query": news_query(r["company"]),
-                     "mfn_slug": slug, "source": "auto"})
+        auto.append(
+            {
+                "ticker": r["ticker"],
+                "name": r["company"],
+                "query": news_query(r["company"]),
+                "mfn_slug": slug,
+                "source": "auto",
+            }
+        )
     auto = pd.DataFrame(auto, columns=WATCHLIST_COLUMNS)
 
     old_auto = set(current.loc[current["source"] == "auto", "ticker"])
@@ -213,9 +237,11 @@ def main(argv=None) -> int:
     # Date plus a hash of the membership: any change in tickers gives a new version.
     members = ",".join(sorted(set(manual["ticker"]) | set(auto["ticker"])))
     version = f"auto-{dt.date.today().isoformat()}-{hashlib.sha1(members.encode()).hexdigest()[:6]}"
-    print(f"[info] manual rows kept: {len(manual)} · auto rows: {len(auto)} "
-          f"(+{len(added)} / -{len(removed)} vs current) · below liquidity floor: {n_illiquid} "
-          f"· for review: {len(review)}")
+    print(
+        f"[info] manual rows kept: {len(manual)} · auto rows: {len(auto)} "
+        f"(+{len(added)} / -{len(removed)} vs current) · below liquidity floor: {n_illiquid} "
+        f"· for review: {len(review)}"
+    )
     if removed:
         print(f"[info] dropped auto rows: {', '.join(removed)}")
 
@@ -225,8 +251,9 @@ def main(argv=None) -> int:
     rows = pd.concat([manual, auto], ignore_index=True).fillna("")
     write_watchlist(wl_path, rows, version, len(auto))
     scanner.DATA_DIR.mkdir(exist_ok=True)
-    pd.DataFrame(review, columns=["ticker", "name", "list", "reason", "median_turnover_sek"]) \
-        .to_csv(REVIEW_LOG, index=False)
+    pd.DataFrame(review, columns=["ticker", "name", "list", "reason", "median_turnover_sek"]).to_csv(
+        REVIEW_LOG, index=False
+    )
     print(f"[info] wrote {wl_path.name} ({len(rows)} rows, version {version}) and {REVIEW_LOG.name}")
     return 0
 

@@ -1,4 +1,5 @@
 """Offline tests for scanner.py. All fetchers are mocked; sockets are blocked."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -8,18 +9,21 @@ import socket
 import pandas as pd
 import pytest
 
+import evaluate as ev
 import scanner
 
-UTC = dt.timezone.utc
+UTC = dt.UTC
 NOW = dt.datetime(2026, 10, 6, 17, 0, tzinfo=UTC)
 
 
 # --------------------------------------------------------------------------- fixtures
 
+
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch):
     def guard(*a, **k):
         raise RuntimeError("network access in tests")
+
     monkeypatch.setattr(socket.socket, "connect", guard)
     monkeypatch.setattr(socket, "create_connection", guard)
 
@@ -59,11 +63,11 @@ def flat(n, px=100.0, vol=1000, start="2026-06-01"):
 
 
 def news(source, hours_ago, title="t"):
-    return {"title": title, "link": "http://x", "source": source,
-            "ts": NOW - dt.timedelta(hours=hours_ago)}
+    return {"title": title, "link": "http://x", "source": source, "ts": NOW - dt.timedelta(hours=hours_ago)}
 
 
 # --------------------------------------------------------------------------- rules guard
+
 
 def test_rules_unchanged(cfg):
     pc, t = cfg["paper_trading"], cfg["thresholds"]
@@ -74,6 +78,7 @@ def test_rules_unchanged(cfg):
 
 # --------------------------------------------------------------------------- scoring
 
+
 def test_quiet_stock_scores_zero_even_if_small_cap(cfg):
     pm = scanner.price_metrics(flat(70), cfg)
     nm = scanner.news_metrics([], NOW, cfg)
@@ -83,7 +88,7 @@ def test_quiet_stock_scores_zero_even_if_small_cap(cfg):
 
 def test_all_signals_fire(cfg):
     h = flat(70)
-    h.iloc[-1] = (100, 115, 100, 112, 6000)            # +12%, 6x volume
+    h.iloc[-1] = (100, 115, 100, 112, 6000)  # +12%, 6x volume
     pm = scanner.price_metrics(h, cfg)
     items = [news("Cision News", 2), news("di.se", 3), news("EFN", 5)]
     nm = scanner.news_metrics(items, NOW, cfg)
@@ -105,7 +110,7 @@ def test_volume_tiers(cfg, vol, expected):
 @pytest.mark.parametrize("mcap", [None, 0, 5e9, 2e10])
 def test_small_cap_bonus_needs_known_cap_below_threshold(cfg, mcap):
     h = flat(70)
-    h.iloc[-1, h.columns.get_loc("Close")] = 89     # -11% → +1
+    h.iloc[-1, h.columns.get_loc("Close")] = 89  # -11% → +1
     pm = scanner.price_metrics(h, cfg)
     score, _, _ = scanner.score_stock(pm, scanner.news_metrics([], NOW, cfg), mcap, cfg)
     assert score == 1
@@ -129,18 +134,22 @@ def test_news_spike_needs_count_and_multiple(cfg):
 
 # --------------------------------------------------------------------------- hype warning
 
+
 def _run_up(pct):
     h = flat(70)
     h.iloc[-1, h.columns.get_loc("Close")] = 100 * (1 + pct)
     return h
 
 
-@pytest.mark.parametrize("pct,items,expected", [
-    (0.50, [], True),
-    (0.49, [], False),
-    (0.80, [news("Cision News", 100)], False),     # release in window explains it
-    (0.80, [news("Placera.se", 2)], True),         # media coverage is not a release
-])
+@pytest.mark.parametrize(
+    "pct,items,expected",
+    [
+        (0.50, [], True),
+        (0.49, [], False),
+        (0.80, [news("Cision News", 100)], False),  # release in window explains it
+        (0.80, [news("Placera.se", 2)], True),  # media coverage is not a release
+    ],
+)
 def test_hype_warning(cfg, pct, items, expected):
     pm = scanner.price_metrics(_run_up(pct), cfg)
     _, _, hype = scanner.score_stock(pm, scanner.news_metrics(items, NOW, cfg), None, cfg)
@@ -148,6 +157,7 @@ def test_hype_warning(cfg, pct, items, expected):
 
 
 # --------------------------------------------------------------------------- missing tickers
+
 
 def test_missing_and_short_history_tickers_reported(cfg, tmp_paths, monkeypatch):
     wl = tmp_paths / "watchlist.csv"
@@ -163,15 +173,23 @@ def test_missing_and_short_history_tickers_reported(cfg, tmp_paths, monkeypatch)
 
     html = (tmp_paths / "reports" / "latest.html").read_text()
     assert "No price data for: BAD.ST, NEW.ST" in html
-    assert news_calls == ["Good"]                  # no news requests for missing tickers
+    assert news_calls == ["Good"]  # no news requests for missing tickers
 
 
 # --------------------------------------------------------------------------- paper trades
 
+
 def pending_trade(ticker="X.ST", signal_date="2026-06-01"):
     rec = {c: "" for c in scanner.PAPER_COLUMNS}
-    rec.update(id=f"{ticker}-{signal_date}", ticker=ticker, name="X",
-               signal_date=signal_date, score="4", status="pending", universe="v1")
+    rec.update(
+        id=f"{ticker}-{signal_date}",
+        ticker=ticker,
+        name="X",
+        signal_date=signal_date,
+        score="4",
+        status="pending",
+        universe="v1",
+    )
     return pd.DataFrame([rec], columns=scanner.PAPER_COLUMNS)
 
 
@@ -188,12 +206,22 @@ def test_pending_stays_pending_without_next_bar(cfg):
 
 
 def test_pending_to_open_to_closed_across_runs(cfg):
-    full = bars([(100, 100, 100, 100, 1000),        # signal day
-                 (102, 104, 101, 103, 1000),        # entry at open 102
-                 (103, 105, 100, 104, 1000),
-                 (104, 140, 103, 135, 1000)])       # target 132.6 hit intraday
-    bench = bars([(1000, 1000, 1000, 1000, 0), (1010, 1010, 1010, 1010, 0),
-                  (1010, 1010, 1010, 1020, 0), (1030, 1030, 1030, 1050, 0)])
+    full = bars(
+        [
+            (100, 100, 100, 100, 1000),  # signal day
+            (102, 104, 101, 103, 1000),  # entry at open 102
+            (103, 105, 100, 104, 1000),
+            (104, 140, 103, 135, 1000),
+        ]
+    )  # target 132.6 hit intraday
+    bench = bars(
+        [
+            (1000, 1000, 1000, 1000, 0),
+            (1010, 1010, 1010, 1010, 0),
+            (1010, 1010, 1010, 1020, 0),
+            (1030, 1030, 1030, 1050, 0),
+        ]
+    )
     p = pending_trade()
 
     p = scanner.update_paper(p, {"X.ST": full.iloc[:1]}, bench.iloc[:1], cfg)
@@ -253,9 +281,11 @@ def test_open_before_time_limit(cfg):
 
 def test_add_signals_skips_active_and_low_scores(cfg):
     p = pending_trade("A.ST")
-    rows = [{"ticker": "A.ST", "name": "A", "date": "2026-06-02", "score": 6},
-            {"ticker": "B.ST", "name": "B", "date": "2026-06-02", "score": 4},
-            {"ticker": "C.ST", "name": "C", "date": "2026-06-02", "score": 3}]
+    rows = [
+        {"ticker": "A.ST", "name": "A", "date": "2026-06-02", "score": 6},
+        {"ticker": "B.ST", "name": "B", "date": "2026-06-02", "score": 4},
+        {"ticker": "C.ST", "name": "C", "date": "2026-06-02", "score": 3},
+    ]
     p = scanner.add_paper_signals(p, rows, cfg)
     assert list(p["ticker"]) == ["A.ST", "B.ST"]
     assert p.iloc[1]["status"] == "pending" and p.iloc[1]["id"] == "B.ST-2026-06-02"
@@ -263,10 +293,10 @@ def test_add_signals_skips_active_and_low_scores(cfg):
 
 # --------------------------------------------------------------------------- CSV round-trip
 
+
 def test_paper_csv_round_trip(cfg, tmp_paths):
     scanner.DATA_DIR.mkdir()
-    open_trade = scanner.update_paper(
-        pending_trade("O.ST"), {"O.ST": flat(3)}, flat(3, px=1000), cfg)
+    open_trade = scanner.update_paper(pending_trade("O.ST"), {"O.ST": flat(3)}, flat(3, px=1000), cfg)
     closed = run_trade(cfg, [(100, 101, 99, 100, 1), (80, 82, 78, 79, 1)]).to_frame().T
     df = pd.concat([open_trade, closed, pending_trade("P.ST")], ignore_index=True)
 
@@ -293,7 +323,7 @@ def test_main_persists_trade_lifecycle(cfg, tmp_paths, monkeypatch):
     wl = tmp_paths / "watchlist.csv"
     wl.write_text("ticker,name,query\nX.ST,X,X\n")
     h = flat(70)
-    h.iloc[-1] = (100, 112, 100, 111, 6000)          # +11%, 6x vol, small cap → 4
+    h.iloc[-1] = (100, 112, 100, 111, 6000)  # +11%, 6x vol, small cap → 4
     data = {"X.ST": h, "^OMX": flat(70, px=1000), "nasdaq:IX3364": flat(70, px=500)}
     monkeypatch.setattr(scanner, "fetch_history", lambda t, p: data[t])
     monkeypatch.setattr(scanner, "fetch_news", lambda q, c: [])
@@ -305,12 +335,13 @@ def test_main_persists_trade_lifecycle(cfg, tmp_paths, monkeypatch):
     assert list(p[["ticker", "status", "score"]].iloc[0]) == ["X.ST", "pending", "4"]
 
     nxt = pd.bdate_range(h.index[-1] + pd.Timedelta(days=1), periods=2)
-    data["X.ST"] = pd.concat([h, pd.DataFrame(
-        [(111, 112, 110, 111, 1000), (90, 91, 80, 85, 1000)], index=nxt, columns=h.columns)])
+    data["X.ST"] = pd.concat(
+        [h, pd.DataFrame([(111, 112, 110, 111, 1000), (90, 91, 80, 85, 1000)], index=nxt, columns=h.columns)]
+    )
     data["^OMX"] = flat(72, px=1000)
     scanner.main(["--no-email", "--watchlist", str(wl)])
     p = pd.read_csv(scanner.PAPER_LOG, dtype=str).fillna("")
-    assert sorted(p["strategy"]) == ["v0", "v0b"]               # default config: LLM off, no v1 book
+    assert sorted(p["strategy"]) == ["v0", "v0b"]  # default config: LLM off, no v1 book
     p = p[p["strategy"] == "v0"]
     assert len(p) == 1
     assert list(p[["status", "exit_reason", "exit_price"]].iloc[0]) == ["closed", "stop", "90.0000"]
@@ -333,8 +364,7 @@ EMPTY_XML = """<?xml version="1.0"?><rss version="2.0"><channel><title>MFN</titl
 
 def mock_feed(monkeypatch, xml):
     real_parse, urls = scanner.feedparser.parse, []
-    monkeypatch.setattr(scanner.feedparser, "parse",
-                        lambda url, agent=None: urls.append(url) or real_parse(xml))
+    monkeypatch.setattr(scanner.feedparser, "parse", lambda url, agent=None: urls.append(url) or real_parse(xml))
     return urls
 
 
@@ -354,8 +384,7 @@ def test_fetch_releases_warns_on_unknown_slug(cfg, monkeypatch, capsys):
 
 
 def mfn(hours_ago, title="release"):
-    return {"title": title, "link": "http://mfn", "source": "MFN",
-            "ts": NOW - dt.timedelta(hours=hours_ago)}
+    return {"title": title, "link": "http://mfn", "source": "MFN", "ts": NOW - dt.timedelta(hours=hours_ago)}
 
 
 def test_mfn_release_scores_but_does_not_count_as_news(cfg):
@@ -448,20 +477,23 @@ def test_routine_release_does_not_suppress_hype(cfg):
     nm = scanner.news_metrics(items, NOW, cfg, [mfn(5, ROUTINE[4])])
     score, reasons, hype = scanner.score_stock(pm, nm, None, cfg)
     assert "company release <24h" not in reasons and hype
-    assert nm["n_24h"] == 1                        # still counted as news
+    assert nm["n_24h"] == 1  # still counted as news
 
 
 # --------------------------------------------------------------------------- weekly summary
 
-FRI_EVE = dt.datetime(2026, 10, 9, 18, 45)          # Friday, ISO week 41
+FRI_EVE = dt.datetime(2026, 10, 9, 18, 45)  # Friday, ISO week 41
 
 
-@pytest.mark.parametrize("when,expected", [
-    (FRI_EVE, True),
-    (dt.datetime(2026, 10, 9, 8, 30), False),       # Friday morning run
-    (dt.datetime(2026, 10, 8, 18, 45), False),      # Thursday
-    (dt.datetime(2026, 10, 10, 12, 0), True),       # weekend manual run, week not yet done
-])
+@pytest.mark.parametrize(
+    "when,expected",
+    [
+        (FRI_EVE, True),
+        (dt.datetime(2026, 10, 9, 8, 30), False),  # Friday morning run
+        (dt.datetime(2026, 10, 8, 18, 45), False),  # Thursday
+        (dt.datetime(2026, 10, 10, 12, 0), True),  # weekend manual run, week not yet done
+    ],
+)
 def test_weekly_due_schedule(cfg, tmp_paths, when, expected):
     assert scanner.weekly_due(when, cfg) is expected
 
@@ -469,7 +501,7 @@ def test_weekly_due_schedule(cfg, tmp_paths, when, expected):
 def test_weekly_due_once_per_week_unless_forced(cfg, tmp_paths):
     scanner.DATA_DIR.mkdir()
     scanner.WEEKLY_LOG.write_text("week,generated_local\n2026-W41,2026-10-06 20:23\n")
-    assert scanner.weekly_due(FRI_EVE, cfg)            # early forced run doesn't count
+    assert scanner.weekly_due(FRI_EVE, cfg)  # early forced run doesn't count
     scanner.WEEKLY_LOG.write_text("week,generated_local\n2026-W41,2026-10-09 18:46\n")
     assert not scanner.weekly_due(FRI_EVE, cfg)
     assert scanner.weekly_due(FRI_EVE, cfg, force=True)
@@ -483,10 +515,14 @@ def test_load_signals_dedupes_runs_keeping_best_score(tmp_paths):
         "2026-10-06T06:30,2026-10-05,A.ST,A,3,x\n"
         "2026-10-06T16:45,2026-10-06,A.ST,A,4,y\n"
         "2026-10-07T06:30,2026-10-06,A.ST,A,3,z\n"
-        "2026-10-06T16:45,2026-10-06,B.ST,B,1,w\n")
+        "2026-10-06T16:45,2026-10-06,B.ST,B,1,w\n"
+    )
     s = scanner.load_signals()
     assert list(zip(s["bar_date"], s["ticker"], s["score"])) == [
-        ("2026-10-05", "A.ST", 3), ("2026-10-06", "A.ST", 4), ("2026-10-06", "B.ST", 1)]
+        ("2026-10-05", "A.ST", 3),
+        ("2026-10-06", "A.ST", 4),
+        ("2026-10-06", "B.ST", 1),
+    ]
 
 
 def _signals(*rows):
@@ -496,20 +532,19 @@ def _signals(*rows):
 def test_signal_outcomes_vs_benchmark(cfg):
     h = bars([(100, 100, 100, c, 1) for c in (100, 110, 105, 120)])
     bench = bars([(1000, 1000, 1000, c, 0) for c in (1000, 1050, 1000, 1000)])
-    sig = _signals(("2026-06-01", "X.ST", "X", 4), ("2026-06-03", "X.ST", "X", 3),
-                   ("2026-06-01", "GONE.ST", "Gone", 5))
+    sig = _signals(("2026-06-01", "X.ST", "X", 4), ("2026-06-03", "X.ST", "X", 3), ("2026-06-01", "GONE.ST", "Gone", 5))
     o = scanner.signal_outcomes(sig, {"X.ST": h}, bench, [1, 2])
     assert o.loc[0, "ret_1d"] == pytest.approx(0.10) and o.loc[0, "excess_1d"] == pytest.approx(0.05)
     assert o.loc[0, "ret_2d"] == pytest.approx(0.05) and o.loc[0, "excess_2d"] == pytest.approx(0.05)
     assert o.loc[1, "ret_1d"] == pytest.approx(120 / 105 - 1)
-    assert pd.isna(o.loc[1, "ret_2d"])                       # not enough bars yet
-    assert o.loc[2, ["ret_1d", "ret_2d"]].isna().all()      # ticker without data
+    assert pd.isna(o.loc[1, "ret_2d"])  # not enough bars yet
+    assert o.loc[2, ["ret_1d", "ret_2d"]].isna().all()  # ticker without data
 
 
 def test_hit_rate_table_buckets():
-    o = pd.DataFrame({"score": [3, 3, 4, 6],
-                      "ret_5d": [0.10, -0.05, 0.02, 0.30],
-                      "excess_5d": [0.08, -0.06, -0.01, float("nan")]})
+    o = pd.DataFrame(
+        {"score": [3, 3, 4, 6], "ret_5d": [0.10, -0.05, 0.02, 0.30], "excess_5d": [0.08, -0.06, -0.01, float("nan")]}
+    )
     t = {r["score"]: r for r in scanner.hit_rate_table(o, [5], top_score=5)}
     assert list(t) == ["all", "3", "4", "5+"]
     assert (t["all"]["signals"], t["all"]["n_5d"]) == (4, 3)
@@ -520,19 +555,21 @@ def test_hit_rate_table_buckets():
 
 def _trade(ticker, status, exit_date="", ret="", bench=""):
     rec = {c: "" for c in scanner.PAPER_COLUMNS}
-    rec.update(ticker=ticker, name=ticker, status=status, exit_date=exit_date,
-               return_pct=ret, bench_return_pct=bench)
+    rec.update(ticker=ticker, name=ticker, status=status, exit_date=exit_date, return_pct=ret, bench_return_pct=bench)
     return rec
 
 
 def test_weekly_paper_week_vs_all_time():
-    paper = pd.DataFrame([
-        _trade("A", "closed", "2026-09-20", "30.00", "2.00"),
-        _trade("B", "closed", "2026-10-06", "-15.00", "1.00"),
-        _trade("C", "closed", "2026-10-08", "10.00", "-1.00"),
-        _trade("D", "open", ret="5.00"),
-        _trade("E", "pending"),
-    ], columns=scanner.PAPER_COLUMNS)
+    paper = pd.DataFrame(
+        [
+            _trade("A", "closed", "2026-09-20", "30.00", "2.00"),
+            _trade("B", "closed", "2026-10-06", "-15.00", "1.00"),
+            _trade("C", "closed", "2026-10-08", "10.00", "-1.00"),
+            _trade("D", "open", ret="5.00"),
+            _trade("E", "pending"),
+        ],
+        columns=scanner.PAPER_COLUMNS,
+    )
     wp = scanner.weekly_paper(paper, dt.date(2026, 10, 5), 10000)
     assert wp["week"]["n"] == 2 and wp["week"]["win_rate"] == 50
     assert wp["week"]["avg_return"] == pytest.approx(-2.5) and wp["week"]["pnl_sek"] == pytest.approx(-500)
@@ -545,14 +582,14 @@ def test_weekly_paper_week_vs_all_time():
 def test_main_weekly_writes_report_and_one_row_per_week(cfg, tmp_paths, monkeypatch):
     wl = tmp_paths / "watchlist.csv"
     wl.write_text("ticker,name,query\nX.ST,X,X\n")
-    start = (pd.Timestamp.today().normalize() - pd.offsets.BDay(69)).date()   # last bar = today
+    start = (pd.Timestamp.today().normalize() - pd.offsets.BDay(69)).date()  # last bar = today
     h = flat(70, start=start)
     h.iloc[-1] = (100, 112, 100, 111, 6000)
     monkeypatch.setattr(scanner, "fetch_history", lambda t, p: h if t == "X.ST" else flat(70, 1000, start=start))
     monkeypatch.setattr(scanner, "fetch_news", lambda q, c: [])
     monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: 1e9)
     monkeypatch.setattr(scanner.time, "sleep", lambda s: None)
-    monkeypatch.setattr(scanner, "today_bar_complete", lambda now, cfg: True)   # as if after the close
+    monkeypatch.setattr(scanner, "today_bar_complete", lambda now, cfg: True)  # as if after the close
     sent = []
     monkeypatch.setattr(scanner, "send_email", lambda html, subject: sent.append(subject))
 
@@ -564,10 +601,11 @@ def test_main_weekly_writes_report_and_one_row_per_week(cfg, tmp_paths, monkeypa
     html = (tmp_paths / "reports" / "weekly_latest.html").read_text()
     assert "Signal hit rate" in html and "X.ST" in html
     assert (tmp_paths / "reports" / f"weekly_{log.iloc[0]['week']}.html").exists()
-    assert sent == []                                   # --no-email respected
+    assert sent == []  # --no-email respected
 
 
 # --------------------------------------------------------------------------- watchlist versions
+
 
 def test_watchlist_version(tmp_path):
     wl = tmp_path / "w.csv"
@@ -583,7 +621,7 @@ def test_new_trades_tagged_and_old_trades_backfilled(cfg, tmp_paths):
     p = scanner.add_paper_signals(pending_trade("A.ST"), rows, cfg, "auto-2026-10-06")
     assert list(p["universe"]) == ["v1", "auto-2026-10-06"]
     scanner.DATA_DIR.mkdir()
-    scanner.PAPER_LOG.write_text("id,ticker,status\nX-1,X.ST,pending\n")    # pre-versioning file
+    scanner.PAPER_LOG.write_text("id,ticker,status\nX-1,X.ST,pending\n")  # pre-versioning file
     assert scanner.load_paper().iloc[0]["universe"] == "v1"
 
 
@@ -598,18 +636,22 @@ def test_weekly_paper_split_by_universe():
 
 # --------------------------------------------------------------------------- title filter
 
-@pytest.mark.parametrize("word,title,keep", [
-    ("Stille", "Pareto höjer riktkursen för Stille till 295 kronor, upprepar köp", True),
-    ("Stille", "Stilles vd köper aktier", True),
-    ("Stille", "Stille-aktien rusar", True),
-    ("Stille", "Lördagsrysare i arenan: ”Jag gillar verkligen det vi gör”", False),
-    ("Stille", "Ein stille Nacht", False),                       # case-sensitive
-    ("I-Tech", "Strategen: Se möjligheterna utanför tech", False),
-    ("I-Tech", "I-Tech tecknar nytt avtal för Selektope", True),
-    ("K33", "K330 lanseras", False),
-    ("Pricer", "Sifonen ersätter Quaero Capital i valberedningen i Pricer", True),
-    ("Pricer", "Pricers vd: starkt kvartal", True),
-])
+
+@pytest.mark.parametrize(
+    "word,title,keep",
+    [
+        ("Stille", "Pareto höjer riktkursen för Stille till 295 kronor, upprepar köp", True),
+        ("Stille", "Stilles vd köper aktier", True),
+        ("Stille", "Stille-aktien rusar", True),
+        ("Stille", "Lördagsrysare i arenan: ”Jag gillar verkligen det vi gör”", False),
+        ("Stille", "Ein stille Nacht", False),  # case-sensitive
+        ("I-Tech", "Strategen: Se möjligheterna utanför tech", False),
+        ("I-Tech", "I-Tech tecknar nytt avtal för Selektope", True),
+        ("K33", "K330 lanseras", False),
+        ("Pricer", "Sifonen ersätter Quaero Capital i valberedningen i Pricer", True),
+        ("Pricer", "Pricers vd: starkt kvartal", True),
+    ],
+)
 def test_filter_titles(word, title, keep):
     assert (scanner.filter_titles([news("di.se", 1, title)], word) != []) is keep
 
@@ -622,15 +664,17 @@ def test_filter_titles_blank_keeps_all():
 def test_main_applies_title_match(cfg, tmp_paths, monkeypatch):
     wl = tmp_paths / "watchlist.csv"
     wl.write_text("ticker,name,query,title_match\nS.ST,Stille,Stille,Stille\nO.ST,Other,Other,\n")
-    feed = [news("di.se", h, t) for h, t in ((1, "Stille rusar"), (2, "Rockbjörnens röda matta"), (3, "Seger för RIG Haga"))]
+    feed = [
+        news("di.se", h, t) for h, t in ((1, "Stille rusar"), (2, "Rockbjörnens röda matta"), (3, "Seger för RIG Haga"))
+    ]
     monkeypatch.setattr(scanner, "fetch_history", lambda t, p: flat(70))
     monkeypatch.setattr(scanner, "fetch_news", lambda q, c: feed)
     monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: None)
     monkeypatch.setattr(scanner.time, "sleep", lambda s: None)
-    monkeypatch.setattr(scanner, "_now", lambda: NOW)          # news items are timed relative to NOW
+    monkeypatch.setattr(scanner, "_now", lambda: NOW)  # news items are timed relative to NOW
     scanner.main(["--no-email", "--watchlist", str(wl)])
     log = pd.read_csv(scanner.SIGNALS_LOG).set_index("ticker")
-    assert "S.ST" not in log.index                     # 1 relevant item: no spike, no signal
+    assert "S.ST" not in log.index  # 1 relevant item: no spike, no signal
     assert log.loc["O.ST", "news_24h"] == 3 and "news spike" in log.loc["O.ST", "reasons"]
 
 
@@ -657,7 +701,7 @@ def test_partial_then_time_exit(cfg):
     rows = [D1, (110, 131, 109, 125, 1)] + [(135, 138, 132, 135, 1)] * 17 + [(138, 141, 136, 140, 1)]
     r = run_trade(cfg, rows)
     assert (r["pe_exit_reason"], r["pe_exit_price"]) == ("time", "140.0000")
-    assert r["pe_return_pct"] == "35.00"                     # 0.5 x 30% + 0.5 x 40%
+    assert r["pe_return_pct"] == "35.00"  # 0.5 x 30% + 0.5 x 40%
 
 
 def test_partial_gap_up_fills_at_open(cfg):
@@ -713,19 +757,23 @@ def test_variant_keeps_running_after_main_trade_closes(cfg):
 def test_variant_index_return_is_weighted_like_the_position(cfg):
     h = bars([(100, 100, 100, 100, 1), D1, (110, 131, 109, 125, 1), (120, 121, 99, 100, 1)])
     bench = bars([(1000, 1000, 1000, c, 0) for c in (1000, 1000, 1100, 1200)])
-    bench.iloc[1, 0] = 1000                                   # entry at the index open
+    bench.iloc[1, 0] = 1000  # entry at the index open
     r = scanner.update_paper(pending_trade(), {"X.ST": h}, bench, cfg).iloc[0]
-    assert r["pe_bench_return_pct"] == "15.00"               # 0.5 x 10% + 0.5 x 20%
+    assert r["pe_bench_return_pct"] == "15.00"  # 0.5 x 10% + 0.5 x 20%
 
 
-@pytest.mark.parametrize("rows", [
-    [D1, (110, 131, 109, 125, 1), (120, 121, 99, 100, 1)],
-    [D1, (80, 82, 78, 79, 1)],
-    [(100, 105, 95, 100 + i * 0.1, 1) for i in range(25)],
-    [D1, (100, 110, 99, 108, 1)],
-])
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [D1, (110, 131, 109, 125, 1), (120, 121, 99, 100, 1)],
+        [D1, (80, 82, 78, 79, 1)],
+        [(100, 105, 95, 100 + i * 0.1, 1) for i in range(25)],
+        [D1, (100, 110, 99, 108, 1)],
+    ],
+)
 def test_main_rules_identical_with_variant_on_or_off(cfg, rows):
     import copy
+
     off = copy.deepcopy(cfg)
     off["paper_trading"]["partial_exit"]["enabled"] = False
     main_cols = [c for c in scanner.PAPER_COLUMNS if not c.startswith("pe_")]
@@ -765,29 +813,41 @@ def test_open_variant_ticker_is_still_fetched(cfg, tmp_paths, monkeypatch):
 
 # --------------------------------------------------------------------------- markdown pages
 
-import evaluate as ev
-
 
 def _row(**k):
-    r = {"ticker": "A.ST", "name": "A | Co", "score": 6, "close": 10.0, "chg_1d": 0.12, "chg_5d": 0.2,
-         "vol_ratio": 6.0, "n_24h": 2, "hype": False, "date": "2026-10-06",
-         "reasons": ["company release <24h", "volume 6.0x avg", "price +12% 1d", "small cap"],
-         "points": {"release": 2, "volume": 2, "price": 1, "news": 0, "small_cap": 1},
-         "market_cap": 1.5e9, "n_releases": 1,
-         "headlines": [{"title": "A | Co wins order", "link": "https://x.test/a?b=(1)"}]}
+    r = {
+        "ticker": "A.ST",
+        "name": "A | Co",
+        "score": 6,
+        "close": 10.0,
+        "chg_1d": 0.12,
+        "chg_5d": 0.2,
+        "vol_ratio": 6.0,
+        "n_24h": 2,
+        "hype": False,
+        "date": "2026-10-06",
+        "reasons": ["company release <24h", "volume 6.0x avg", "price +12% 1d", "small cap"],
+        "points": {"release": 2, "volume": 2, "price": 1, "news": 0, "small_cap": 1},
+        "market_cap": 1.5e9,
+        "n_releases": 1,
+        "headlines": [{"title": "A | Co wins order", "link": "https://x.test/a?b=(1)"}],
+    }
     r.update(k)
     return r
 
 
-@pytest.mark.parametrize("raw,nice", [
-    ("company release <24h", "📣 Company release"),
-    ("volume 5.1x avg", "📊 Volume 5.1× normal"),
-    ("price -11% 1d", "📉 Big drop ▼ 11%"),
-    ("price +10% 1d", "📈 Big jump ▲ 10%"),
-    ("news spike (3 in 24h vs 1.0/day)", "📰 3 news items today (usually 1.0/day)"),
-    ("small cap", "🔹 Small cap"),
-    ("something new", "something new"),
-])
+@pytest.mark.parametrize(
+    "raw,nice",
+    [
+        ("company release <24h", "📣 Company release"),
+        ("volume 5.1x avg", "📊 Volume 5.1× normal"),
+        ("price -11% 1d", "📉 Big drop ▼ 11%"),
+        ("price +10% 1d", "📈 Big jump ▲ 10%"),
+        ("news spike (3 in 24h vs 1.0/day)", "📰 3 news items today (usually 1.0/day)"),
+        ("small cap", "🔹 Small cap"),
+        ("something new", "something new"),
+    ],
+)
 def test_friendly_reasons(raw, nice):
     assert scanner._friendly(raw) == nice
 
@@ -806,8 +866,9 @@ def test_why_accepts_list_or_logged_string():
     assert scanner._why([]) == "–"
 
 
-@pytest.mark.parametrize("pct,out", [(2.5, "▲ 2.5%"), (-11.2, "▼ 11.2%"), (0.01, "0.0%"), (None, "–"),
-                                     (float("nan"), "–")])
+@pytest.mark.parametrize(
+    "pct,out", [(2.5, "▲ 2.5%"), (-11.2, "▼ 11.2%"), (0.01, "0.0%"), (None, "–"), (float("nan"), "–")]
+)
 def test_arrow(pct, out):
     assert scanner._arrow(pct) == out
 
@@ -816,7 +877,7 @@ def test_alert_table_shows_component_values():
     t = scanner._alerts_table([_row()], "")
     head, sep, row = t.splitlines()[:3]
     assert "📣<br><sub>Releases 24h</sub>" in head and "🔹<br><sub>Market cap</sub>" in head
-    assert "Today" not in head                                   # price column replaces it
+    assert "Today" not in head  # price column replaces it
     # bold = counted: release, volume, price, small cap; news (2 items) did not score
     assert "| **6** | **1** | **6.0×** | **▲&nbsp;12.0%** | 2 | **1.5&nbsp;bn** |" in row
     assert sep.count("|---:") == 5 and "**Bold** = counted towards the score" in t
@@ -843,7 +904,7 @@ def test_alert_table_escapes_and_headlines_link():
 def test_nav_buttons(monkeypatch):
     monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
     root, sub = scanner._nav("DASHBOARD.md"), scanner._nav("reports/latest.md")
-    assert "badge/Dashboard-d0d7de" in root and "(reports/latest.md)" in root      # current page greyed
+    assert "badge/Dashboard-d0d7de" in root and "(reports/latest.md)" in root  # current page greyed
     assert "(../DASHBOARD.md)" in sub and "(latest.md)" not in sub and "(../reports/latest.md)" in sub
     assert "badge/Paper%20trades-" in root and "Runs" not in root
     monkeypatch.setenv("GITHUB_SERVER_URL", "https://github.com")
@@ -855,8 +916,13 @@ def _paper_fixture():
     o = _trade("O.ST", "open", ret="4.00", bench="1.00")
     o.update(entry_date="2026-10-01", entry_price="100.0000", last_price="104.0000", pe_status="open")
     c = _trade("C.ST", "closed", "2026-10-02", "30.00", "1.00")
-    c.update(entry_date="2026-09-20", exit_reason="target", pe_status="closed", pe_return_pct="15.00",
-             pe_exit_reason="remainder stop")
+    c.update(
+        entry_date="2026-09-20",
+        exit_reason="target",
+        pe_status="closed",
+        pe_return_pct="15.00",
+        pe_exit_reason="remainder stop",
+    )
     p = _trade("P.ST", "pending")
     p.update(signal_date="2026-10-06", score="5")
     return pd.DataFrame([o, c, p], columns=scanner.PAPER_COLUMNS)
@@ -864,34 +930,56 @@ def _paper_fixture():
 
 def test_dashboard(cfg, tmp_paths, monkeypatch):
     monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
-    scanner.DATA_DIR.mkdir(); scanner.REPORT_DIR.mkdir()
-    scanner.SIGNALS_LOG.write_text("run_utc,bar_date,ticker,name,score,reasons\n"
-                                   "2026-10-06T16:45,2026-10-06,A.ST,A,4,volume 6.0x avg\n"
-                                   "2026-10-06T16:45,2026-10-06,B.ST,B,1,small cap\n")
-    scanner.WEEKLY_LOG.write_text("week,signals_week,hit_5d,n_5d,hit_20d,n_20d,paper_all_n,paper_all_pnl_sek\n"
-                                  "2026-W41,3,50.0,2,,0,1,1500\n")
+    scanner.DATA_DIR.mkdir()
+    scanner.REPORT_DIR.mkdir()
+    scanner.SIGNALS_LOG.write_text(
+        "run_utc,bar_date,ticker,name,score,reasons\n"
+        "2026-10-06T16:45,2026-10-06,A.ST,A,4,volume 6.0x avg\n"
+        "2026-10-06T16:45,2026-10-06,B.ST,B,1,small cap\n"
+    )
+    scanner.WEEKLY_LOG.write_text(
+        "week,signals_week,hit_5d,n_5d,hit_20d,n_20d,paper_all_n,paper_all_pnl_sek\n2026-W41,3,50.0,2,,0,1,1500\n"
+    )
     (scanner.REPORT_DIR / "weekly_2026-W41.md").write_text("x")
     res = ev.evaluate(ev.closed_trades(_paper_fixture()))
-    md = scanner.build_dashboard([_row(), _row(ticker="H.ST", score=0, hype=True)], ["BAD.ST"],
-                                 _paper_fixture(), cfg, dt.datetime(2026, 10, 7, 18, 45), res)
-    for s in ["# 📊 Attention scanner", "> [!WARNING]\n> No price data for: BAD.ST",
-              "| 🔔 Alerts | ⚠️ Hype warnings | 💼 Open trades | ✅ Closed trades | ⚖️ Evaluation |",
-              "| **1**<br><sub>score ≥ 3</sub> | **1** | **1**<br><sub>+1 waiting</sub> | **1** | **NOT YET**",
-              "## ⚠️ Hype warnings", "> [!CAUTION]",
-              "🎯 130.00<br>🛑 85.00", "| 5 of 20 |", "100.00 → 104.00", "⏳ buys at the next open",
-              "> [!NOTE]\n> **Evaluation: NOT YET – 1 of 30 trades**",
-              "[2026-W41](reports/weekly_2026-W41.md)", "50% <sub>of 2</sub>", "+1 500 SEK",
-              "(reports/paper_trades.md)", "(reports/evaluation.md)", "(data/signals_log.csv)"]:
+    md = scanner.build_dashboard(
+        [_row(), _row(ticker="H.ST", score=0, hype=True)],
+        ["BAD.ST"],
+        _paper_fixture(),
+        cfg,
+        dt.datetime(2026, 10, 7, 18, 45),
+        res,
+    )
+    for s in [
+        "# 📊 Attention scanner",
+        "> [!WARNING]\n> No price data for: BAD.ST",
+        "| 🔔 Alerts | ⚠️ Hype warnings | 💼 Open trades | ✅ Closed trades | ⚖️ Evaluation |",
+        "| **1**<br><sub>score ≥ 3</sub> | **1** | **1**<br><sub>+1 waiting</sub> | **1** | **NOT YET**",
+        "## ⚠️ Hype warnings",
+        "> [!CAUTION]",
+        "🎯 130.00<br>🛑 85.00",
+        "| 5 of 20 |",
+        "100.00 → 104.00",
+        "⏳ buys at the next open",
+        "> [!NOTE]\n> **Evaluation: NOT YET – 1 of 30 trades**",
+        "[2026-W41](reports/weekly_2026-W41.md)",
+        "50% <sub>of 2</sub>",
+        "+1 500 SEK",
+        "(reports/paper_trades.md)",
+        "(reports/evaluation.md)",
+        "(data/signals_log.csv)",
+    ]:
         assert s in md, s
     recent = md.split("Signals in the last 10 trading days")[1].split("</details>")[0]
-    assert "A.ST" in recent and "B.ST" not in recent              # score 1 isn't a signal
+    assert "A.ST" in recent and "B.ST" not in recent  # score 1 isn't a signal
     assert md.count("<details>") == md.count("</details>")
 
 
 def test_dashboard_empty(cfg, tmp_paths, monkeypatch):
     monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
-    md = scanner.build_dashboard([], [], pd.DataFrame(columns=scanner.PAPER_COLUMNS), cfg,
-                                 dt.datetime(2026, 10, 6, 8, 30), ev.evaluate(None))
+    md = scanner.build_dashboard(
+        [], [], pd.DataFrame(columns=scanner.PAPER_COLUMNS), cfg, dt.datetime(2026, 10, 6, 8, 30), ev.evaluate(None)
+    )
     for s in ["✅ No alerts on this run.", "No signals yet.", "first one comes on Friday", "No open positions."]:
         assert s in md, s
     assert "## ⚠️ Hype warnings" not in md and "Waiting to buy" not in md
@@ -900,16 +988,32 @@ def test_dashboard_empty(cfg, tmp_paths, monkeypatch):
 def test_paper_page(cfg):
     paper = _paper_fixture()
     md = scanner.build_paper_md(paper, cfg, dt.datetime(2026, 10, 7, 18, 45), ev.evaluate(ev.closed_trades(paper)))
-    for s in ["# 💼 Paper trades", "| **Main rules** | 2 | 1 | 100% | ▲ 30.0% | ▲ 29.0% | +3 000 SEK |",
-              "| **Partial-exit variant** | 1 | 1 |", "## Open (1)", "## Waiting to buy (1)", "## Closed (1)",
-              "2026-09-20 → 2026-10-02", "🎯 Target", "▲ 15.0%<br><sub>🛑 Breakeven stop</sub>"]:
+    for s in [
+        "# 💼 Paper trades",
+        "| **Main rules** | 2 | 1 | 100% | ▲ 30.0% | ▲ 29.0% | +3 000 SEK |",
+        "| **Partial-exit variant** | 1 | 1 |",
+        "## Open (1)",
+        "## Waiting to buy (1)",
+        "## Closed (1)",
+        "2026-09-20 → 2026-10-02",
+        "🎯 Target",
+        "▲ 15.0%<br><sub>🛑 Breakeven stop</sub>",
+    ]:
         assert s in md, s
 
 
 def _eval_res(tmp_path, excess, n):
-    rows = [{"ticker": f"T{i}", "status": "closed", "return_pct": excess[i % len(excess)] + 1,
-             "bench_return_pct": 0, "exit_reason": "time", "exit_date": f"2026-01-{i % 28 + 1:02d}"}
-            for i in range(n)]
+    rows = [
+        {
+            "ticker": f"T{i}",
+            "status": "closed",
+            "return_pct": excess[i % len(excess)] + 1,
+            "bench_return_pct": 0,
+            "exit_reason": "time",
+            "exit_date": f"2026-01-{i % 28 + 1:02d}",
+        }
+        for i in range(n)
+    ]
     path = tmp_path / "p.csv"
     pd.DataFrame(rows).to_csv(path, index=False)
     return ev.evaluate(ev.load_trades(path))
@@ -918,7 +1022,10 @@ def _eval_res(tmp_path, excess, n):
 def test_evaluation_page_verdicts(cfg, tmp_path):
     now = dt.datetime(2026, 10, 7, 18, 45)
     passed = scanner.build_evaluation_md(_eval_res(tmp_path, [1, 5], 40), None, cfg, now)
-    assert "> [!TIP]\n> **Evaluation: PASS – 40 trades" in passed and "| ✅ | Enough trades | 40 closed (need 30) |" in passed
+    assert (
+        "> [!TIP]\n> **Evaluation: PASS – 40 trades" in passed
+        and "| ✅ | Enough trades | 40 closed (need 30) |" in passed
+    )
     failed = scanner.build_evaluation_md(_eval_res(tmp_path, [6, -4.5], 40), None, cfg, now)
     assert "> [!WARNING]" in failed and "Failed: unlikely to be luck (t > 2)." in failed and "| ❌ |" in failed
     empty = scanner.build_evaluation_md(ev.evaluate(None), ev.evaluate(None), cfg, now)
@@ -936,44 +1043,60 @@ def test_main_writes_all_pages(cfg, tmp_paths, monkeypatch):
     monkeypatch.setattr(scanner.time, "sleep", lambda s: None)
     scanner.main(["--no-email", "--weekly", "--watchlist", str(wl)])
     rep = tmp_paths / "reports"
-    titles = {scanner.DASHBOARD: "# 📊", rep / "latest.md": "# 📰 Today", rep / "paper_trades.md": "# 💼",
-              rep / "evaluation.md": "# ⚖️ Evaluation", rep / "weekly_latest.md": "# 📅 Weekly summary"}
+    titles = {
+        scanner.DASHBOARD: "# 📊",
+        rep / "latest.md": "# 📰 Today",
+        rep / "paper_trades.md": "# 💼",
+        rep / "evaluation.md": "# ⚖️ Evaluation",
+        rep / "weekly_latest.md": "# 📅 Weekly summary",
+    }
     for path, title in titles.items():
         text = path.read_text()
         assert text.startswith(title), path
-        assert "img.shields.io/badge/Dashboard" in text, path               # button row on every page
+        assert "img.shields.io/badge/Dashboard" in text, path  # button row on every page
         assert text.count("<details>") == text.count("</details>"), path
     assert len(list(rep.glob("weekly_20*.md"))) == 1
 
 
 def test_weekly_with_no_signals_in_window(cfg, tmp_paths):
-    scanner.DATA_DIR.mkdir(); scanner.REPORT_DIR.mkdir()
+    scanner.DATA_DIR.mkdir()
+    scanner.REPORT_DIR.mkdir()
     html, md = scanner.run_weekly(pd.DataFrame(columns=scanner.PAPER_COLUMNS), {}, flat(5), cfg, FRI_EVE)
     assert "No signals in the window yet." in md and "No signals this week." in md
-    assert "img.shields.io" not in md                    # job-summary version has no button row
+    assert "img.shields.io" not in md  # job-summary version has no button row
     assert "img.shields.io" in (scanner.REPORT_DIR / "weekly_latest.md").read_text()
 
 
 # --------------------------------------------------------------------------- score components / score log
 
+
 def _scenario(vol=1000, close=100, items=(), mcap=None):
     h = flat(70)
     h.iloc[-1] = (100, max(100, close), min(100, close), close, vol)
-    return (scanner.price_metrics(h, CFG_FOR_SCENARIOS), scanner.news_metrics(list(items), NOW, CFG_FOR_SCENARIOS), mcap)
+    return (
+        scanner.price_metrics(h, CFG_FOR_SCENARIOS),
+        scanner.news_metrics(list(items), NOW, CFG_FOR_SCENARIOS),
+        mcap,
+    )
 
 
 CFG_FOR_SCENARIOS = scanner.load_config(scanner.ROOT / "config.yaml")
 
 
-@pytest.mark.parametrize("kw,expected", [
-    ({}, {}),
-    ({"vol": 3500}, {"volume": 1}),
-    ({"vol": 6000, "close": 112, "mcap": 1e9}, {"volume": 2, "price": 1, "small_cap": 1}),
-    ({"mcap": 1e9}, {}),                                                   # small cap alone: nothing
-    ({"items": [news("Cision News", 2), news("di.se", 3), news("EFN", 5)], "mcap": 1e9},
-     {"release": 2, "news": 1, "small_cap": 1}),
-    ({"close": 85, "mcap": 9e9}, {"price": 1}),                            # big cap: no small-cap point
-])
+@pytest.mark.parametrize(
+    "kw,expected",
+    [
+        ({}, {}),
+        ({"vol": 3500}, {"volume": 1}),
+        ({"vol": 6000, "close": 112, "mcap": 1e9}, {"volume": 2, "price": 1, "small_cap": 1}),
+        ({"mcap": 1e9}, {}),  # small cap alone: nothing
+        (
+            {"items": [news("Cision News", 2), news("di.se", 3), news("EFN", 5)], "mcap": 1e9},
+            {"release": 2, "news": 1, "small_cap": 1},
+        ),
+        ({"close": 85, "mcap": 9e9}, {"price": 1}),  # big cap: no small-cap point
+    ],
+)
 def test_score_breakdown_components_sum_to_score(cfg, kw, expected):
     pm, nm, mcap = _scenario(**kw)
     pts, reasons, hype = scanner.score_breakdown(pm, nm, mcap, cfg)
@@ -996,20 +1119,26 @@ def test_main_logs_every_stock_with_components(cfg, tmp_paths, monkeypatch):
     log = pd.read_csv(scanner.SCORES_LOG, dtype=str).fillna("").set_index("ticker")
     assert list(log.index) == ["HOT.ST", "QUIET.ST", "GONE.ST"]
     h = log.loc["HOT.ST"]
-    assert (h["score"], h["pts_volume"], h["pts_price"], h["pts_small_cap"], h["pts_release"], h["pts_news"]) == \
-        ("4", "2", "1", "1", "0", "0")
+    assert (h["score"], h["pts_volume"], h["pts_price"], h["pts_small_cap"], h["pts_release"], h["pts_news"]) == (
+        "4",
+        "2",
+        "1",
+        "1",
+        "0",
+        "0",
+    )
     assert (h["status"], h["market_cap_msek"], h["universe"], h["news_24h"]) == ("ok", "1500", "auto-test", "0")
     q = log.loc["QUIET.ST"]
-    assert (q["score"], q["pts_small_cap"], q["reasons"]) == ("0", "0", "")    # logged although quiet
+    assert (q["score"], q["pts_small_cap"], q["reasons"]) == ("0", "0", "")  # logged although quiet
     g = log.loc["GONE.ST"]
     assert (g["status"], g["score"], g["name"]) == ("no price data", "", "Gone")
     sig = pd.read_csv(scanner.SIGNALS_LOG)
-    assert list(sig["ticker"]) == ["HOT.ST"]                                     # signals log unchanged
+    assert list(sig["ticker"]) == ["HOT.ST"]  # signals log unchanged
 
     scanner.main(["--no-email", "--no-news", "--watchlist", str(wl)])
     log = pd.read_csv(scanner.SCORES_LOG, dtype=str).fillna("")
     assert len(log) == 6 and log["run_utc"].nunique() >= 1
-    assert log.iloc[3]["news_24h"] == "" and log.iloc[3]["releases_24h"] == ""   # news not checked
+    assert log.iloc[3]["news_24h"] == "" and log.iloc[3]["releases_24h"] == ""  # news not checked
 
 
 def test_append_csv_rewrites_when_columns_change(tmp_path):
@@ -1028,12 +1157,13 @@ def test_stale_bar_is_skipped_not_backdated(cfg, tmp_paths, monkeypatch):
     wl = tmp_paths / "watchlist.csv"
     wl.write_text("ticker,name,query\nHOT.ST,Hot,Hot\nOK.ST,Ok,Ok\n")
     hot = flat(70)
-    hot.iloc[-1] = (100, 112, 100, 111, 6000)                     # would score 4 (with small cap)
+    hot.iloc[-1] = (100, 112, 100, 111, 6000)  # would score 4 (with small cap)
     last = hot.index[-1].date().isoformat()
     later = (hot.index[-1] + pd.offsets.BDay(1)).date().isoformat()
     scanner.DATA_DIR.mkdir()
-    scanner.SCORES_LOG.write_text("run_utc,bar_date,ticker,status\n"
-                                  f"x,{later},HOT.ST,ok\nx,{last},OK.ST,ok\nx,{later},OK.ST,no price data\n")
+    scanner.SCORES_LOG.write_text(
+        f"run_utc,bar_date,ticker,status\nx,{later},HOT.ST,ok\nx,{last},OK.ST,ok\nx,{later},OK.ST,no price data\n"
+    )
     monkeypatch.setattr(scanner, "fetch_history", lambda t, p: hot if t == "HOT.ST" else flat(70))
     monkeypatch.setattr(scanner, "fetch_news", lambda q, c: [])
     monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: 1e9)
@@ -1045,16 +1175,18 @@ def test_stale_bar_is_skipped_not_backdated(cfg, tmp_paths, monkeypatch):
     log = pd.read_csv(scanner.SCORES_LOG, dtype=str).fillna("")
     new = log[log["run_utc"] != "x"].set_index("ticker")
     assert new.loc["HOT.ST", "status"] == "stale price data"
-    assert new.loc["OK.ST", "status"] == "ok"                    # same date as before is fine
+    assert new.loc["OK.ST", "status"] == "ok"  # same date as before is fine
     assert "HOT.ST (stale)" in scanner.DASHBOARD.read_text()
 
 
-@pytest.mark.parametrize("local_hm,uses_today", [((12, 45), False), ((17, 59), False), ((18, 0), True), ((8, 7), False)])
+@pytest.mark.parametrize(
+    "local_hm,uses_today", [((12, 45), False), ((17, 59), False), ((18, 0), True), ((8, 7), False)]
+)
 def test_todays_forming_bar_is_ignored_before_cutoff(cfg, tmp_paths, monkeypatch, local_hm, uses_today):
     today = dt.date(2026, 10, 7)
     idx = pd.bdate_range(end=today, periods=70)
     h = pd.DataFrame([(100, 100, 100, 100, 1000)] * 70, index=idx, columns=["Open", "High", "Low", "Close", "Volume"])
-    h.iloc[-1] = (100, 112, 100, 111, 6000)                     # today's (forming) bar would score 4
+    h.iloc[-1] = (100, 112, 100, 111, 6000)  # today's (forming) bar would score 4
     wl = tmp_paths / "watchlist.csv"
     wl.write_text("ticker,name,query\nX.ST,X,X\n")
     monkeypatch.setattr(scanner, "fetch_history", lambda t, p: h)
@@ -1062,7 +1194,7 @@ def test_todays_forming_bar_is_ignored_before_cutoff(cfg, tmp_paths, monkeypatch
     monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: 1e9)
     monkeypatch.setattr(scanner.time, "sleep", lambda s: None)
     local = dt.datetime(2026, 10, 7, *local_hm, tzinfo=dt.timezone(dt.timedelta(hours=2)))
-    monkeypatch.setattr(scanner, "_now", lambda: local.astimezone(dt.timezone.utc))
+    monkeypatch.setattr(scanner, "_now", lambda: local.astimezone(dt.UTC))
     scanner.main(["--no-email", "--watchlist", str(wl)])
     log = pd.read_csv(scanner.SCORES_LOG, dtype=str).iloc[0]
     assert (log["bar_date"] == "2026-10-07") is uses_today
@@ -1083,9 +1215,13 @@ def test_completed_bars_keeps_entry_day_open_for_pending_trades(cfg):
 
 # --------------------------------------------------------------------------- direction split (scanner)
 
+
 def test_new_trade_records_signal_move(cfg):
-    p = scanner.add_paper_signals(pd.DataFrame(columns=scanner.PAPER_COLUMNS),
-                                  [{"ticker": "E.ST", "name": "E", "date": "2026-10-06", "score": 4, "chg_1d": -0.1117}], cfg)
+    p = scanner.add_paper_signals(
+        pd.DataFrame(columns=scanner.PAPER_COLUMNS),
+        [{"ticker": "E.ST", "name": "E", "date": "2026-10-06", "score": 4, "chg_1d": -0.1117}],
+        cfg,
+    )
     assert p.iloc[0]["signal_move"] == "-0.1117"
 
 
@@ -1093,18 +1229,28 @@ def test_backfill_signal_moves_from_logs_then_history(tmp_paths):
     scanner.DATA_DIR.mkdir()
     scanner.SIGNALS_LOG.write_text("run_utc,bar_date,ticker,name,score,chg_1d\nx,2026-10-06,A.ST,A,4,-0.1117\n")
     scanner.SCORES_LOG.write_text("run_utc,bar_date,ticker,status,chg_1d\nx,2026-10-06,B.ST,ok,0.1049\n")
-    trades = [pending_trade("A.ST", "2026-10-06"), pending_trade("B.ST", "2026-10-06"),
-              pending_trade("C.ST", "2026-06-02"), pending_trade("D.ST", "2026-06-02")]
+    trades = [
+        pending_trade("A.ST", "2026-10-06"),
+        pending_trade("B.ST", "2026-10-06"),
+        pending_trade("C.ST", "2026-06-02"),
+        pending_trade("D.ST", "2026-06-02"),
+    ]
     paper = pd.concat(trades, ignore_index=True)
-    paper.loc[3, "signal_move"] = "0.0500"                             # already known: untouched
-    hist = bars([(100, 100, 100, 100, 1), (90, 90, 90, 90, 1)])        # C: -10% on 2026-06-02
+    paper.loc[3, "signal_move"] = "0.0500"  # already known: untouched
+    hist = bars([(100, 100, 100, 100, 1), (90, 90, 90, 90, 1)])  # C: -10% on 2026-06-02
     out = scanner.backfill_signal_moves(paper, {"C.ST": hist, "D.ST": hist})
     assert out["signal_move"].tolist() == ["-0.1117", "0.1049", "-0.1000", "0.0500"]
 
 
 def test_direction_rate_table(cfg):
-    o = pd.DataFrame({"score": [3, 4, 3], "move": ["-0.12", "0.15", "0.01"],
-                      "ret_5d": [0.10, -0.05, 0.02], "excess_5d": [0.08, -0.06, -0.01]})
+    o = pd.DataFrame(
+        {
+            "score": [3, 4, 3],
+            "move": ["-0.12", "0.15", "0.01"],
+            "ret_5d": [0.10, -0.05, 0.02],
+            "excess_5d": [0.08, -0.06, -0.01],
+        }
+    )
     t = {r["score"]: r for r in scanner.direction_rate_table(o, [5], 0.10)}
     assert list(t) == ["▼ Drop", "▲ Jump", "– No big move"]
     assert (t["▼ Drop"]["hit_5d"], t["▲ Jump"]["hit_5d"], t["– No big move"]["signals"]) == (100.0, 0.0, 1)
@@ -1120,9 +1266,22 @@ def test_paper_page_shows_signal_day_and_split(cfg):
 
 
 def test_weekly_page_has_direction_split(cfg):
-    o = pd.DataFrame({"ticker": ["A"], "name": ["A"], "bar_date": ["2026-09-01"], "score": [4], "reasons": [""],
-                      "move": ["-0.12"], "ret_1d": [0.01], "excess_1d": [0.01], "ret_5d": [0.02],
-                      "excess_5d": [0.02], "ret_20d": [None], "excess_20d": [None]})
+    o = pd.DataFrame(
+        {
+            "ticker": ["A"],
+            "name": ["A"],
+            "bar_date": ["2026-09-01"],
+            "score": [4],
+            "reasons": [""],
+            "move": ["-0.12"],
+            "ret_1d": [0.01],
+            "excess_1d": [0.01],
+            "ret_5d": [0.02],
+            "excess_5d": [0.02],
+            "ret_20d": [None],
+            "excess_20d": [None],
+        }
+    )
     table = scanner.hit_rate_table(o, [1, 5, 20], 5)
     wp = scanner.weekly_paper(pd.DataFrame(columns=scanner.PAPER_COLUMNS), dt.date(2026, 10, 5), 10000)
     md = scanner.build_weekly_md(o, table, wp, cfg, FRI_EVE)
@@ -1132,24 +1291,73 @@ def test_weekly_page_has_direction_split(cfg):
 
 # --------------------------------------------------------------------------- fund watch on the dashboard
 
+
 def _fund_summary(run_utc="2026-10-07T05:13+00:00", flagged=2, high=1, single=False):
-    top = [{"score": 6, "severity": "HIGH", "title": "TSMC | halts production", "link": "https://x.test/a",
-            "source": "Reuters", "entities": ["TSMC"], "categories": ["infrastructure"],
-            "similar": 3, "similar_sources": "Bloomberg, Nikkei Asia, Focus Taiwan", "direction": "negative"},
-           {"score": 3, "severity": "MEDIUM", "title": "Quanta revenue falls", "link": "https://x.test/b",
-            "source": "digitimes", "entities": ["Quanta Computer"], "categories": ["company_results"],
-            "status": "escalated", "first_seen": "2026-10-05T05:13+00:00"}][:flagged]
-    tw = {"n_flagged": flagged, "n_high": high, "n_watch": 4, "top": top, "n_developing": 2,
-          **({} if single else {"n_flagged_articles": flagged + (3 if flagged else 0)})}
-    if single:   # the format written before several funds
+    top = [
+        {
+            "score": 6,
+            "severity": "HIGH",
+            "title": "TSMC | halts production",
+            "link": "https://x.test/a",
+            "source": "Reuters",
+            "entities": ["TSMC"],
+            "categories": ["infrastructure"],
+            "similar": 3,
+            "similar_sources": "Bloomberg, Nikkei Asia, Focus Taiwan",
+            "direction": "negative",
+        },
+        {
+            "score": 3,
+            "severity": "MEDIUM",
+            "title": "Quanta revenue falls",
+            "link": "https://x.test/b",
+            "source": "digitimes",
+            "entities": ["Quanta Computer"],
+            "categories": ["company_results"],
+            "status": "escalated",
+            "first_seen": "2026-10-05T05:13+00:00",
+        },
+    ][:flagged]
+    tw = {
+        "n_flagged": flagged,
+        "n_high": high,
+        "n_watch": 4,
+        "top": top,
+        "n_developing": 2,
+        **({} if single else {"n_flagged_articles": flagged + (3 if flagged else 0)}),
+    }
+    if single:  # the format written before several funds
         return {"run_utc": run_utc, "run_local": "2026-10-07 07:13", "n_raw": 1300, **tw}
-    gl = {"id": "avanza_global", "short": "Global", "icon": "🌍", "name": "Avanza Global", "isin": "SE0011527613",
-          "n_flagged": 1, "n_high": 0, "n_watch": 9,
-          "top": [{"score": 4, "severity": "MEDIUM", "title": "Fed raises interest rates", "link": "https://x.test/c",
-                   "source": "Forbes", "entities": [], "categories": ["macro"]}]}
-    return {"run_utc": run_utc, "run_local": "2026-10-07 07:13", "n_raw": 1300,
-            "funds": [{"id": "jpm_taiwan", "short": "Taiwan", "icon": "🇹🇼", "name": "JPM Taiwan", **tw},
-                      gl if flagged else {**gl, "n_flagged": 0, "top": []}]}
+    gl = {
+        "id": "avanza_global",
+        "short": "Global",
+        "icon": "🌍",
+        "name": "Avanza Global",
+        "isin": "SE0011527613",
+        "n_flagged": 1,
+        "n_high": 0,
+        "n_watch": 9,
+        "top": [
+            {
+                "score": 4,
+                "severity": "MEDIUM",
+                "title": "Fed raises interest rates",
+                "link": "https://x.test/c",
+                "source": "Forbes",
+                "entities": [],
+                "categories": ["macro"],
+            }
+        ],
+    }
+    return {
+        "run_utc": run_utc,
+        "run_local": "2026-10-07 07:13",
+        "n_raw": 1300,
+        "funds": [
+            {"id": "jpm_taiwan", "short": "Taiwan", "icon": "🇹🇼", "name": "JPM Taiwan", **tw},
+            gl if flagged else {**gl, "n_flagged": 0, "top": []},
+        ],
+    }
 
 
 def _dash(cfg, now=dt.datetime(2026, 10, 7, 18, 52)):
@@ -1160,21 +1368,25 @@ def test_dashboard_fund_watch_section(cfg, tmp_paths, monkeypatch):
     monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
     scanner.FUND_SUMMARY.write_text(json.dumps(_fund_summary()))
     md = _dash(cfg)
-    glance_head = next(l for l in md.splitlines() if l.startswith("| 🔔"))
+    glance_head = next(line for line in md.splitlines() if line.startswith("| 🔔"))
     assert "| 🛡️ Fund watch |" in glance_head
-    assert "**3**<br><sub>flagged · 1 high</sub>" in md                            # summed over both funds
+    assert "**3**<br><sub>flagged · 1 high</sub>" in md  # summed over both funds
     sec = md.split("## 🛡️ Fund risk watch")[1].split("## More")[0]
     assert "Last run **Wed&nbsp;7&nbsp;Oct 07:13**" in sec and "1300 articles scanned" in sec
-    assert "| 🇹🇼 **Taiwan** | **2**<br><sub>5 articles</sub> | 1 | 2 | 4 |" in sec   # ... developing, watch
-    assert "| 🌍 **Global** | **1** | 0 | 0 | 9 |" in sec                           # no grouping: no article count
+    assert "| 🇹🇼 **Taiwan** | **2**<br><sub>5 articles</sub> | 1 | 2 | 4 |" in sec  # ... developing, watch
+    assert "| 🌍 **Global** | **1** | 0 | 0 | 9 |" in sec  # no grouping: no article count
     assert "⬆️ **escalated** · first seen Mon&nbsp;5&nbsp;Oct" in sec
     assert "➕ 3 similar: Bloomberg, Nikkei Asia, Focus Taiwan" in sec
     assert "**🇹🇼 Taiwan** · 1 high-severity" in sec and "**🌍 Global**" in sec
-    assert ("| 🔴&nbsp;HIGH | ▼&nbsp;negative | [TSMC \\| halts production](<https://x.test/a>)"
-            "<br><sub>➕ 3 similar: Bloomberg, Nikkei Asia, Focus Taiwan</sub> | TSMC |") in sec
-    assert "| 🟠&nbsp;MEDIUM | ·&nbsp;unclear | [Fed raises interest rates](<https://x.test/c>)" in sec   # older summary: no direction
+    assert (
+        "| 🔴&nbsp;HIGH | ▼&nbsp;negative | [TSMC \\| halts production](<https://x.test/a>)"
+        "<br><sub>➕ 3 similar: Bloomberg, Nikkei Asia, Focus Taiwan</sub> | TSMC |"
+    ) in sec
+    assert (
+        "| 🟠&nbsp;MEDIUM | ·&nbsp;unclear | [Fed raises interest rates](<https://x.test/c>)" in sec
+    )  # older summary: no direction
     assert "[Full fund watch →](fund-watch/reports/fund_watch_latest.md)" in sec
-    assert "last ran" not in sec                                                  # fresh: no stale warning
+    assert "last ran" not in sec  # fresh: no stale warning
 
 
 def test_dashboard_reads_old_single_fund_summary(cfg, tmp_paths, monkeypatch):
@@ -1218,14 +1430,15 @@ def test_pages_only_rebuilds_from_logs_without_fetching(cfg, tmp_paths, monkeypa
 
     def boom(*a, **k):
         raise AssertionError("pages-only must not fetch")
+
     for name in ("fetch_history", "fetch_news", "fetch_market_cap", "fetch_releases"):
         monkeypatch.setattr(scanner, name, boom)
     scanner.DASHBOARD.unlink()
     assert scanner.main(["--pages-only"]) == 0
     rebuilt = scanner.DASHBOARD.read_text()
-    assert {p: p.read_text() for p in scanner.DATA_DIR.iterdir()} == logs          # no log touched
+    assert {p: p.read_text() for p in scanner.DATA_DIR.iterdir()} == logs  # no log touched
     alerts = lambda md: md.split("## 🔔 Today's alerts")[1].split("## 💼")[0]
-    assert alerts(rebuilt) == alerts(full)                                          # same alert table
+    assert alerts(rebuilt) == alerts(full)  # same alert table
     assert "No price data for: GONE.ST" in rebuilt and "badge/Fund%20watch" in rebuilt
 
 
@@ -1236,11 +1449,31 @@ def test_pages_only_without_logs_fails_clearly(cfg, tmp_paths):
 
 # --------------------------------------------------------------------------- primary benchmark (Nasdaq)
 
-NASDAQ_PAYLOAD = {"data": {"CP": [
-    {"z": {"dateTime": "2026-10-06", "open": "1,230.10", "high": "1,240.00", "low": "1,225.00", "close": "1,238.50"}},
-    {"z": {"dateTime": "2026-10-07", "open": "1,242.15", "high": "1,245.00", "low": "1,230.00", "close": "1,235.22"}},
-    {"z": {"dateTime": "2026-10-08", "open": "-", "high": "", "low": None, "close": ""}},
-]}}
+NASDAQ_PAYLOAD = {
+    "data": {
+        "CP": [
+            {
+                "z": {
+                    "dateTime": "2026-10-06",
+                    "open": "1,230.10",
+                    "high": "1,240.00",
+                    "low": "1,225.00",
+                    "close": "1,238.50",
+                }
+            },
+            {
+                "z": {
+                    "dateTime": "2026-10-07",
+                    "open": "1,242.15",
+                    "high": "1,245.00",
+                    "low": "1,230.00",
+                    "close": "1,235.22",
+                }
+            },
+            {"z": {"dateTime": "2026-10-08", "open": "-", "high": "", "low": None, "close": ""}},
+        ]
+    }
+}
 
 
 def test_parse_nasdaq_chart_handles_comma_numbers_and_blank_rows():
@@ -1255,9 +1488,14 @@ def test_fetch_history_routes_nasdaq_symbols(monkeypatch):
     seen = {}
 
     class Resp:
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
-        def read(self): return json.dumps(NASDAQ_PAYLOAD).encode()
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps(NASDAQ_PAYLOAD).encode()
 
     def fake_urlopen(req, timeout):
         seen["url"] = req.full_url
@@ -1273,6 +1511,7 @@ def test_fetch_history_routes_nasdaq_symbols(monkeypatch):
 def test_fetch_nasdaq_index_failure_warns_and_returns_empty(monkeypatch, capsys):
     def boom(*a, **k):
         raise OSError("down")
+
     monkeypatch.setattr(scanner.urllib.request, "urlopen", boom)
     assert scanner.fetch_nasdaq_index("IX3364", "6mo", today=dt.date(2026, 10, 7)).empty
     assert "Nasdaq index fetch failed" in capsys.readouterr().err
@@ -1286,16 +1525,20 @@ def test_bench_symbol_primary_and_secondary(cfg):
 
 # --------------------------------------------------------------------------- strategies in the paper book
 
-OLD_PAPER_HEADER = ("id,ticker,name,signal_date,score,status,entry_date,entry_price,bench_entry,exit_date,"
-                    "exit_price,exit_reason,bench_exit,last_price,return_pct,bench_return_pct,universe,pe_status,"
-                    "pe_partial_date,pe_partial_price,pe_exit_date,pe_exit_price,pe_exit_reason,pe_return_pct,"
-                    "pe_bench_return_pct,signal_move")
+OLD_PAPER_HEADER = (
+    "id,ticker,name,signal_date,score,status,entry_date,entry_price,bench_entry,exit_date,"
+    "exit_price,exit_reason,bench_exit,last_price,return_pct,bench_return_pct,universe,pe_status,"
+    "pe_partial_date,pe_partial_price,pe_exit_date,pe_exit_price,pe_exit_reason,pe_return_pct,"
+    "pe_bench_return_pct,signal_move"
+)
 
 
 def test_paper_migration_marks_existing_rows_v0(tmp_paths):
     scanner.DATA_DIR.mkdir()
-    scanner.PAPER_LOG.write_text(OLD_PAPER_HEADER + "\nELTEL.ST-2026-10-06,ELTEL.ST,Eltel,2026-10-06,4,open,"
-                                 "2026-10-07,18.0000,2500,,,,,18.0000,0.00,,v2,open,,,,,,0.00,,-0.1200\n")
+    scanner.PAPER_LOG.write_text(
+        OLD_PAPER_HEADER + "\nELTEL.ST-2026-10-06,ELTEL.ST,Eltel,2026-10-06,4,open,"
+        "2026-10-07,18.0000,2500,,,,,18.0000,0.00,,v2,open,,,,,,0.00,,-0.1200\n"
+    )
     p = scanner.load_paper()
     assert list(p.columns) == scanner.PAPER_COLUMNS
     assert p.iloc[0]["strategy"] == "v0" and p.iloc[0]["id"] == "ELTEL.ST-2026-10-06"
@@ -1304,8 +1547,16 @@ def test_paper_migration_marks_existing_rows_v0(tmp_paths):
 
 
 def strat_row(ticker="X.ST", score=4, v0b=4, v1=5, block=False):
-    return {"ticker": ticker, "name": ticker, "date": "2026-10-08", "score": score, "chg_1d": 0.05,
-            "score_v0b": v0b, "score_v1": v1, "block_buy": block}
+    return {
+        "ticker": ticker,
+        "name": ticker,
+        "date": "2026-10-08",
+        "score": score,
+        "chg_1d": 0.05,
+        "score_v0b": v0b,
+        "score_v1": v1,
+        "block_buy": block,
+    }
 
 
 def test_three_books_are_independent_and_v1_blocks(cfg, tmp_paths):
@@ -1324,8 +1575,9 @@ def test_three_books_are_independent_and_v1_blocks(cfg, tmp_paths):
 
 
 def test_primary_benchmark_return_on_trades(cfg):
-    p = scanner.update_paper(pending_trade("O.ST"), {"O.ST": flat(3)}, flat(3, px=1000), cfg,
-                             bench_primary=flat(3, px=500))
+    p = scanner.update_paper(
+        pending_trade("O.ST"), {"O.ST": flat(3)}, flat(3, px=1000), cfg, bench_primary=flat(3, px=500)
+    )
     r = p.iloc[0]
     assert r["status"] == "open" and r["bench_primary_entry"] == "500.0000"
     assert r["bench_primary_return_pct"] == "0.00"
@@ -1344,15 +1596,17 @@ def with_llm(cfg):
 
 
 def test_main_end_to_end_llm_blocks_v1_but_not_v0b(cfg, tmp_paths, monkeypatch):
-    import llm_score as ls
     from types import SimpleNamespace
+
+    import llm_score as ls
+
     real_load = scanner.load_config
     monkeypatch.setattr(scanner, "load_config", lambda p: with_llm(real_load(p)))
     wl = tmp_paths / "watchlist.csv"
     wl.write_text("ticker,name,query,mfn_slug\nX.ST,X,X,x\n")
     start = pd.bdate_range(end="2026-10-08", periods=70)[0]
     h = flat(70, start=start)
-    h.iloc[-1] = (100, 101, 85, 88, 6000)               # -12%, 6x volume, small cap
+    h.iloc[-1] = (100, 101, 85, 88, 6000)  # -12%, 6x volume, small cap
     data = {"X.ST": h, "^OMX": flat(70, px=1000, start=start), "nasdaq:IX3364": flat(70, px=500, start=start)}
     monkeypatch.setattr(scanner, "fetch_history", lambda t, p: data[t])
     monkeypatch.setattr(scanner, "fetch_news", lambda q, c: [])
@@ -1360,8 +1614,14 @@ def test_main_end_to_end_llm_blocks_v1_but_not_v0b(cfg, tmp_paths, monkeypatch):
     monkeypatch.setattr(scanner.time, "sleep", lambda s: None)
     monkeypatch.setattr(scanner.ns, "fetch_mfn_xml", lambda s, n: BLOCK_XML)
     monkeypatch.setattr(scanner, "_now", lambda: dt.datetime(2026, 10, 8, 16, 52, tzinfo=UTC))
-    answer = {"event_type": "guidance", "direction": -2, "surprise": 3, "material": True,
-              "confidence": 0.9, "rationale": "Profit warning well below expectations."}
+    answer = {
+        "event_type": "guidance",
+        "direction": -2,
+        "surprise": 3,
+        "material": True,
+        "confidence": 0.9,
+        "rationale": "Profit warning well below expectations.",
+    }
     calls = []
 
     class Client:
@@ -1369,8 +1629,12 @@ def test_main_end_to_end_llm_blocks_v1_but_not_v0b(cfg, tmp_paths, monkeypatch):
             @staticmethod
             def create(**kw):
                 calls.append(kw)
-                return SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text=json.dumps(answer))],
-                                       usage=SimpleNamespace(input_tokens=900, output_tokens=60))
+                return SimpleNamespace(
+                    stop_reason="end_turn",
+                    content=[SimpleNamespace(type="text", text=json.dumps(answer))],
+                    usage=SimpleNamespace(input_tokens=900, output_tokens=60),
+                )
+
     monkeypatch.setattr(ls, "make_client", lambda: Client)
 
     scanner.main(["--no-email", "--watchlist", str(wl)])
@@ -1397,12 +1661,18 @@ def test_main_end_to_end_llm_blocks_v1_but_not_v0b(cfg, tmp_paths, monkeypatch):
 
 
 def test_parse_spreads():
-    payload = {"data": {"instrumentListing": {"rows": [
-        {"symbol": "4C", "bidPrice": "6.61", "askPrice": "6.72"},
-        {"symbol": "SAAB B", "bidPrice": "1,000.00", "askPrice": "1,001.00"},
-        {"symbol": "NOBID", "bidPrice": "", "askPrice": "3.00"},
-        {"symbol": "CROSSED", "bidPrice": "5.00", "askPrice": "4.00"},
-    ]}}}
+    payload = {
+        "data": {
+            "instrumentListing": {
+                "rows": [
+                    {"symbol": "4C", "bidPrice": "6.61", "askPrice": "6.72"},
+                    {"symbol": "SAAB B", "bidPrice": "1,000.00", "askPrice": "1,001.00"},
+                    {"symbol": "NOBID", "bidPrice": "", "askPrice": "3.00"},
+                    {"symbol": "CROSSED", "bidPrice": "5.00", "askPrice": "4.00"},
+                ]
+            }
+        }
+    }
     sp = scanner.parse_spreads(payload)
     assert set(sp) == {"4C.ST", "SAAB-B.ST"}
     assert sp["4C.ST"] == pytest.approx(0.11 / 6.665 * 100)
@@ -1410,8 +1680,9 @@ def test_parse_spreads():
 
 
 def test_spread_recorded_on_new_trades(cfg, tmp_paths):
-    paper = scanner.add_paper_signals(scanner.load_paper().iloc[0:0], [{**strat_row("A.ST"), "spread_pct": 1.6667}],
-                                      cfg, "v2", strategy="v0b")
+    paper = scanner.add_paper_signals(
+        scanner.load_paper().iloc[0:0], [{**strat_row("A.ST"), "spread_pct": 1.6667}], cfg, "v2", strategy="v0b"
+    )
     assert paper.iloc[0]["spread_pct"] == "1.667"
     paper = scanner.add_paper_signals(paper, [strat_row("B.ST")], cfg, "v2", strategy="v0b")
     assert paper.iloc[1]["spread_pct"] == ""
@@ -1419,17 +1690,23 @@ def test_spread_recorded_on_new_trades(cfg, tmp_paths):
 
 def test_llm_failure_becomes_a_report_warning(cfg, tmp_paths, monkeypatch):
     scanner.DATA_DIR.mkdir()
+
     def boom(*a, **k):
         raise scanner.ls.PromptChanged("prompt v1 changed after it was used live")
+
     monkeypatch.setattr(scanner.ls, "run", boom)
     rel = scanner.ns.load_releases(scanner.RELEASES_LOG)
     rel.loc[0] = ["r", "X.ST", "mfn", "primary", "2026-10-09T07:00:00Z", "t", "u", "sv", "", ""]
     warnings = []
-    scores, new = scanner.score_releases(rel, pd.DataFrame({"ticker": ["X.ST"], "name": ["X"]}), with_llm(cfg), warnings)
+    scores, new = scanner.score_releases(
+        rel, pd.DataFrame({"ticker": ["X.ST"], "name": ["X"]}), with_llm(cfg), warnings
+    )
     assert new == [] and warnings == ["LLM scoring failed: prompt v1 changed after it was used live"]
     html = scanner.build_llm_html([], [], rel, None, warnings, with_llm(cfg))
     assert "LLM scoring failed" in html and "class=warn" in html
-    md = scanner.build_evaluation_md(scanner.ev.evaluate(None), None, cfg, NOW, {"strategies": {}, "events": scanner.ev.event_study(None)}, warnings)
+    md = scanner.build_evaluation_md(
+        scanner.ev.evaluate(None), None, cfg, NOW, {"strategies": {}, "events": scanner.ev.event_study(None)}, warnings
+    )
     assert "[!WARNING]" in md and "LLM scoring failed" in md
 
 
@@ -1437,8 +1714,10 @@ def test_llm_off_by_default_makes_no_api_call(cfg, tmp_paths, monkeypatch):
     """The default config is the free setup: no client is ever created, even with a key set."""
     assert cfg["llm"]["enabled"] is False
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-not-a-real-key")
+
     def no_client():
         raise AssertionError("LLM client created while llm.enabled is false")
+
     monkeypatch.setattr(scanner.ls, "make_client", no_client)
     scanner.DATA_DIR.mkdir()
     rel = scanner.ns.load_releases(scanner.RELEASES_LOG)
@@ -1451,35 +1730,52 @@ def test_llm_off_by_default_makes_no_api_call(cfg, tmp_paths, monkeypatch):
 
 
 def test_fill_entries_at_open_during_session_then_evening_run_matches(cfg):
-    signal = flat(3)                                             # signal on the last complete bar
+    signal = flat(3)  # signal on the last complete bar
     today = pd.bdate_range(signal.index[-1] + pd.Timedelta(days=1), periods=1)
     forming = pd.concat([signal, pd.DataFrame([(104, 105, 80, 81, 500)], index=today, columns=signal.columns)])
-    bench_forming = pd.concat([flat(3, px=1000), pd.DataFrame([(1010, 1010, 1000, 1005, 0)], index=today,
-                                                              columns=signal.columns)])
+    bench_forming = pd.concat(
+        [flat(3, px=1000), pd.DataFrame([(1010, 1010, 1000, 1005, 0)], index=today, columns=signal.columns)]
+    )
     p = pending_trade("X.ST", signal.index[-1].date().isoformat())
     # midday: update on complete bars (nothing to do), then fill at today's open
     p = scanner.update_paper(p, {"X.ST": signal}, flat(3, px=1000), cfg)
     p = scanner.fill_entries_at_open(p, {"X.ST": forming}, bench_forming, bench_forming)
     r = p.iloc[0]
-    assert (r["status"], r["entry_price"], r["bench_entry"], r["bench_primary_entry"]) == ("open", "104.0000", "1010.0000", "1010.0000")
-    assert r["exit_date"] == "" and r["bench_primary_return_pct"] == ""   # today's low (80) not used yet
+    assert (r["status"], r["entry_price"], r["bench_entry"], r["bench_primary_entry"]) == (
+        "open",
+        "104.0000",
+        "1010.0000",
+        "1010.0000",
+    )
+    assert r["exit_date"] == "" and r["bench_primary_return_pct"] == ""  # today's low (80) not used yet
     # another midday run keeps it open and untouched
     again = scanner.update_paper(p.copy(), {"X.ST": signal}, flat(3, px=1000), cfg, flat(3, px=1000))
     assert again.iloc[0]["status"] == "open" and again.iloc[0]["exit_date"] == ""
     # evening: the complete bar arrives; same result as a trade filled only in the evening
     evening = scanner.update_paper(p.copy(), {"X.ST": forming}, bench_forming, cfg, bench_forming)
-    direct = scanner.update_paper(pending_trade("X.ST", signal.index[-1].date().isoformat()),
-                                  {"X.ST": forming}, bench_forming, cfg, bench_forming)
-    cols = ["status", "entry_date", "entry_price", "exit_price", "exit_reason", "return_pct", "bench_entry",
-            "bench_return_pct", "bench_primary_return_pct"]
+    direct = scanner.update_paper(
+        pending_trade("X.ST", signal.index[-1].date().isoformat()), {"X.ST": forming}, bench_forming, cfg, bench_forming
+    )
+    cols = [
+        "status",
+        "entry_date",
+        "entry_price",
+        "exit_price",
+        "exit_reason",
+        "return_pct",
+        "bench_entry",
+        "bench_return_pct",
+        "bench_primary_return_pct",
+    ]
     assert list(evening.iloc[0][cols]) == list(direct.iloc[0][cols])
     assert evening.iloc[0]["exit_reason"] == "stop"
 
 
 def test_fill_entries_skips_without_todays_bar(cfg):
     signal = flat(3)
-    p = scanner.fill_entries_at_open(pending_trade("X.ST", signal.index[-1].date().isoformat()),
-                                     {"X.ST": signal}, flat(3, px=1000))
+    p = scanner.fill_entries_at_open(
+        pending_trade("X.ST", signal.index[-1].date().isoformat()), {"X.ST": signal}, flat(3, px=1000)
+    )
     assert p.iloc[0]["status"] == "pending"
 
 
@@ -1512,37 +1808,62 @@ def test_evening_runs_refresh_weekly_page_but_only_friday_sends(cfg, tmp_paths, 
     monkeypatch.setattr(scanner, "_now", lambda: dt.datetime(2026, 10, 9, 16, 52, tzinfo=UTC))
     scanner.main(["--watchlist", str(wl)])
     assert any(s.startswith("Scanner weekly") for s in sent)
-    assert len(pd.read_csv(scanner.WEEKLY_LOG, dtype=str)) == 1          # one row per week
+    assert len(pd.read_csv(scanner.WEEKLY_LOG, dtype=str)) == 1  # one row per week
 
 
 # --------------------------------------------------------------------------- Yahoo gaps repaired from Nasdaq
+
 
 def _yahoo(rows):
     idx = pd.DatetimeIndex(["2026-10-06", "2026-10-07", "2026-10-08"]).tz_localize("Europe/Stockholm")
     return pd.DataFrame(rows, index=idx, columns=["Open", "High", "Low", "Close", "Volume"])
 
 
-NQ_SHARE = {"data": {"CP": [
-    {"z": {"dateTime": "2026-10-08", "open": "98.00", "high": "101.00", "low": "96.80", "close": "99.80",
-           "volume": "205,140"}}]}}
+NQ_SHARE = {
+    "data": {
+        "CP": [
+            {
+                "z": {
+                    "dateTime": "2026-10-08",
+                    "open": "98.00",
+                    "high": "101.00",
+                    "low": "96.80",
+                    "close": "99.80",
+                    "volume": "205,140",
+                }
+            }
+        ]
+    }
+}
 
 
 def test_missing_yahoo_close_is_filled_from_nasdaq(monkeypatch, capsys):
-    y = _yahoo([(113.4, 115, 110.6, 111.8, 57007), (105.2, 105.4, 95.8, 97.8, 772515),
-                (98.0, 101.0, 96.8, float("nan"), 202928)])
+    y = _yahoo(
+        [
+            (113.4, 115, 110.6, 111.8, 57007),
+            (105.2, 105.4, 95.8, 97.8, 772515),
+            (98.0, 101.0, 96.8, float("nan"), 202928),
+        ]
+    )
     monkeypatch.setattr(scanner.yf, "Ticker", lambda t: type("T", (), {"history": lambda self, **k: y})())
     monkeypatch.setattr(scanner, "NASDAQ_SHARE_IDS", {"CHEF.ST": "TX3775430"})
     urls = []
 
     class Resp:
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
-        def read(self): return json.dumps(NQ_SHARE).encode()
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps(NQ_SHARE).encode()
+
     monkeypatch.setattr(scanner.urllib.request, "urlopen", lambda req, timeout: urls.append(req.full_url) or Resp())
     h = scanner.fetch_history("CHEF.ST", "6mo")
     assert h.index[-1] == pd.Timestamp("2026-10-08")
     assert (h.iloc[-1]["Close"], h.iloc[-1]["Volume"]) == (99.8, 205140)
-    assert h.iloc[-2]["Close"] == 97.8                                   # Yahoo rows untouched
+    assert h.iloc[-2]["Close"] == 97.8  # Yahoo rows untouched
     assert "assetClass=SHARES" in urls[0] and "TX3775430" in urls[0] and "fromDate=2026-10-08" in urls[0]
     assert "filled 1 missing Yahoo close" in capsys.readouterr().out
 
@@ -1553,14 +1874,21 @@ def test_missing_close_without_nasdaq_is_dropped_as_before(monkeypatch, capsys):
     monkeypatch.setattr(scanner, "NASDAQ_SHARE_IDS", {})
     assert scanner.fetch_history("X.ST", "6mo").index[-1] == pd.Timestamp("2026-10-07")
     monkeypatch.setattr(scanner, "NASDAQ_SHARE_IDS", {"X.ST": "TX1"})
+
     def down(*a, **k):
         raise OSError("down")
+
     monkeypatch.setattr(scanner.urllib.request, "urlopen", down)
     assert scanner.fetch_history("X.ST", "6mo").index[-1] == pd.Timestamp("2026-10-07")
     assert "Nasdaq couldn't fill it" in capsys.readouterr().err
 
 
 def test_parse_share_ids():
-    payload = {"data": {"instrumentListing": {"rows": [{"symbol": "SAAB B", "orderbookId": "SSE1"},
-                                                       {"symbol": "X", "orderbookId": ""}]}}}
+    payload = {
+        "data": {
+            "instrumentListing": {
+                "rows": [{"symbol": "SAAB B", "orderbookId": "SSE1"}, {"symbol": "X", "orderbookId": ""}]
+            }
+        }
+    }
     assert scanner.parse_share_ids(payload) == {"SAAB-B.ST": "SSE1"}
