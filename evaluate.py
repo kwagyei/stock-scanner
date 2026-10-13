@@ -702,7 +702,10 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--file", default=str(PAPER_LOG))
     ap.add_argument(
-        "--cost", type=float, default=d["cost_pct"], help=f"round-trip cost in percent (default {d['cost_pct']})"
+        "--cost",
+        type=float,
+        default=None,
+        help=f"one round-trip cost in percent for every trade (default: costs.* per trade, about {d['cost_pct']})",
     )
     ap.add_argument(
         "--stake",
@@ -730,7 +733,8 @@ def main(argv=None) -> int:
     )
     ap.add_argument("--events", default=str(EVENTS_LOG))
     args = ap.parse_args(argv)
-    costs = None if "--cost" in (argv if argv is not None else sys.argv) else d["costs"]
+    costs = None if args.cost is not None else d["costs"]  # --cost: one flat cost instead of per-trade costs
+    cost = args.cost if args.cost is not None else d["cost_pct"]
 
     if args.compare:
         paper = pd.read_csv(args.file, dtype=str).fillna("") if Path(args.file).exists() else None
@@ -752,7 +756,7 @@ def main(argv=None) -> int:
     trades = load_trades(Path(args.file), args.variant, args.strategy, costs)
     if trades is not None and args.direction:
         trades = trades[trades["move"].map(lambda m: direction(m, d["move_threshold"])) == args.direction]
-    res = evaluate(trades, args.cost, args.stake, args.min_trades, move_threshold=d["move_threshold"])
+    res = evaluate(trades, cost, args.stake, args.min_trades, move_threshold=d["move_threshold"])
     label = (
         ("partial-exit variant" if args.variant else "main rules")
         + (f", strategy {args.strategy}" if args.strategy != "v0" else "")
