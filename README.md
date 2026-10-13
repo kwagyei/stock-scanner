@@ -46,8 +46,15 @@ same days, after costs.
 ## Design decisions
 
 - **Forward paper trading, not a backtest.** Results build up slowly, but there is no
-  look-ahead and no survivorship bias, and the rules can't be quietly fitted to history.
-  The rules are fixed; changing them would reset the experiment.
+  survivorship bias and the rules can't be quietly fitted to history. The rules are fixed;
+  changing them would reset the experiment.
+- **No look-ahead, enforced by time.** A signal on day D buys at the next trading day's 09:00
+  open, so news and releases count for D only if they were published before that open (or
+  before the run, if it's earlier). A scan run during the next session can't credit D with
+  news it couldn't have traded on. A code review found that daytime runs used to; the fix
+  came with tests for runs before, during and after the session, weekends and holidays.
+  Trading days are inferred from the price data, so a day that vanishes from every series
+  is indistinguishable from a holiday (see the limitations).
 - **A verdict that is allowed to say "not yet".** PASS needs ≥ 30 closed trades, a positive
   average excess return after costs, still positive with the single best trade removed, and
   t > 2. Anything less is FAIL or NOT YET. Costs are 0.1% commission plus half the bid-ask
@@ -125,6 +132,10 @@ CI runs lint and tests on every push and pull request.
 - **Unofficial data sources.** Yahoo Finance, Google News RSS and Nasdaq Nordic's public
   endpoints are undocumented and can change without notice. Failures are logged and shown
   in the reports rather than swallowed, but a changed endpoint will need a code change.
+- **Holidays are inferred, not looked up.** There's no exchange calendar: a weekday with no
+  prices anywhere counts as a holiday. If Yahoo ever drops a trading day for every stock and
+  the index at once (a day with blank closes still counts as traded), the bar before it would
+  be scored with that day's news. The scan warns whenever it infers a holiday.
 - **Keyword matching.** News signals and the fund watch's risk and direction labels read
   words, not meaning: commentary ("Forget the selloff: …") and op-eds get mislabelled.
 - **One large module.** `scanner.py` (~2,800 lines) mixes fetching, scoring and report

@@ -95,25 +95,60 @@ def signal_bar_for(published_at, trading_days) -> pd.Timestamp | None:
     return days[i - 1] if i > 0 else None
 
 
-def releases_for_bar(
-    releases: pd.DataFrame, ticker: str, bar_date, now: dt.datetime, bar_complete_today: bool = True
-) -> pd.DataFrame:
-    """Primary releases for `ticker` that belong to signal bar `bar_date` (the latest bar in the
-    data). Releases from 09:00 on that day onwards count. A session that is running right now
-    (a weekday after the bar, past 09:00, before today's bar is complete) is not part of the
-    window: its releases belong to today's bar, scored at the evening run."""
+def as_of_for_bar(bar_date, now: dt.datetime, market_days, cutoff: dt.time = dt.time(18, 0)) -> pd.Timestamp:
+    """The moment a signal on `bar_date` becomes tradable: 09:00 Stockholm on the next trading
+    day, or `now` if that is earlier. News and releases count for the bar only if published
+    before it, so a run during the next session (or a late run still on an older bar) can't use
+    news that came out after the open the trade buys at.
+
+    The next trading day is the first weekday after the bar that has a bar in `market_days`
+    (dates in the price data) or hasn't finished yet (its bar isn't complete before `cutoff`).
+    A weekday that is over without any bar was a holiday and is skipped. With no market data at
+    all, every weekday counts as a trading day."""
+    now_l = _local(now)
+    days = set(pd.DatetimeIndex(list(market_days)).normalize()) if len(market_days) else set()
+    d = pd.Timestamp(bar_date).normalize()
+    for _ in range(10):  # never more than a few holidays in a row
+        d = d + pd.offsets.BDay(1)
+        over = now_l.date() > d.date() or (now_l.date() == d.date() and now_l.time() >= cutoff)
+        if not days or d in days or not over:
+            break
+    return min(now_l, open_at(d))
+
+
+def market_trading_days(series_days, benchmark_days=()) -> set:
+    """Dates the market traded, judged from the price data: a date the benchmark has, or one that
+    at least two series have (a row counts even if its close is missing). One stray row can't
+    turn a holiday into a trading day."""
+    from collections import Counter
+
+    counts = Counter(pd.Timestamp(d).normalize() for days in series_days for d in set(days))
+    bench = {pd.Timestamp(d).normalize() for d in benchmark_days}
+    return bench | {d for d, n in counts.items() if n >= 2}
+
+
+def inferred_holidays(market_days, now: dt.datetime, cutoff: dt.time = dt.time(18, 0), lookback_days: int = 7):
+    """Weekdays in the last `lookback_days` that are over but have no prices anywhere. as_of_for_bar
+    treats them as holidays; if one wasn't, the data for it is missing and the bar before it is
+    scored with that day's news (see the limitation in docs/OPERATIONS.md)."""
+    now_l = _local(now)
+    days = {pd.Timestamp(d).normalize() for d in market_days}
+    if not days:
+        return []
+    out = []
+    for d in pd.bdate_range(now_l.date() - dt.timedelta(days=lookback_days), now_l.date()):
+        over = now_l.date() > d.date() or (now_l.date() == d.date() and now_l.time() >= cutoff)
+        if over and d.normalize() not in days and d.normalize() > min(days):
+            out.append(d.normalize())
+    return out
+
+
+def releases_for_bar(releases: pd.DataFrame, ticker: str, bar_date, as_of) -> pd.DataFrame:
+    """Primary releases for `ticker` that belong to signal bar `bar_date`: published from 09:00
+    on that day up to `as_of` (as_of_for_bar: the next open, or now if earlier)."""
     if releases.empty:
         return releases
-    lo = open_at(bar_date)
-    now_l = _local(now)
-    hi = now_l
-    if (
-        now_l.date() > pd.Timestamp(bar_date).date()
-        and now_l.weekday() < 5
-        and now_l.time() >= OPEN
-        and not bar_complete_today
-    ):
-        hi = open_at(now_l.date())
+    lo, hi = open_at(bar_date), _local(as_of)
     r = releases[(releases["ticker"] == ticker) & (releases["source_type"] == "primary")]
     pub = pd.to_datetime(r["published_at"], utc=True).dt.tz_convert(STOCKHOLM)
     return r[(pub >= lo) & (pub < hi)]
@@ -168,11 +203,11 @@ def strategy_scores(
     releases: pd.DataFrame,
     scores: pd.DataFrame,
     cfg: dict,
-    now: dt.datetime,
-    bar_complete_today: bool = True,
+    as_of: dt.datetime,
 ) -> dict:
-    """score_v0 / score_v0b / score_v1, block_buy and the releases behind them, for one scanner row."""
-    bar = releases_for_bar(releases, row["ticker"], row["date"], now, bar_complete_today)
+    """score_v0 / score_v0b / score_v1, block_buy and the releases behind them, for one scanner row.
+    `as_of`: releases published from then on don't count (as_of_for_bar)."""
+    bar = releases_for_bar(releases, row["ticker"], row["date"], as_of)
     bar = bar[[not is_routine(t, cfg) for t in bar["title"]]] if not bar.empty else bar
     pts = row["points"]
     v0b = with_release_points(pts, RELEASE_POINTS_V0 if not bar.empty else 0, row.get("market_cap"), cfg)
