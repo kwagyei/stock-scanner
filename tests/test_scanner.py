@@ -2254,3 +2254,41 @@ def test_duplicate_index_dates_use_the_last_usable_value():
     )
     assert scanner._price_exact(b, "2026-10-08", "Open") == 1000.0
     assert scanner._price_exact(b, "2026-10-08", "Close") == 1002.0
+
+
+def test_paper_figures_agree_everywhere_and_add_up():
+    """Return covers every closed trade; the index figures cover only trades with an index price
+    (small caps, else OMXS30), and say so, so return - index = excess on the trades shown.
+    The dashboard summary and the weekly page use the same numbers."""
+    rows = []
+    for i, (ret, sec, prim) in enumerate([(10, "1", "2"), (4, "1", ""), (-6, "", "")]):
+        rec = {c: "" for c in scanner.PAPER_COLUMNS}
+        rec.update(
+            id=f"T{i}",
+            ticker=f"T{i}.ST",
+            status="closed",
+            exit_date="2026-10-09",
+            universe="v1",
+            return_pct=str(ret),
+            bench_return_pct=sec,
+            bench_primary_return_pct=prim,
+            signal_move="0",
+            pe_status="closed",
+            pe_exit_date="2026-10-09",
+            pe_return_pct=str(ret),
+            pe_bench_return_pct=sec,
+        )
+        rows.append(rec)
+    paper = pd.DataFrame(rows, columns=scanner.PAPER_COLUMNS)
+    s = scanner.weekly_paper(paper, dt.date(2026, 10, 5), 10000)["all"]
+    assert s["n"] == 3 and s["avg_return"] == pytest.approx((10 + 4 - 6) / 3)  # every trade
+    assert s["n_no_bench"] == 1
+    assert s["avg_bench"] == pytest.approx((2 + 1) / 2)  # small caps where known, else OMXS30
+    assert s["avg_return_indexed"] - s["avg_bench"] == pytest.approx(s["avg_excess"])  # adds up
+    assert "over 2 of 3 trades" in scanner._excess_cell(s)
+    assert "over the 2 of 3 trades with an index price, which averaged +7.0%" in scanner._index_text(s)
+    summary = scanner.paper_summary(paper)
+    assert (summary["n_closed"], summary["avg_bench"], summary["n_no_bench"]) == (3, s["avg_bench"], 1)
+    # the partial-exit variant has OMXS30 only: its figure isn't taken from the small-cap column
+    pe = scanner.weekly_paper(paper, dt.date(2026, 10, 5), 10000)["pe_all"]
+    assert pe["avg_bench"] == pytest.approx(1.0) and pe["n_no_bench"] == 1

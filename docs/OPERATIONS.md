@@ -41,7 +41,10 @@ why it's built this way, see the [README](../README.md).
    - *Paper P&L*: trades closed this week and all time, win rate, average return vs
      the index, and P&L in SEK at a fixed size per trade (no costs).
 
-   The CSV keeps one row per week, so it becomes the long-run record.
+   The CSV keeps one row per week, so it becomes the long-run record. From week 42 (13 Oct
+   2026) its `paper_*_avg_bench` columns use the evaluation's benchmark (small caps, else
+   OMXS30) over the trades that have one; earlier rows used OMXS30 over all trades with a
+   figure.
 
 All thresholds are in `config.yaml`.
 

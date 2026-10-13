@@ -963,17 +963,49 @@ def append_csv(path: Path, rows: list[dict]) -> None:
     new.to_csv(path, mode="a", index=False, header=not path.exists())
 
 
-def paper_summary(paper: pd.DataFrame) -> dict:
-    closed = paper[paper["status"] == "closed"]
-    rets = pd.to_numeric(closed["return_pct"], errors="coerce").dropna()
-    bench = pd.to_numeric(closed["bench_return_pct"], errors="coerce").dropna()
+def closed_stats(df: pd.DataFrame, notional: float = 0.0) -> dict:
+    """Figures for a set of closed trades, the same everywhere they're shown.
+
+    Return, win rate and P&L cover every trade. The index figures use the evaluation's
+    benchmark (small caps, else OMXS30) and cover only trades that have one: avg_bench,
+    avg_excess and avg_return_indexed all use that subset, so avg_return_indexed - avg_bench
+    = avg_excess. n_no_bench counts the trades without an index price."""
+    r = pd.to_numeric(df["return_pct"], errors="coerce")
+    b = pd.to_numeric(df["bench_return_pct"], errors="coerce")
+    if "bench_primary_return_pct" in df:
+        b = pd.to_numeric(df["bench_primary_return_pct"], errors="coerce").fillna(b)
+    both = r.notna() & b.notna()
+    r_all = r.dropna()
     return {
-        "n_closed": len(closed),
+        "n": len(r_all),
+        "win_rate": float((r_all > 0).mean() * 100) if len(r_all) else None,
+        "avg_return": float(r_all.mean()) if len(r_all) else None,
+        "avg_return_indexed": float(r[both].mean()) if both.any() else None,
+        "avg_bench": float(b[both].mean()) if both.any() else None,
+        "avg_excess": float((r - b)[both].mean()) if both.any() else None,
+        "n_no_bench": int((r.notna() & b.isna()).sum()),
+        "pnl_sek": float(r_all.sum() / 100 * notional),
+    }
+
+
+def _index_text(st: dict) -> str:
+    """'vs index X' for one-line summaries; when some trades lack an index price, says which
+    trades the index figure covers, so nobody subtracts it from the all-trades average."""
+    text = f"vs index {_fmt_pct(st['avg_bench'])}"
+    k = st["n"] - st.get("n_no_bench", 0)
+    if st.get("n_no_bench"):
+        avg = _fmt_pct(st["avg_return_indexed"])
+        text += f" (over the {k} of {st['n']} trades with an index price, which averaged {avg})"
+    return text
+
+
+def paper_summary(paper: pd.DataFrame) -> dict:
+    st = closed_stats(paper[paper["status"] == "closed"])
+    return {
+        "n_closed": st["n"],
         "n_open": int((paper["status"] == "open").sum()),
         "n_pending": int((paper["status"] == "pending").sum()),
-        "win_rate": float((rets > 0).mean() * 100) if len(rets) else None,
-        "avg_return": float(rets.mean()) if len(rets) else None,
-        "avg_bench": float(bench.mean()) if len(bench) else None,
+        **{k: st[k] for k in ("win_rate", "avg_return", "avg_return_indexed", "avg_bench", "avg_excess", "n_no_bench")},
         **_pe_summary(paper),
     }
 
@@ -1141,7 +1173,7 @@ def build_html(rows, missing, paper, summary, cfg, now_local, eval_line=None, ll
         f"Closed: {s['n_closed']} · Open: {s['n_open']} · Pending: {s['n_pending']}"
         + (
             f" · Win rate: {s['win_rate']:.0f}% · Avg return: {_fmt_pct(s['avg_return'])}"
-            f" · Avg index return same periods: {_fmt_pct(s['avg_bench'])}"
+            f" {_index_text({**s, 'n': s['n_closed']})} over the same days"
             if s["n_closed"]
             else ""
         )
@@ -1213,7 +1245,7 @@ def build_markdown(rows, summary, cfg, now_local, eval_line=None) -> str:
         lines += ["", f"**{eval_line}**"]
     if s["n_closed"]:
         lines.append(
-            f"Win rate {s['win_rate']:.0f}%, avg {_fmt_pct(s['avg_return'])} vs index {_fmt_pct(s['avg_bench'])}"
+            f"Win rate {s['win_rate']:.0f}%, avg {_fmt_pct(s['avg_return'])} {_index_text({**s, 'n': s['n_closed']})}"
         )
     return "\n".join(lines) + "\n"
 
@@ -1337,19 +1369,8 @@ def _rate_row(label, g: pd.DataFrame, horizons: list[int]) -> dict:
 def weekly_paper(paper: pd.DataFrame, week_start: dt.date, notional: float, move_threshold: float = 0.10) -> dict:
     closed = paper[paper["status"] == "closed"]
 
-    def stats(df):
-        r = pd.to_numeric(df["return_pct"], errors="coerce")
-        b = pd.to_numeric(df["bench_return_pct"], errors="coerce")
-        ex = (r - b).dropna()
-        r = r.dropna()
-        return {
-            "n": len(r),
-            "win_rate": float((r > 0).mean() * 100) if len(r) else None,
-            "avg_return": float(r.mean()) if len(r) else None,
-            "avg_bench": float(b.dropna().mean()) if b.notna().any() else None,
-            "avg_excess": float(ex.mean()) if len(ex) else None,
-            "pnl_sek": float(r.sum() / 100 * notional),
-        }
+    def stats(df: pd.DataFrame) -> dict:
+        return closed_stats(df, notional)
 
     week = closed[closed["exit_date"] >= week_start.isoformat()]
     opened = paper[paper["status"] == "open"]
@@ -1357,8 +1378,10 @@ def weekly_paper(paper: pd.DataFrame, week_start: dt.date, notional: float, move
     by_universe = {u: stats(g) for u, g in closed.groupby("universe", sort=True)}
     dirs = closed["signal_move"].map(lambda m: ev.direction(m, move_threshold))
     by_direction = {ev.DIRECTIONS[d]: stats(closed[dirs == d]) for d in ev.DIRECTIONS if (dirs == d).any()}
-    pe = paper[paper["pe_status"] == "closed"].assign(
-        return_pct=lambda d: d["pe_return_pct"], bench_return_pct=lambda d: d["pe_bench_return_pct"]
+    pe = (
+        paper[paper["pe_status"] == "closed"]
+        .assign(return_pct=lambda d: d["pe_return_pct"], bench_return_pct=lambda d: d["pe_bench_return_pct"])
+        .drop(columns=["bench_primary_return_pct"], errors="ignore")  # the variant has OMXS30 only
     )
     pe_week = pe[pe["pe_exit_date"] >= week_start.isoformat()]
     return {
@@ -1374,7 +1397,20 @@ def weekly_paper(paper: pd.DataFrame, week_start: dt.date, notional: float, move
     }
 
 
-def _fmt_rate(x):
+def _excess_cell(stats: dict) -> str:
+    """'Avg vs index' cell, noting trades left out for lack of an index price."""
+    cell = _arrow(stats["avg_excess"])
+    n = stats.get("n_no_bench", 0)
+    return cell + (f"<br><sub>over {stats['n'] - n} of {stats['n']} trades</sub>" if n else "")
+
+
+def _subset_note(stats: dict) -> str:
+    """For HTML index cells: which trades the figure covers, when not all of them."""
+    n = stats.get("n_no_bench", 0)
+    return f" <small>({stats['n'] - n} of {stats['n']})</small>" if n else ""
+
+
+def _fmt_rate(x: float | None) -> str:
     return "–" if x is None else f"{x:.0f}%"
 
 
@@ -1430,7 +1466,7 @@ def build_weekly(signals, outcomes, table, wp, cfg, now_local) -> tuple[str, str
     def pstats(st):
         return (
             f"{st['n']} closed · win rate {_fmt_rate(st['win_rate'])} · avg {_fmt_pct(st['avg_return'])}"
-            f" vs index {_fmt_pct(st['avg_bench'])} (excess {_fmt_pct(st['avg_excess'])})"
+            f" {_index_text(st)} · excess {_fmt_pct(st['avg_excess'])}"
             f" · P&amp;L {_fmt_sek(st['pnl_sek'])}"
         )
 
@@ -1460,8 +1496,10 @@ def build_weekly(signals, outcomes, table, wp, cfg, now_local) -> tuple[str, str
         "<th>Excess</th><th>P&amp;L</th></tr>"
         + "".join(
             f"<tr><td>{escape(u)}</td><td class=n>{st['n']}</td><td class=n>{_fmt_rate(st['win_rate'])}</td>"
-            f"<td class=n>{_fmt_pct(st['avg_return'])}</td><td class=n>{_fmt_pct(st['avg_bench'])}</td>"
-            f"<td class=n>{_fmt_pct(st['avg_excess'])}</td><td class=n>{_fmt_sek(st['pnl_sek'])}</td></tr>"
+            f"<td class=n>{_fmt_pct(st['avg_return'])}</td>"
+            f"<td class=n>{_fmt_pct(st['avg_bench'])}{_subset_note(st)}</td>"
+            f"<td class=n>{_fmt_pct(st['avg_excess'])}{_subset_note(st)}</td>"
+            f"<td class=n>{_fmt_sek(st['pnl_sek'])}</td></tr>"
             for u, st in wp["by_universe"].items()
         )
         + "</table></div>"
@@ -1768,7 +1806,7 @@ def _paper_summary_table(scopes, cfg: dict) -> str:
                 stats["n"],
                 _fmt_rate(stats["win_rate"]),
                 _arrow(stats["avg_return"]),
-                _arrow(stats["avg_excess"]),
+                _excess_cell(stats),
                 _fmt_sek(stats["pnl_sek"]),
             ]
         )
@@ -2227,7 +2265,7 @@ def build_paper_md(paper, cfg, now_local, eval_res) -> str:
                         st["n"],
                         _fmt_rate(st["win_rate"]),
                         _arrow(st["avg_return"]),
-                        _arrow(st["avg_excess"]),
+                        _excess_cell(st),
                         _fmt_sek(st["pnl_sek"]),
                     ]
                     for label, st in wp["by_direction"].items()
@@ -2247,7 +2285,7 @@ def build_paper_md(paper, cfg, now_local, eval_res) -> str:
                         st["n"],
                         _fmt_rate(st["win_rate"]),
                         _arrow(st["avg_return"]),
-                        _arrow(st["avg_excess"]),
+                        _excess_cell(st),
                         _fmt_sek(st["pnl_sek"]),
                     ]
                     for u, st in wp["by_universe"].items()
@@ -2425,7 +2463,7 @@ def build_weekly_md(outcomes, table, wp, cfg, now_local, here: str | None = None
                     stats["n"],
                     _fmt_rate(stats["win_rate"]),
                     _arrow(stats["avg_return"]),
-                    _arrow(stats["avg_excess"]),
+                    _excess_cell(stats),
                     _fmt_sek(stats["pnl_sek"]),
                 ]
                 for label, stats, _ in scopes
@@ -2451,7 +2489,7 @@ def build_weekly_md(outcomes, table, wp, cfg, now_local, here: str | None = None
                         stats["n"],
                         _fmt_rate(stats["win_rate"]),
                         _arrow(stats["avg_return"]),
-                        _arrow(stats["avg_excess"]),
+                        _excess_cell(stats),
                         _fmt_sek(stats["pnl_sek"]),
                     ]
                     for u, stats in wp["by_universe"].items()
