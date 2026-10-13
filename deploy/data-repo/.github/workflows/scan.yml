@@ -9,7 +9,9 @@ on:
     # the 09:00 open: new paper trades buy at the next open.
     - cron: "7 6 * * 1-5"     # 08:07 Stockholm summer / 07:07 winter
     - cron: "37 6 * * 1-5"    # backup: 08:37 summer / 07:37 winter, skipped if 08:07 ran
-    - cron: "52 16 * * 1-5"   # 18:52 summer / 17:52 winter (after the 17:30 close)
+    # Evening: must land after complete_bar_after (18:00 Stockholm) in winter too, or it scores
+    # yesterday's bar and blocks the evening slot (tests/test_schedule.py checks both seasons).
+    - cron: "7 17 * * 1-5"    # 19:07 summer / 18:07 winter (after the 17:30 close and the 18:00 bar cutoff)
   workflow_dispatch:          # "Run workflow" button, and the external timer (cron-job.org, see README)
     inputs:
       slot:
@@ -31,7 +33,7 @@ concurrency:
 jobs:
   slot:
     # Timed runs (GitHub's schedule, or the external timer with slot=morning/evening) are skipped
-    # if that slot already has a scan: a "scan ..." commit since 05:00 (morning) or 17:30
+    # if that slot already has a scan: a "scan ..." commit since 05:00 (morning) or 18:00
     # (evening) Stockholm time today. Manual runs always run. The concurrency group makes a
     # second run wait until the first has finished, so it sees the first one's commit.
     runs-on: ubuntu-latest
@@ -43,15 +45,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SLOT: >-
             ${{ inputs.slot
-                || (github.event.schedule == '52 16 * * 1-5' && 'evening')
+                || (github.event.schedule == '7 17 * * 1-5' && 'evening')
                 || (github.event_name == 'schedule' && 'morning') || '' }}
         run: |
           case "$SLOT" in
             morning) from="05:00" ;;
-            evening) from="17:30" ;;
+            evening) from="18:00" ;;   # = complete_bar_after: today's bar is final from then
             *) echo "Manual run: no slot check."; exit 0 ;;
           esac
           day=$(TZ=Europe/Stockholm date +%Y-%m-%d)
+          if [ "$SLOT" = evening ] && [ "$(TZ=Europe/Stockholm date +%H:%M)" \< "$from" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Before $from Stockholm: too early for the evening slot (today's bar isn't complete); skipping."
+            exit 0
+          fi
           since=$(date -u -d "TZ=\"Europe/Stockholm\" $day $from" +%Y-%m-%dT%H:%M:%SZ)
           n=$(gh api "repos/$GITHUB_REPOSITORY/commits?sha=main&since=$since&per_page=100" \
                 --jq '[.[] | select(.commit.message | startswith("scan "))] | length')

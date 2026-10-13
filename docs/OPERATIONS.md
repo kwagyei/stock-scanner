@@ -131,9 +131,14 @@ The `schedule:` lines stay in the workflows as a fallback; their late runs skip 
    evening), and the run skips itself instead of scanning.
 
 **How the slot works.** A run with `slot` skips itself when that slot already has a run today
-(Stockholm time): morning = a scan commit since 05:00, evening = since 17:30, daily = a fund
+(Stockholm time): morning = a scan commit since 05:00, evening = since 18:00, daily = a fund
 watch commit since midnight. That stops the backup, a retry or a late GitHub run from scanning
-twice. A run without `slot` (the *Run workflow* button) always runs.
+twice. A run without `slot` (the *Run workflow* button) always runs. An evening-slot run that
+starts before 18:00 skips itself too: today's bar isn't complete until then
+(`complete_bar_after`), so it would score yesterday's bar. That matters for GitHub's fallback
+`schedule:`, which runs in UTC: its evening run is at 17:07 UTC, i.e. 19:07 in summer and
+18:07 in winter. `tests/test_schedule.py` checks the cron times against the bar cutoff in both
+seasons.
 
 **When something goes wrong**
 
