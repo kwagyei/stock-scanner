@@ -306,3 +306,66 @@ def test_v0b_applies_the_filters_and_v0_does_not(cfg):
     pending = paper[paper["status"] == "pending"]
     got = {s: sorted(pending.loc[pending["strategy"] == s, "ticker"]) for s in ("v0", "v0b")}
     assert got == {"v0": ["CHEF.ST", "FASTAT.ST", "ONCO.ST"], "v0b": ["CHEF.ST"]}
+
+
+# --------------------------------------------------------------------------- as-of: boundaries and data gaps
+
+CUT = dt.time(18, 0)
+# Christmas 2026: Thu 24 and Fri 25 Dec closed; Mon 28 trades
+XMAS = pd.DatetimeIndex(["2026-12-21", "2026-12-22", "2026-12-23"])
+
+
+@pytest.mark.parametrize(
+    "bar, market, now, expected",
+    [
+        ("2026-10-08", DAYS, "2026-10-09 09:00", "2026-10-09 09:00"),  # 09:00 exactly: the open
+        ("2026-10-08", DAYS, "2026-10-09 08:59", "2026-10-09 08:59"),  # a minute before: now
+        ("2026-10-09", DAYS, "2026-10-12 18:00", "2026-10-12 18:00"),  # 18:00 exactly: holiday Mon is over
+        ("2026-10-09", DAYS, "2026-10-12 17:59", "2026-10-12 09:00"),  # 17:59: Mon not over, assume trading
+        ("2026-12-23", XMAS, "2026-12-28 11:00", "2026-12-28 09:00"),  # two holidays in a row (CET)
+        ("2026-12-23", XMAS, "2026-12-27 12:00", "2026-12-27 12:00"),  # Sunday after: Mon's open later
+        ("2026-10-23", pd.DatetimeIndex(["2026-10-22", "2026-10-23"]), "2026-10-26 11:00", "2026-10-26 09:00"),  # DST
+    ],
+)
+def test_as_of_boundaries(bar, market, now, expected):
+    assert st.as_of_for_bar(bar, at(now), market, CUT) == pd.Timestamp(expected, tz="Europe/Stockholm")
+
+
+def test_a_release_at_09_00_belongs_to_the_next_bar():
+    r = frame(rel("nine", "A", "2026-10-09T07:00:00Z"))  # Fri 09:00:00 Stockholm
+    as_of = st.as_of_for_bar("2026-10-08", at("2026-10-09 11:00"), DAYS, CUT)
+    assert st.releases_for_bar(r, "A", "2026-10-08", as_of).empty
+    # and enters at the open after Friday's: Tuesday, since DAYS has Monday 12 as a holiday
+    assert st.entry_day_for(pd.Timestamp("2026-10-09T07:00:00Z"), DAYS) == pd.Timestamp("2026-10-13")
+
+
+def test_market_days_need_the_benchmark_or_two_series():
+    a = pd.DatetimeIndex(["2026-10-08", "2026-10-09", "2026-10-12"])  # one stray row on holiday Mon 12
+    b = pd.DatetimeIndex(["2026-10-08", "2026-10-09"])
+    days = st.market_trading_days([a, b], benchmark_days=pd.DatetimeIndex(["2026-10-08"]))
+    assert pd.Timestamp("2026-10-12") not in days  # one series only
+    assert pd.Timestamp("2026-10-09") in days  # two series
+    assert pd.Timestamp("2026-10-08") in days  # benchmark
+    assert pd.Timestamp("2026-10-12") in st.market_trading_days([a], pd.DatetimeIndex(["2026-10-12"]))
+
+
+def test_a_day_yahoo_left_without_closes_still_counts_as_traded():
+    """The 9 Oct incident: rows for Thu existed with Close blank everywhere. Counting those rows
+    keeps Thursday a trading day, so Wednesday's bar isn't credited with Thursday's news."""
+    through_wed = [pd.DatetimeIndex(["2026-10-06", "2026-10-07"])] * 3
+    blank_thu = [{pd.Timestamp("2026-10-08")}] * 3
+    with_gaps = st.market_trading_days(through_wed + blank_thu, ())
+    as_of = st.as_of_for_bar("2026-10-07", at("2026-10-09 08:07"), with_gaps, CUT)
+    assert as_of == pd.Timestamp("2026-10-08 09:00", tz="Europe/Stockholm")
+
+
+def test_known_limitation_a_day_missing_everywhere_looks_like_a_holiday():
+    """If every series loses a trading day's rows completely, it can't be told from a holiday:
+    the bar before it gets that day's news. The scan warns (inferred_holidays) so it's visible."""
+    through_thu = pd.DatetimeIndex(["2026-10-06", "2026-10-07", "2026-10-08"])
+    late_fri = at("2026-10-09 23:30")
+    assert st.as_of_for_bar("2026-10-08", late_fri, through_thu, CUT) == pd.Timestamp(late_fri).tz_convert(
+        "Europe/Stockholm"
+    )
+    assert st.inferred_holidays(through_thu, late_fri, CUT) == [pd.Timestamp("2026-10-09")]
+    assert st.inferred_holidays(through_thu, at("2026-10-09 17:00"), CUT) == []  # Friday not over yet

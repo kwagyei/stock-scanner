@@ -1938,3 +1938,61 @@ def test_daytime_run_does_not_credit_yesterdays_bar_with_todays_release(
     assert (row["pts_release"] == "2") is counts  # v0
     assert (row["score"] == "4") is counts  # v0: 2 without the release, 4 with it
     assert (row["score_v0b"] == "4") is counts  # v0b: the same release window
+
+
+def test_news_windows_end_at_the_as_of_time(cfg):
+    as_of = dt.datetime(2026, 10, 9, 7, 0, tzinfo=UTC)  # Fri 09:00 Stockholm
+    items = [
+        {"title": "X tecknar avtal", "link": "a", "source": "Cision", "ts": as_of + dt.timedelta(hours=1)},
+        {"title": "X i fokus", "link": "b", "source": "di.se", "ts": as_of + dt.timedelta(hours=1)},
+        {"title": "X i fokus igen", "link": "c", "source": "di.se", "ts": as_of - dt.timedelta(hours=23)},
+        {"title": "X förra veckan", "link": "d", "source": "di.se", "ts": as_of - dt.timedelta(hours=25)},
+    ]
+    nm = scanner.news_metrics(items, as_of, cfg)
+    assert nm["releases_24h"] == []  # the Cision release came after the open
+    assert nm["n_24h"] == 1  # only the item 23h before as_of; the later one doesn't count
+    assert [i["link"] for i in nm["headlines"]] == ["c"]
+    # a later as-of shifts the 24h window: both items after 09:00 count, the one from 23h before 09:00 drops out
+    assert scanner.news_metrics(items, as_of + dt.timedelta(hours=2), cfg)["n_24h"] == 2
+
+
+def test_no_intraday_fill_before_the_open(cfg, tmp_paths, monkeypatch):
+    """A morning run before 09:00 must not buy at a pre-open placeholder row for today."""
+    wl = tmp_paths / "watchlist.csv"
+    wl.write_text("ticker,name,query\nX.ST,X,X\n")
+    start = pd.bdate_range(end="2026-10-08", periods=70)[0]
+    h = flat(70, start=start)
+    today = pd.DataFrame([(55, 55, 55, 55, 0)], index=[pd.Timestamp("2026-10-09")], columns=h.columns)
+    data = {
+        "X.ST": pd.concat([h, today]),
+        "^OMX": flat(70, px=1000, start=start),
+        "nasdaq:IX3364": flat(70, px=500, start=start),
+    }
+    monkeypatch.setattr(scanner, "fetch_history", lambda t, p: data[t])
+    monkeypatch.setattr(scanner, "fetch_news", lambda q, c: [])
+    monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: 1e9)
+    monkeypatch.setattr(scanner.time, "sleep", lambda s: None)
+    scanner.DATA_DIR.mkdir()
+    pending_trade("X.ST", "2026-10-08").to_csv(scanner.PAPER_LOG, index=False)
+    monkeypatch.setattr(scanner, "_now", lambda: dt.datetime(2026, 10, 9, 6, 7, tzinfo=UTC))  # Fri 08:07
+    scanner.main(["--no-email", "--watchlist", str(wl)])
+    p = pd.read_csv(scanner.PAPER_LOG, dtype=str).fillna("")
+    assert p.iloc[0]["status"] == "pending" and p.iloc[0]["entry_price"] == ""
+    monkeypatch.setattr(scanner, "_now", lambda: dt.datetime(2026, 10, 9, 8, 0, tzinfo=UTC))  # Fri 10:00
+    scanner.main(["--no-email", "--watchlist", str(wl)])
+    p = pd.read_csv(scanner.PAPER_LOG, dtype=str).fillna("")
+    assert p.iloc[0]["status"] == "open" and p.iloc[0]["entry_price"] == "55.0000"
+
+
+def test_scores_log_records_the_as_of_time(cfg, tmp_paths, monkeypatch):
+    wl = tmp_paths / "watchlist.csv"
+    wl.write_text("ticker,name,query\nX.ST,X,X\n")
+    start = pd.bdate_range(end="2026-10-08", periods=70)[0]
+    monkeypatch.setattr(scanner, "fetch_history", lambda t, p: flat(70, start=start))
+    monkeypatch.setattr(scanner, "fetch_news", lambda q, c: [])
+    monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: None)
+    monkeypatch.setattr(scanner.time, "sleep", lambda s: None)
+    monkeypatch.setattr(scanner, "_now", lambda: dt.datetime(2026, 10, 9, 9, 0, tzinfo=UTC))  # Fri 11:00
+    scanner.main(["--no-email", "--watchlist", str(wl)])
+    row = pd.read_csv(scanner.SCORES_LOG, dtype=str).fillna("").iloc[-1]
+    assert row["as_of"] == "2026-10-09T09:00+02:00"

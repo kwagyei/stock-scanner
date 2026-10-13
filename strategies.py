@@ -116,6 +116,33 @@ def as_of_for_bar(bar_date, now: dt.datetime, market_days, cutoff: dt.time = dt.
     return min(now_l, open_at(d))
 
 
+def market_trading_days(series_days, benchmark_days=()) -> set:
+    """Dates the market traded, judged from the price data: a date the benchmark has, or one that
+    at least two series have (a row counts even if its close is missing). One stray row can't
+    turn a holiday into a trading day."""
+    from collections import Counter
+
+    counts = Counter(pd.Timestamp(d).normalize() for days in series_days for d in set(days))
+    bench = {pd.Timestamp(d).normalize() for d in benchmark_days}
+    return bench | {d for d, n in counts.items() if n >= 2}
+
+
+def inferred_holidays(market_days, now: dt.datetime, cutoff: dt.time = dt.time(18, 0), lookback_days: int = 7):
+    """Weekdays in the last `lookback_days` that are over but have no prices anywhere. as_of_for_bar
+    treats them as holidays; if one wasn't, the data for it is missing and the bar before it is
+    scored with that day's news (see the limitation in docs/OPERATIONS.md)."""
+    now_l = _local(now)
+    days = {pd.Timestamp(d).normalize() for d in market_days}
+    if not days:
+        return []
+    out = []
+    for d in pd.bdate_range(now_l.date() - dt.timedelta(days=lookback_days), now_l.date()):
+        over = now_l.date() > d.date() or (now_l.date() == d.date() and now_l.time() >= cutoff)
+        if over and d.normalize() not in days and d.normalize() > min(days):
+            out.append(d.normalize())
+    return out
+
+
 def releases_for_bar(releases: pd.DataFrame, ticker: str, bar_date, as_of) -> pd.DataFrame:
     """Primary releases for `ticker` that belong to signal bar `bar_date`: published from 09:00
     on that day up to `as_of` (as_of_for_bar: the next open, or now if earlier)."""
