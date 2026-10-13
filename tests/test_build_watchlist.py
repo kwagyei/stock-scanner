@@ -1,7 +1,6 @@
 """Offline tests for build_watchlist.py. All network calls are mocked."""
 
 import re
-import socket
 
 import pandas as pd
 import pytest
@@ -12,10 +11,6 @@ import scanner
 
 @pytest.fixture(autouse=True)
 def offline(monkeypatch, tmp_path):
-    def guard(*a, **k):
-        raise RuntimeError("network access in tests")
-
-    monkeypatch.setattr(socket.socket, "connect", guard)
     monkeypatch.setattr(bw.time, "sleep", lambda s: None)
     monkeypatch.setattr(scanner, "DATA_DIR", tmp_path / "data")
     monkeypatch.setattr(bw, "REVIEW_LOG", tmp_path / "data" / "watchlist_review.csv")

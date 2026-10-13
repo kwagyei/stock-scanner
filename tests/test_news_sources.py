@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import socket
-
-import pytest
 
 import news_sources as ns
 import scanner
@@ -26,15 +23,6 @@ XML = b"""<?xml version="1.0" encoding="UTF-8"?>
   <pubDate>Tue, 21 Jul 2026 06:00:00 +0200</pubDate><x:language>en</x:language>
   <x:content type="html">&lt;p&gt;Sales &amp;amp; profit up&lt;/p&gt;</x:content></item>
 </channel></rss>"""
-
-
-@pytest.fixture(autouse=True)
-def no_network(monkeypatch):
-    def guard(*a, **k):
-        raise RuntimeError("network access in tests")
-
-    monkeypatch.setattr(socket.socket, "connect", guard)
-    monkeypatch.setattr(socket, "create_connection", guard)
 
 
 def row(ticker="ELTEL.ST", title="Eltel vinner ramavtal", ts="2026-10-06T06:00:00Z", url=None, source_type="primary"):

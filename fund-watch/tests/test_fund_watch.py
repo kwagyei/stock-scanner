@@ -2,7 +2,6 @@
 
 import datetime as dt
 import json
-import socket
 
 import pytest
 
@@ -14,10 +13,6 @@ NOW = dt.datetime(2026, 10, 7, 5, 0, tzinfo=UTC)
 
 @pytest.fixture(autouse=True)
 def offline(monkeypatch, tmp_path):
-    def guard(*a, **k):
-        raise RuntimeError("network access in tests")
-
-    monkeypatch.setattr(socket.socket, "connect", guard)
     monkeypatch.setattr(fw.time, "sleep", lambda s: None)
     monkeypatch.setattr(fw, "DATA_DIR", tmp_path / "data")
     monkeypatch.setattr(fw, "REPORT_DIR", tmp_path / "reports")

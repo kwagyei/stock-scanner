@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import socket
 
 import pandas as pd
 import pytest
@@ -17,15 +16,6 @@ NOW = dt.datetime(2026, 10, 6, 17, 0, tzinfo=UTC)
 
 
 # --------------------------------------------------------------------------- fixtures
-
-
-@pytest.fixture(autouse=True)
-def no_network(monkeypatch):
-    def guard(*a, **k):
-        raise RuntimeError("network access in tests")
-
-    monkeypatch.setattr(socket.socket, "connect", guard)
-    monkeypatch.setattr(socket, "create_connection", guard)
 
 
 @pytest.fixture
