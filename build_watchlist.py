@@ -31,6 +31,7 @@ import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import yfinance as yf
@@ -46,7 +47,7 @@ WATCHLIST_COLUMNS = ["ticker", "name", "query", "mfn_slug", "source", "title_mat
 PAUSE = 1.0
 
 
-def get_json(url: str):
+def get_json(url: str) -> Any:
     req = urllib.request.Request(url, headers={"User-Agent": scanner.USER_AGENT, "Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.load(resp)
@@ -149,7 +150,7 @@ def write_watchlist(path: Path, rows: pd.DataFrame, version: str, n_auto: int) -
         rows[cols].to_csv(fh, index=False)
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default=str(scanner.ROOT / "config.yaml"))
     ap.add_argument("--watchlist", default=str(scanner.ROOT / "watchlist.csv"))

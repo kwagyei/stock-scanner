@@ -33,6 +33,7 @@ import ssl
 import sys
 import time
 import urllib.parse
+from collections.abc import Iterable
 from email.message import EmailMessage
 from html import escape
 from pathlib import Path
@@ -251,7 +252,7 @@ def compile_direction(cfg: dict) -> dict:
     }
 
 
-def news_direction(item: dict, categories, rules: dict) -> tuple[str, list[str]]:
+def news_direction(item: dict, categories: Iterable[str], rules: dict) -> tuple[str, list[str]]:
     """Likely direction of an article for the fund: positive, negative, mixed or unclear, with
     the phrases behind it. A phrase inside a longer phrase of the other kind doesn't count
     ("lifts ban" is positive; its "ban" isn't negative). With no phrase, the categories' lean
@@ -297,7 +298,7 @@ def classify(
     cats: dict,
     name_sets: dict,
     cfg: dict,
-    matched=None,
+    matched: dict | None = None,
     fund: dict | None = None,
     direction_rules: dict | None = None,
 ) -> dict | None:
@@ -676,15 +677,15 @@ def cat_label(cat: str) -> str:
     return cat.replace("_", " ").capitalize()
 
 
-def _n_high(items) -> int:
+def _n_high(items: list[dict]) -> int:
     return sum(1 for i in items if i["severity"] == 3)
 
 
-def _n_articles(stories) -> int:
+def _n_articles(stories: list[dict]) -> int:
     return sum(1 + len(s.get("similar", [])) for s in stories)
 
 
-def _first_seen(story) -> str:
+def _first_seen(story: dict) -> str:
     """'Tue 6 Oct' for the day the story was first seen (Stockholm time)."""
     try:
         d = dt.datetime.fromisoformat(story["first_seen"])
@@ -699,12 +700,12 @@ def _first_seen(story) -> str:
         return ""
 
 
-def _similar_sources(story, limit: int = 4) -> str:
+def _similar_sources(story: dict, limit: int = 4) -> str:
     srcs = list(dict.fromkeys(i["source"] for i in story.get("similar", []) if i["source"]))
     return ", ".join(srcs[:limit]) + ("…" if len(srcs) > limit else "")
 
 
-def build_html(results, now_local, n_queries, n_raw) -> str:
+def build_html(results: list[dict], now_local: dt.datetime, n_queries: int, n_raw: int) -> str:
     def rows(items):
         out = []
         for i in items:
@@ -787,11 +788,11 @@ from keywords in the headline, not a forecast.</small></p>
 SEVERITY_ICON = {3: "🔴&nbsp;HIGH", 2: "🟠&nbsp;MEDIUM", 1: "🔵&nbsp;LOW"}
 
 
-def _md(text) -> str:
+def _md(text: object) -> str:
     return str(text).replace("|", "\\|").replace("\n", " ")
 
 
-def _md_items(items, empty: str) -> str:
+def _md_items(items: list[dict], empty: str) -> str:
     if not items:
         return f"_{empty}_\n"
     out = ["| Score | Severity | Direction | Headline | Affects | Why flagged |", "|:---:|:---|:---|:---|:---|:---|"]
@@ -828,7 +829,7 @@ def _md_items(items, empty: str) -> str:
     return "\n".join(out) + "\n"
 
 
-def build_page_md(results, now_local, n_queries, n_raw) -> str:
+def build_page_md(results: list[dict], now_local: dt.datetime, n_queries: int, n_raw: int) -> str:
     """The report as a Markdown page (GitHub shows Markdown, not HTML, in a private repo)."""
     back = "[![Dashboard](https://img.shields.io/badge/Dashboard-24292f?style=for-the-badge)](../../DASHBOARD.md)"
     glance = [
@@ -889,7 +890,7 @@ def build_page_md(results, now_local, n_queries, n_raw) -> str:
     return "\n".join(out + ["---", "<sub>Research and alerting only. Not investment advice.</sub>", ""])
 
 
-def write_summary(results, now, now_local, n_raw) -> None:
+def write_summary(results: list[dict], now: dt.datetime, now_local: dt.datetime, n_raw: int) -> None:
     """Small JSON summary of the latest run for the stock scanner's dashboard."""
     funds = [
         {
@@ -939,7 +940,7 @@ def write_summary(results, now, now_local, n_raw) -> None:
     )
 
 
-def build_markdown(results, now_local) -> str:
+def build_markdown(results: list[dict], now_local: dt.datetime) -> str:
     """Short version for the GitHub job summary."""
     lines = [f"## Fund risk watch {now_local:%Y-%m-%d}", ""]
     for r in results:
@@ -966,7 +967,7 @@ def build_markdown(results, now_local) -> str:
     return "\n".join(lines) + "\n"
 
 
-def append_log(results, now) -> None:
+def append_log(results: list[dict], now: dt.datetime) -> None:
     """One row per (fund, article), grouped articles included; `story` = key of the story's lead.
     A log with older columns is rewritten first (rows without a fund were the Taiwan fund's)."""
     if LOG_FILE.exists():
@@ -1031,7 +1032,7 @@ def send_email(html: str, subject: str, required: bool = False) -> None:
     print(f"[info] e-mailed to {to}")
 
 
-def email_subject(results, now_local) -> str:
+def email_subject(results: list[dict], now_local: dt.datetime) -> str:
     parts = [f"{r['fund']['short']} {len(r['flagged'])} flagged ({_n_high(r['flagged'])} high)" for r in results]
     return f"Fund risk watch {now_local:%d %b}: " + " · ".join(parts)
 
@@ -1039,7 +1040,7 @@ def email_subject(results, now_local) -> str:
 # --------------------------------------------------------------------------- main
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default=str(ROOT / "fund_watch.yaml"))
     ap.add_argument("--no-email", action="store_true")

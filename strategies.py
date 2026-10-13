@@ -18,11 +18,13 @@ bar, as v0 already does.
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Collection, Iterable
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 STOCKHOLM = ZoneInfo("Europe/Stockholm")
+DateLike = str | dt.date | dt.datetime | pd.Timestamp  # a date or moment in any form the callers use
 OPEN = dt.time(9, 0)
 V0, V0B = "v0", "v0b"
 RELEASE_POINTS_V0 = 2
@@ -63,20 +65,20 @@ def entry_allowed(row: dict, filters: dict, book: pd.DataFrame) -> bool:
 # --------------------------------------------------------------------------- timing
 
 
-def _local(ts) -> pd.Timestamp:
+def _local(ts: DateLike) -> pd.Timestamp:
     t = pd.Timestamp(ts)
     if t.tzinfo is None:
         t = t.tz_localize("UTC")
     return t.tz_convert(STOCKHOLM)
 
 
-def open_at(day) -> pd.Timestamp:
+def open_at(day: DateLike) -> pd.Timestamp:
     """09:00 Stockholm on `day`, as an aware timestamp."""
     d = pd.Timestamp(day).date()
     return pd.Timestamp(dt.datetime.combine(d, OPEN), tz=STOCKHOLM)
 
 
-def entry_day_for(published_at, trading_days) -> pd.Timestamp | None:
+def entry_day_for(published_at: DateLike, trading_days: Iterable) -> pd.Timestamp | None:
     """First trading day whose 09:00 open is after the release (None if not in the data yet)."""
     t = _local(published_at)
     for d in sorted(pd.DatetimeIndex(trading_days)):
@@ -85,7 +87,7 @@ def entry_day_for(published_at, trading_days) -> pd.Timestamp | None:
     return None
 
 
-def signal_bar_for(published_at, trading_days) -> pd.Timestamp | None:
+def signal_bar_for(published_at: DateLike, trading_days: Iterable) -> pd.Timestamp | None:
     """The trading day before the entry day (None if the entry day is unknown or is the first day)."""
     days = sorted(pd.DatetimeIndex(trading_days).normalize())
     entry = entry_day_for(published_at, days)
@@ -95,7 +97,9 @@ def signal_bar_for(published_at, trading_days) -> pd.Timestamp | None:
     return days[i - 1] if i > 0 else None
 
 
-def as_of_for_bar(bar_date, now: dt.datetime, market_days, cutoff: dt.time = dt.time(18, 0)) -> pd.Timestamp:
+def as_of_for_bar(
+    bar_date: DateLike, now: dt.datetime, market_days: Collection, cutoff: dt.time = dt.time(18, 0)
+) -> pd.Timestamp:
     """The moment a signal on `bar_date` becomes tradable: 09:00 Stockholm on the next trading
     day, or `now` if that is earlier. News and releases count for the bar only if published
     before it, so a run during the next session (or a late run still on an older bar) can't use
@@ -116,7 +120,7 @@ def as_of_for_bar(bar_date, now: dt.datetime, market_days, cutoff: dt.time = dt.
     return min(now_l, open_at(d))
 
 
-def market_trading_days(series_days, benchmark_days=()) -> set:
+def market_trading_days(series_days: Iterable[Iterable], benchmark_days: Iterable = ()) -> set:
     """Dates the market traded, judged from the price data: a date the benchmark has, or one that
     at least two series have (a row counts even if its close is missing). One stray row can't
     turn a holiday into a trading day."""
@@ -127,7 +131,9 @@ def market_trading_days(series_days, benchmark_days=()) -> set:
     return bench | {d for d, n in counts.items() if n >= 2}
 
 
-def inferred_holidays(market_days, now: dt.datetime, cutoff: dt.time = dt.time(18, 0), lookback_days: int = 7):
+def inferred_holidays(
+    market_days: Iterable, now: dt.datetime, cutoff: dt.time = dt.time(18, 0), lookback_days: int = 7
+) -> list[pd.Timestamp]:
     """Weekdays in the last `lookback_days` that are over but have no prices anywhere. as_of_for_bar
     treats them as holidays; if one wasn't, the data for it is missing and the bar before it is
     scored with that day's news (see the limitation in docs/OPERATIONS.md)."""
@@ -143,7 +149,7 @@ def inferred_holidays(market_days, now: dt.datetime, cutoff: dt.time = dt.time(1
     return out
 
 
-def releases_for_bar(releases: pd.DataFrame, ticker: str, bar_date, as_of) -> pd.DataFrame:
+def releases_for_bar(releases: pd.DataFrame, ticker: str, bar_date: DateLike, as_of: DateLike) -> pd.DataFrame:
     """Primary releases for `ticker` that belong to signal bar `bar_date`: published from 09:00
     on that day up to `as_of` (as_of_for_bar: the next open, or now if earlier)."""
     if releases.empty:
@@ -189,7 +195,7 @@ def v1_release(bar_releases: pd.DataFrame, scores: pd.DataFrame, cfg: dict) -> d
     return {"points": points, "block": block, "scored_ids": [r["release_id"] for r in recs]}
 
 
-def with_release_points(pts: dict, release_pts: int, mcap, cfg: dict) -> dict:
+def with_release_points(pts: dict, release_pts: int, mcap: float | None, cfg: dict) -> dict:
     """v0's points with the release component replaced; small cap recomputed (it only
     amplifies an existing signal)."""
     out = {**pts, "release": release_pts, "small_cap": 0}

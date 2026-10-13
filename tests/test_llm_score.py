@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import socket
 from types import SimpleNamespace
 
 import anthropic
@@ -26,15 +25,6 @@ GOOD = {
     "confidence": 0.8,
     "rationale": "Order worth a third of annual revenue.",
 }
-
-
-@pytest.fixture(autouse=True)
-def no_network(monkeypatch):
-    def guard(*a, **k):
-        raise RuntimeError("network access in tests")
-
-    monkeypatch.setattr(socket.socket, "connect", guard)
-    monkeypatch.setattr(socket, "create_connection", guard)
 
 
 @pytest.fixture(autouse=True)

@@ -452,3 +452,11 @@ def test_event_study_one_lucky_event_fails_without_best():
     spec = [(1, -1), (1, -1), (1, 30), (-1, 0), (-1, 0), (-1, 0)]
     res = ev.event_study(_events(spec), min_events=6)
     assert res["spread"] > 0 and res["spread_wo_best"] < 0 and res["verdict"] == "FAIL"
+
+
+@pytest.mark.parametrize("args", [["--cost", "0.5"], ["--cost=0.5"], ["--cos=0.5"]])
+def test_cli_cost_override_in_every_spelling(tmp_path, capsys, args):
+    """'--cost=0.5' and argparse's abbreviations used to be silently ignored."""
+    path = log(tmp_path, HAND)
+    ev.main(["--file", str(path), "--min-trades", "4", *args])
+    assert "cost 0.50% per round trip" in capsys.readouterr().out

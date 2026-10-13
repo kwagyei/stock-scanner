@@ -37,6 +37,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from collections.abc import Callable, Collection, Hashable, Iterable
 from email.message import EmailMessage
 from html import escape
 from pathlib import Path
@@ -175,7 +176,7 @@ def _period_days(period: str) -> int:
     return n * {"d": 1, "wk": 7, "mo": 31, "y": 366}[unit]
 
 
-def _nasdaq_number(v) -> float | None:
+def _nasdaq_number(v: object) -> float | None:
     if v in (None, "", "-"):
         return None
     try:
@@ -459,7 +460,7 @@ def price_metrics(hist: pd.DataFrame, cfg: dict) -> dict | None:
     }
 
 
-def news_metrics(items: list[dict], now: dt.datetime, cfg: dict, releases=()) -> dict:
+def news_metrics(items: list[dict], now: dt.datetime, cfg: dict, releases: Iterable[dict] = ()) -> dict:
     """items: Google News results. releases: direct company releases (MFN).
 
     `now` is the as-of time (strategies.as_of_for_bar): the windows end there, and anything
@@ -506,7 +507,7 @@ def news_metrics(items: list[dict], now: dt.datetime, cfg: dict, releases=()) ->
 SCORE_COMPONENTS = ["release", "volume", "price", "news", "small_cap"]
 
 
-def score_breakdown(pm: dict, nm: dict, mcap: float | None, cfg: dict):
+def score_breakdown(pm: dict, nm: dict, mcap: float | None, cfg: dict) -> tuple[dict, list[str], bool]:
     """Points per component (SCORE_COMPONENTS), reasons and the hype flag."""
     t = cfg["thresholds"]
     pts, reasons = dict.fromkeys(SCORE_COMPONENTS, 0), []
@@ -535,7 +536,7 @@ def score_breakdown(pm: dict, nm: dict, mcap: float | None, cfg: dict):
     return pts, reasons, hype
 
 
-def score_stock(pm: dict, nm: dict, mcap: float | None, cfg: dict):
+def score_stock(pm: dict, nm: dict, mcap: float | None, cfg: dict) -> tuple[int, list[str], bool]:
     pts, reasons, hype = score_breakdown(pm, nm, mcap, cfg)
     return sum(pts.values()), reasons, hype
 
@@ -555,7 +556,7 @@ def load_paper() -> pd.DataFrame:
     return pd.DataFrame(columns=PAPER_COLUMNS, dtype=str)
 
 
-def _price_exact(hist: pd.DataFrame | None, date, field: str) -> float | None:
+def _price_exact(hist: pd.DataFrame | None, date: st.DateLike | None, field: str) -> float | None:
     """The price on exactly `date`, or None. Benchmarks must cover the same days as the trade:
     the nearest earlier day would silently compare different periods."""
     if hist is None or hist.empty or date is None:
@@ -568,14 +569,14 @@ def _price_exact(hist: pd.DataFrame | None, date, field: str) -> float | None:
     return v if v else None
 
 
-def _gap_fill(open_, level: float, worse) -> float:
+def _gap_fill(open_: float, level: float, worse: Callable[[float, float], float]) -> float:
     """Exit price when a stop or target is hit after the entry day: the open if it already
     jumped past the level (worse = min for stops, max for targets), else the level. An open of
     0 or NaN (Yahoo sometimes gives thin names one) isn't a price: fill at the level."""
     return worse(float(open_), level) if open_ > 0 else level
 
 
-def _bench_gap(hist: pd.DataFrame | None, date, field: str = "Close") -> bool:
+def _bench_gap(hist: pd.DataFrame | None, date: st.DateLike | None, field: str = "Close") -> bool:
     """True if the benchmark can't give `field` for `date` now but should have: the date is
     inside its history with no usable price (a real gap), or after its latest row (not
     published yet, e.g. Yahoo blanked today's close). Dates before its history (older than the
@@ -605,15 +606,15 @@ def update_paper(
         if h is None or h.empty:
             continue
         if main_todo:
-            _update_main(paper, idx, row, h, bench, pc)
+            _update_main(paper, idx, row, h, pc)
         row = paper.loc[idx]
         if pe_enabled and row["entry_date"] and row["pe_status"] != "closed":
-            _update_partial(paper, idx, row, h, bench, pc)
+            _update_partial(paper, idx, row, h, pc)
     fraction = pc["partial_exit"].get("fraction", 0.5) if pe_enabled else None
     return refresh_benchmarks(paper, histories, bench, bench_primary, fraction)
 
 
-def _update_main(paper, idx, row, h, bench, pc) -> None:
+def _update_main(paper: pd.DataFrame, idx: Hashable, row: pd.Series, h: pd.DataFrame, pc: dict) -> None:
     """The fixed paper-trade rules: one exit at target, stop or time."""
     if row["status"] == "pending":
         after = h[h.index > pd.Timestamp(row["signal_date"])]
@@ -658,7 +659,14 @@ def _update_main(paper, idx, row, h, bench, pc) -> None:
         paper.at[idx, "return_pct"] = f"{(last / entry - 1) * 100:.2f}"
 
 
-def _set_bench(paper, idx, cols: tuple[str, str, str], bench, start, end) -> None:
+def _set_bench(
+    paper: pd.DataFrame,
+    idx: Hashable,
+    cols: tuple[str, str, str],
+    bench: pd.DataFrame | None,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> None:
     """Entry open, end close and return of one benchmark over [start, end], by exact dates.
     Both known: set. Either missing but expected (a gap, or not published yet): blank, so no
     figure ever covers other days than the trade's; the next run fills it in once the index
@@ -790,7 +798,7 @@ def simulate_partial(bars: pd.DataFrame, entry: float, pc: dict) -> dict:
     }
 
 
-def _update_partial(paper, idx, row, h, bench, pc) -> None:
+def _update_partial(paper: pd.DataFrame, idx: Hashable, row: pd.Series, h: pd.DataFrame, pc: dict) -> None:
     entry = float(row["entry_price"])
     bars = h[h.index >= pd.Timestamp(row["entry_date"])]
     if bars.empty:
@@ -886,7 +894,16 @@ def last_logged_bars() -> dict:
     return log.groupby("ticker")["bar_date"].max().to_dict()
 
 
-def score_log_rows(rows, missing, wl, now, universe, news_checked=True, stale=(), cfg=None) -> list[dict]:
+def score_log_rows(
+    rows: list[dict],
+    missing: list[str],
+    wl: pd.DataFrame,
+    now: dt.datetime,
+    universe: str,
+    news_checked: bool = True,
+    stale: Collection[str] = (),
+    cfg: dict | None = None,
+) -> list[dict]:
     """One row per watchlist stock for this run, scored or not; stocks without price data too."""
     run = now.isoformat(timespec="minutes")
     out = []
@@ -963,17 +980,49 @@ def append_csv(path: Path, rows: list[dict]) -> None:
     new.to_csv(path, mode="a", index=False, header=not path.exists())
 
 
-def paper_summary(paper: pd.DataFrame) -> dict:
-    closed = paper[paper["status"] == "closed"]
-    rets = pd.to_numeric(closed["return_pct"], errors="coerce").dropna()
-    bench = pd.to_numeric(closed["bench_return_pct"], errors="coerce").dropna()
+def closed_stats(df: pd.DataFrame, notional: float = 0.0) -> dict:
+    """Figures for a set of closed trades, the same everywhere they're shown.
+
+    Return, win rate and P&L cover every trade. The index figures use the evaluation's
+    benchmark (small caps, else OMXS30) and cover only trades that have one: avg_bench,
+    avg_excess and avg_return_indexed all use that subset, so avg_return_indexed - avg_bench
+    = avg_excess. n_no_bench counts the trades without an index price."""
+    r = pd.to_numeric(df["return_pct"], errors="coerce")
+    b = pd.to_numeric(df["bench_return_pct"], errors="coerce")
+    if "bench_primary_return_pct" in df:
+        b = pd.to_numeric(df["bench_primary_return_pct"], errors="coerce").fillna(b)
+    both = r.notna() & b.notna()
+    r_all = r.dropna()
     return {
-        "n_closed": len(closed),
+        "n": len(r_all),
+        "win_rate": float((r_all > 0).mean() * 100) if len(r_all) else None,
+        "avg_return": float(r_all.mean()) if len(r_all) else None,
+        "avg_return_indexed": float(r[both].mean()) if both.any() else None,
+        "avg_bench": float(b[both].mean()) if both.any() else None,
+        "avg_excess": float((r - b)[both].mean()) if both.any() else None,
+        "n_no_bench": int((r.notna() & b.isna()).sum()),
+        "pnl_sek": float(r_all.sum() / 100 * notional),
+    }
+
+
+def _index_text(st: dict) -> str:
+    """'vs index X' for one-line summaries; when some trades lack an index price, says which
+    trades the index figure covers, so nobody subtracts it from the all-trades average."""
+    text = f"vs index {_fmt_pct(st['avg_bench'])}"
+    k = st["n"] - st.get("n_no_bench", 0)
+    if st.get("n_no_bench"):
+        avg = _fmt_pct(st["avg_return_indexed"])
+        text += f" (over the {k} of {st['n']} trades with an index price, which averaged {avg})"
+    return text
+
+
+def paper_summary(paper: pd.DataFrame) -> dict:
+    st = closed_stats(paper[paper["status"] == "closed"])
+    return {
+        "n_closed": st["n"],
         "n_open": int((paper["status"] == "open").sum()),
         "n_pending": int((paper["status"] == "pending").sum()),
-        "win_rate": float((rets > 0).mean() * 100) if len(rets) else None,
-        "avg_return": float(rets.mean()) if len(rets) else None,
-        "avg_bench": float(bench.mean()) if len(bench) else None,
+        **{k: st[k] for k in ("win_rate", "avg_return", "avg_return_indexed", "avg_bench", "avg_excess", "n_no_bench")},
         **_pe_summary(paper),
     }
 
@@ -1001,12 +1050,12 @@ td.n{text-align:right;white-space:nowrap} ul{margin:4px 0 0 16px;padding:0}
 """
 
 
-def _fmt_pct(x, digits=1):
+def _fmt_pct(x: float | None, digits: int = 1) -> str:
     return "–" if x is None or (isinstance(x, float) and math.isnan(x)) else f"{x:+.{digits}f}%"
 
 
 def build_llm_html(
-    rows, new_scores: list[dict], releases: pd.DataFrame, cmp: dict | None, warnings: list[str], cfg: dict
+    rows: list[dict], new_scores: list[dict], releases: pd.DataFrame, cmp: dict | None, warnings: list[str], cfg: dict
 ) -> str:
     """Digest section for the LLM experiment: this run's scored releases, blocked buys,
     the v0 / v0b / v1 summary and any problems."""
@@ -1085,7 +1134,16 @@ def build_llm_html(
 """
 
 
-def build_html(rows, missing, paper, summary, cfg, now_local, eval_line=None, llm_html: str = "") -> str:
+def build_html(
+    rows: list[dict],
+    missing: list[str],
+    paper: pd.DataFrame,
+    summary: dict,
+    cfg: dict,
+    now_local: dt.datetime,
+    eval_line: str | None = None,
+    llm_html: str = "",
+) -> str:
     alert_min = cfg["alert_min_score"]
     alerts = [r for r in rows if r["score"] >= alert_min]
     hype = [r for r in rows if r["hype"]]
@@ -1141,7 +1199,7 @@ def build_html(rows, missing, paper, summary, cfg, now_local, eval_line=None, ll
         f"Closed: {s['n_closed']} · Open: {s['n_open']} · Pending: {s['n_pending']}"
         + (
             f" · Win rate: {s['win_rate']:.0f}% · Avg return: {_fmt_pct(s['avg_return'])}"
-            f" · Avg index return same periods: {_fmt_pct(s['avg_bench'])}"
+            f" {_index_text({**s, 'n': s['n_closed']})} over the same days"
             if s["n_closed"]
             else ""
         )
@@ -1194,7 +1252,9 @@ Typical pump profile.</small></p>
 </body></html>"""
 
 
-def build_markdown(rows, summary, cfg, now_local, eval_line=None) -> str:
+def build_markdown(
+    rows: list[dict], summary: dict, cfg: dict, now_local: dt.datetime, eval_line: str | None = None
+) -> str:
     alerts = [r for r in rows if r["score"] >= cfg["alert_min_score"]]
     hype = [r for r in rows if r["hype"]]
     lines = [f"## Scanner {now_local:%Y-%m-%d %H:%M}", ""]
@@ -1213,7 +1273,7 @@ def build_markdown(rows, summary, cfg, now_local, eval_line=None) -> str:
         lines += ["", f"**{eval_line}**"]
     if s["n_closed"]:
         lines.append(
-            f"Win rate {s['win_rate']:.0f}%, avg {_fmt_pct(s['avg_return'])} vs index {_fmt_pct(s['avg_bench'])}"
+            f"Win rate {s['win_rate']:.0f}%, avg {_fmt_pct(s['avg_return'])} {_index_text({**s, 'n': s['n_closed']})}"
         )
     return "\n".join(lines) + "\n"
 
@@ -1323,7 +1383,7 @@ def direction_rate_table(outcomes: pd.DataFrame, horizons: list[int], threshold:
     return [_rate_row(ev.DIRECTIONS[d], outcomes[dirs == d], horizons) for d in ev.DIRECTIONS if (dirs == d).any()]
 
 
-def _rate_row(label, g: pd.DataFrame, horizons: list[int]) -> dict:
+def _rate_row(label: str, g: pd.DataFrame, horizons: list[int]) -> dict:
     row = {"score": label, "signals": len(g)}
     for n in horizons:
         ex, r = g[f"excess_{n}d"].dropna(), g[f"ret_{n}d"].dropna()
@@ -1337,19 +1397,8 @@ def _rate_row(label, g: pd.DataFrame, horizons: list[int]) -> dict:
 def weekly_paper(paper: pd.DataFrame, week_start: dt.date, notional: float, move_threshold: float = 0.10) -> dict:
     closed = paper[paper["status"] == "closed"]
 
-    def stats(df):
-        r = pd.to_numeric(df["return_pct"], errors="coerce")
-        b = pd.to_numeric(df["bench_return_pct"], errors="coerce")
-        ex = (r - b).dropna()
-        r = r.dropna()
-        return {
-            "n": len(r),
-            "win_rate": float((r > 0).mean() * 100) if len(r) else None,
-            "avg_return": float(r.mean()) if len(r) else None,
-            "avg_bench": float(b.dropna().mean()) if b.notna().any() else None,
-            "avg_excess": float(ex.mean()) if len(ex) else None,
-            "pnl_sek": float(r.sum() / 100 * notional),
-        }
+    def stats(df: pd.DataFrame) -> dict:
+        return closed_stats(df, notional)
 
     week = closed[closed["exit_date"] >= week_start.isoformat()]
     opened = paper[paper["status"] == "open"]
@@ -1357,8 +1406,10 @@ def weekly_paper(paper: pd.DataFrame, week_start: dt.date, notional: float, move
     by_universe = {u: stats(g) for u, g in closed.groupby("universe", sort=True)}
     dirs = closed["signal_move"].map(lambda m: ev.direction(m, move_threshold))
     by_direction = {ev.DIRECTIONS[d]: stats(closed[dirs == d]) for d in ev.DIRECTIONS if (dirs == d).any()}
-    pe = paper[paper["pe_status"] == "closed"].assign(
-        return_pct=lambda d: d["pe_return_pct"], bench_return_pct=lambda d: d["pe_bench_return_pct"]
+    pe = (
+        paper[paper["pe_status"] == "closed"]
+        .assign(return_pct=lambda d: d["pe_return_pct"], bench_return_pct=lambda d: d["pe_bench_return_pct"])
+        .drop(columns=["bench_primary_return_pct"], errors="ignore")  # the variant has OMXS30 only
     )
     pe_week = pe[pe["pe_exit_date"] >= week_start.isoformat()]
     return {
@@ -1374,15 +1425,30 @@ def weekly_paper(paper: pd.DataFrame, week_start: dt.date, notional: float, move
     }
 
 
-def _fmt_rate(x):
+def _excess_cell(stats: dict) -> str:
+    """'Avg vs index' cell, noting trades left out for lack of an index price."""
+    cell = _arrow(stats["avg_excess"])
+    n = stats.get("n_no_bench", 0)
+    return cell + (f"<br><sub>over {stats['n'] - n} of {stats['n']} trades</sub>" if n else "")
+
+
+def _subset_note(stats: dict) -> str:
+    """For HTML index cells: which trades the figure covers, when not all of them."""
+    n = stats.get("n_no_bench", 0)
+    return f" <small>({stats['n'] - n} of {stats['n']})</small>" if n else ""
+
+
+def _fmt_rate(x: float | None) -> str:
     return "–" if x is None else f"{x:.0f}%"
 
 
-def _fmt_sek(x):
+def _fmt_sek(x: float | None) -> str:
     return f"{x:+,.0f} SEK".replace(",", " ")
 
 
-def build_weekly(signals, outcomes, table, wp, cfg, now_local) -> tuple[str, str, dict]:
+def build_weekly(
+    signals: pd.DataFrame, outcomes: pd.DataFrame, table: list[dict], wp: dict, cfg: dict, now_local: dt.datetime
+) -> tuple[str, str, dict]:
     """Returns (html, markdown, csv row)."""
     wc = cfg["weekly_summary"]
     horizons, label = wc["horizons"], week_label(now_local.date())
@@ -1430,7 +1496,7 @@ def build_weekly(signals, outcomes, table, wp, cfg, now_local) -> tuple[str, str
     def pstats(st):
         return (
             f"{st['n']} closed · win rate {_fmt_rate(st['win_rate'])} · avg {_fmt_pct(st['avg_return'])}"
-            f" vs index {_fmt_pct(st['avg_bench'])} (excess {_fmt_pct(st['avg_excess'])})"
+            f" {_index_text(st)} · excess {_fmt_pct(st['avg_excess'])}"
             f" · P&amp;L {_fmt_sek(st['pnl_sek'])}"
         )
 
@@ -1460,8 +1526,10 @@ def build_weekly(signals, outcomes, table, wp, cfg, now_local) -> tuple[str, str
         "<th>Excess</th><th>P&amp;L</th></tr>"
         + "".join(
             f"<tr><td>{escape(u)}</td><td class=n>{st['n']}</td><td class=n>{_fmt_rate(st['win_rate'])}</td>"
-            f"<td class=n>{_fmt_pct(st['avg_return'])}</td><td class=n>{_fmt_pct(st['avg_bench'])}</td>"
-            f"<td class=n>{_fmt_pct(st['avg_excess'])}</td><td class=n>{_fmt_sek(st['pnl_sek'])}</td></tr>"
+            f"<td class=n>{_fmt_pct(st['avg_return'])}</td>"
+            f"<td class=n>{_fmt_pct(st['avg_bench'])}{_subset_note(st)}</td>"
+            f"<td class=n>{_fmt_pct(st['avg_excess'])}{_subset_note(st)}</td>"
+            f"<td class=n>{_fmt_sek(st['pnl_sek'])}</td></tr>"
             for u, st in wp["by_universe"].items()
         )
         + "</table></div>"
@@ -1531,7 +1599,13 @@ n counts signals old enough to measure.</small></p>
     return html, md, row
 
 
-def run_weekly(paper, histories, bench, cfg, now_local) -> tuple[str, str]:
+def run_weekly(
+    paper: pd.DataFrame,
+    histories: dict[str, pd.DataFrame],
+    bench: pd.DataFrame,
+    cfg: dict,
+    now_local: dt.datetime,
+) -> tuple[str, str]:
     wc = cfg["weekly_summary"]
     week_start = now_local.date() - dt.timedelta(days=now_local.weekday())
     window_start = week_start - dt.timedelta(weeks=wc["lookback_weeks"] - 1)
@@ -1570,7 +1644,7 @@ PAGES = [  # button label, colour, path from the repo root
 EXIT_LABELS = {"target": "🎯 Target", "stop": "🛑 Stop", "time": "⏱️ Time limit", "remainder stop": "🛑 Breakeven stop"}
 
 
-def _md(text) -> str:
+def _md(text: object) -> str:
     """Escape text for a Markdown table cell."""
     return str(text).replace("|", "\\|").replace("\n", " ")
 
@@ -1638,7 +1712,7 @@ def _glance(cells: list[tuple[str, object, str]]) -> str:
     )
 
 
-def _arrow(pct, digits: int = 1) -> str:
+def _arrow(pct: float | None, digits: int = 1) -> str:
     """Percent value (2.5 = 2.5%) as '▲ 2.5%' / '▼ 2.5%'."""
     if pct is None or (isinstance(pct, float) and math.isnan(pct)):
         return "–"
@@ -1647,7 +1721,8 @@ def _arrow(pct, digits: int = 1) -> str:
     return f"{'▲' if pct > 0 else '▼'} {abs(pct):.{digits}f}%"
 
 
-def _num(x):
+def _num(x: object) -> float | None:
+    """A number from a CSV cell ('' or text -> None)."""
     v = pd.to_numeric(x, errors="coerce")
     return None if pd.isna(v) else float(v)
 
@@ -1669,7 +1744,7 @@ def _friendly(reason: str, short_price: bool = False) -> str:
     return _md(r)
 
 
-def _why(reasons, short_price: bool = False) -> str:
+def _why(reasons: str | list[str], short_price: bool = False) -> str:
     parts = reasons if isinstance(reasons, list) else [p for p in str(reasons).split(";") if p.strip()]
     return " · ".join(_friendly(p, short_price) for p in parts) or "–"
 
@@ -1683,7 +1758,7 @@ def _day(iso: str) -> str:
     return f"{d:%a}&nbsp;{d.day}&nbsp;{d:%b}"
 
 
-def _stock(name, ticker) -> str:
+def _stock(name: str, ticker: str) -> str:
     return f"**{_md(name)}**<br><sub>{ticker}</sub>"
 
 
@@ -1701,13 +1776,13 @@ SCORE_LEGEND = (
 )
 
 
-def _mcap(mc) -> str:
+def _mcap(mc: float | None) -> str:
     if not mc:
         return "–"
     return f"{mc / 1e9:.1f}&nbsp;bn" if mc >= 1e9 else f"{mc / 1e6:.0f}&nbsp;M"
 
 
-def _component_values(r) -> dict:
+def _component_values(r: dict) -> dict:
     """The measured value behind each score component, as table text."""
     vr = r["vol_ratio"]
     return {
@@ -1719,7 +1794,7 @@ def _component_values(r) -> dict:
     }
 
 
-def _alerts_table(rs, empty) -> str:
+def _alerts_table(rs: list[dict], empty: str) -> str:
     if not rs:
         return f"_{empty}_\n" if empty else ""
     heads = [f"{icon}<br><sub>{label}</sub>" for icon, label in COMPONENT_HEADS.values()]
@@ -1738,7 +1813,7 @@ def _alerts_table(rs, empty) -> str:
     )
 
 
-def _headlines(rs) -> str:
+def _headlines(rs: list[dict]) -> str:
     with_news = [r for r in rs if r["headlines"]]
     if not with_news:
         return ""
@@ -1756,7 +1831,7 @@ def _eval_callout(res: dict) -> str:
     return _callout(kind, f"**{ev.one_line(res)}**<br>{text}")
 
 
-def _paper_summary_table(scopes, cfg: dict) -> str:
+def _paper_summary_table(scopes: list[tuple[str, dict, int | None]], cfg: dict) -> str:
     """scopes: (label, stats from weekly_paper, open count)."""
     notional = cfg["weekly_summary"]["notional_sek"]
     rows = []
@@ -1768,7 +1843,7 @@ def _paper_summary_table(scopes, cfg: dict) -> str:
                 stats["n"],
                 _fmt_rate(stats["win_rate"]),
                 _arrow(stats["avg_return"]),
-                _arrow(stats["avg_excess"]),
+                _excess_cell(stats),
                 _fmt_sek(stats["pnl_sek"]),
             ]
         )
@@ -1806,7 +1881,7 @@ def _open_table(paper: pd.DataFrame, cfg: dict, today: dt.date) -> str:
     return _md_table(head, rows, "No open positions.", "lrlcrrlc" + ("l" if pe_on else ""))
 
 
-def _signal_cell(p) -> str:
+def _signal_cell(p: pd.Series) -> str:
     """Signal-day move of a paper trade, e.g. '▼ 11.2%'."""
     m = _num(p.get("signal_move", ""))
     return "–" if m is None else _arrow(m * 100).replace(" ", "&nbsp;")
@@ -1825,7 +1900,7 @@ def _pending_table(paper: pd.DataFrame) -> str:
     )
 
 
-def _closed_table(df: pd.DataFrame, pe_on: bool, empty="No closed trades yet.") -> str:
+def _closed_table(df: pd.DataFrame, pe_on: bool, empty: str = "No closed trades yet.") -> str:
     rows = []
     for _, p in df.iloc[::-1].iterrows():
         ret, bench = _num(p["return_pct"]), _num(p["bench_return_pct"])
@@ -1854,7 +1929,7 @@ def _closed_table(df: pd.DataFrame, pe_on: bool, empty="No closed trades yet.") 
     return _md_table(head, rows, empty, "lrllrrr" + ("r" if pe_on else ""))
 
 
-def _updated(now_local, rows=None) -> str:
+def _updated(now_local: dt.datetime, rows: list[dict] | None = None) -> str:
     bits = [f"Updated **{now_local:%a %d %b %Y, %H:%M}** (Stockholm)"]
     if rows:
         bits += [f"prices to {max(r['date'] for r in rows)}", f"{len(rows)} stocks"]
@@ -1985,7 +2060,9 @@ def _fund_section(fs: dict | None, now_local: dt.datetime) -> list[str]:
     return out + [f"[Full fund watch →]({page})", ""]
 
 
-def build_dashboard(rows, missing, paper, cfg, now_local, eval_res) -> str:
+def build_dashboard(
+    rows: list[dict], missing: list[str], paper: pd.DataFrame, cfg: dict, now_local: dt.datetime, eval_res: dict
+) -> str:
     alerts = [r for r in rows if r["score"] >= cfg["alert_min_score"]]
     hype = [r for r in rows if r["hype"]]
     n_open, n_pend = int((paper["status"] == "open").sum()), int((paper["status"] == "pending").sum())
@@ -2118,7 +2195,7 @@ def build_dashboard(rows, missing, paper, cfg, now_local, eval_res) -> str:
     return "\n".join(out)
 
 
-def build_digest_md(rows, missing, cfg, now_local) -> str:
+def build_digest_md(rows: list[dict], missing: list[str], cfg: dict, now_local: dt.datetime) -> str:
     alerts = [r for r in rows if r["score"] >= cfg["alert_min_score"]]
     hype = [r for r in rows if r["hype"]]
     out = ["# 📰 Today", "", _nav("reports/latest.md"), _updated(now_local, rows)]
@@ -2170,7 +2247,7 @@ def build_digest_md(rows, missing, cfg, now_local) -> str:
     return "\n".join(out)
 
 
-def build_paper_md(paper, cfg, now_local, eval_res) -> str:
+def build_paper_md(paper: pd.DataFrame, cfg: dict, now_local: dt.datetime, eval_res: dict) -> str:
     pc = cfg["paper_trading"]
     pe = pc.get("partial_exit") or {}
     wp = weekly_paper(
@@ -2227,7 +2304,7 @@ def build_paper_md(paper, cfg, now_local, eval_res) -> str:
                         st["n"],
                         _fmt_rate(st["win_rate"]),
                         _arrow(st["avg_return"]),
-                        _arrow(st["avg_excess"]),
+                        _excess_cell(st),
                         _fmt_sek(st["pnl_sek"]),
                     ]
                     for label, st in wp["by_direction"].items()
@@ -2247,7 +2324,7 @@ def build_paper_md(paper, cfg, now_local, eval_res) -> str:
                         st["n"],
                         _fmt_rate(st["win_rate"]),
                         _arrow(st["avg_return"]),
-                        _arrow(st["avg_excess"]),
+                        _excess_cell(st),
                         _fmt_sek(st["pnl_sek"]),
                     ]
                     for u, st in wp["by_universe"].items()
@@ -2259,7 +2336,14 @@ def build_paper_md(paper, cfg, now_local, eval_res) -> str:
     return "\n".join(out + [FOOTER])
 
 
-def build_evaluation_md(res, pe_res, cfg, now_local, cmp: dict | None = None, warnings=()) -> str:
+def build_evaluation_md(
+    res: dict,
+    pe_res: dict | None,
+    cfg: dict,
+    now_local: dt.datetime,
+    cmp: dict | None = None,
+    warnings: Collection[str] = (),
+) -> str:
     out = [
         "# ⚖️ Evaluation",
         "",
@@ -2302,7 +2386,9 @@ def build_evaluation_md(res, pe_res, cfg, now_local, cmp: dict | None = None, wa
     return "\n".join(out + [FOOTER])
 
 
-def build_weekly_md(outcomes, table, wp, cfg, now_local, here: str | None = None) -> str:
+def build_weekly_md(
+    outcomes: pd.DataFrame, table: list[dict], wp: dict, cfg: dict, now_local: dt.datetime, here: str | None = None
+) -> str:
     """Weekly summary page. `here` adds the button row (left out of the GitHub job summary)."""
     wc = cfg["weekly_summary"]
     horizons = wc["horizons"]
@@ -2425,7 +2511,7 @@ def build_weekly_md(outcomes, table, wp, cfg, now_local, here: str | None = None
                     stats["n"],
                     _fmt_rate(stats["win_rate"]),
                     _arrow(stats["avg_return"]),
-                    _arrow(stats["avg_excess"]),
+                    _excess_cell(stats),
                     _fmt_sek(stats["pnl_sek"]),
                 ]
                 for label, stats, _ in scopes
@@ -2451,7 +2537,7 @@ def build_weekly_md(outcomes, table, wp, cfg, now_local, here: str | None = None
                         stats["n"],
                         _fmt_rate(stats["win_rate"]),
                         _arrow(stats["avg_return"]),
-                        _arrow(stats["avg_excess"]),
+                        _excess_cell(stats),
                         _fmt_sek(stats["pnl_sek"]),
                     ]
                     for u, stats in wp["by_universe"].items()
@@ -2516,7 +2602,7 @@ def update_events(
     return out
 
 
-def evaluations(paper: pd.DataFrame, cfg: dict):
+def evaluations(paper: pd.DataFrame, cfg: dict) -> tuple[dict, dict, dict | None]:
     """(evaluation settings, main-rules result, partial-exit result or None), via evaluate.py."""
     ec = eval_settings(cfg)
     args = (ec["cost_pct"], ec["stake"], ec["min_trades"])
@@ -2530,7 +2616,14 @@ def evaluations(paper: pd.DataFrame, cfg: dict):
     return ec, eval_res, pe_res
 
 
-def write_pages(rows, missing, paper, cfg, now_local, warnings=()) -> None:
+def write_pages(
+    rows: list[dict],
+    missing: list[str],
+    paper: pd.DataFrame,
+    cfg: dict,
+    now_local: dt.datetime,
+    warnings: Collection[str] = (),
+) -> None:
     """The Markdown pages GitHub shows: dashboard, today, paper trades, evaluation."""
     _, eval_res, pe_res = evaluations(paper, cfg)
     pages = {
@@ -2543,7 +2636,7 @@ def write_pages(rows, missing, paper, cfg, now_local, warnings=()) -> None:
         path.write_text(text, encoding="utf-8")
 
 
-def rows_from_score_log():
+def rows_from_score_log() -> tuple[list[dict], list[str], dt.datetime]:
     """The stocks as scored on the latest logged run: (rows, missing, run time in UTC).
 
     Lets the pages be rebuilt without fetching anything. Headlines aren't logged, so the
@@ -2649,7 +2742,7 @@ def _now() -> dt.datetime:
     return dt.datetime.now(UTC)
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default=str(ROOT / "config.yaml"))
     ap.add_argument("--watchlist", default=str(ROOT / "watchlist.csv"))

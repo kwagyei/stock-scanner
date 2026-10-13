@@ -41,7 +41,10 @@ why it's built this way, see the [README](../README.md).
    - *Paper P&L*: trades closed this week and all time, win rate, average return vs
      the index, and P&L in SEK at a fixed size per trade (no costs).
 
-   The CSV keeps one row per week, so it becomes the long-run record.
+   The CSV keeps one row per week, so it becomes the long-run record. From week 42 (13 Oct
+   2026) its `paper_*_avg_bench` columns use the evaluation's benchmark (small caps, else
+   OMXS30) over the trades that have one; earlier rows used OMXS30 over all trades with a
+   figure.
 
 All thresholds are in `config.yaml`.
 
@@ -290,7 +293,7 @@ signals log and weekly hit rates, but no paper trade came from them.
 
 | File | What's in it |
 |---|---|
-| `news_sources.py` | Fetches each company's MFN feed once per run (v0 parses the same bytes) and stores releases in `data/releases.csv`: primary rows with the full text, plus Google News wire matches as `aggregator` rows (no text). Deduplicated on `release_id` (hash of source + URL) and on near-identical titles per stock within 24h. |
+| `news_sources.py` | Fetches each company's MFN feed once per run (v0 parses the same bytes) and stores releases in `data/releases.csv`: primary rows with the full text, plus Google News wire matches as `aggregator` rows (no text). Deduplicated on `release_id` (hash of source + URL) and on near-identical titles per stock within 24h. A primary row always wins: an aggregator copy stored earlier (e.g. when the MFN fetch failed) is removed from the file when its primary arrives. |
 | `llm_score.py` | Sends each new primary release to Claude (`data/llm_scores.csv`). JSON output checked against a fixed schema; one retry on invalid output, then `status=error`. Scored once per `release_id` + prompt version. `api_error` rows (API down, rate limit, no key) are retried next run. `python llm_score.py --backfill` also scores releases before `llm.score_from_date`; those rows get `is_backfill=true` and are never used in trading or evaluation. |
 | `prompts/score_v1.md` | The prompt. **Never edit a prompt after it has been used live**: add `score_v2.md`, set `llm.prompt_version: v2` (a new strategy `v1_v2`). On first live use the prompt is fingerprinted in `data/used_prompts.json`; an edited prompt makes scoring stop with an error in the report. |
 | `strategies.py` | Timing, v0b/v1 points and blocking. |

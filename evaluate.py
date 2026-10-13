@@ -30,6 +30,7 @@ import argparse
 import math
 import os
 import sys
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 import numpy as np
@@ -46,7 +47,7 @@ EVENT_DEFAULTS = {"min_events": 300, "horizons": [1, 5, 20]}
 DIRECTIONS = {"drop": "▼ Drop", "jump": "▲ Jump", "flat": "– No big move", "unknown": "? Unknown"}
 
 
-def direction(move, threshold: float = 0.10) -> str:
+def direction(move: object, threshold: float = 0.10) -> str:
     """Signal-day price move (a fraction: -0.112 = -11.2%) -> drop / jump / flat / unknown.
 
     Uses the same threshold as the score's price component (thresholds.price_move_1d).
@@ -275,11 +276,13 @@ EVENT_KEYS = [
 GROUPS = ["direction", "surprise", "event_type"]
 
 
-def event_columns(horizons) -> list[str]:
+def event_columns(horizons: Iterable[int]) -> list[str]:
     return EVENT_KEYS + [f"{k}_{h}d" for h in horizons for k in ("ret", "bench", "abn")]
 
 
-def event_outcomes(scored: pd.DataFrame, histories: dict, bench: pd.DataFrame, horizons, cost: float) -> pd.DataFrame:
+def event_outcomes(
+    scored: pd.DataFrame, histories: dict, bench: pd.DataFrame, horizons: Sequence[int], cost: float
+) -> pd.DataFrame:
     """Returns after each scored release: bought at the open of its entry day (strategies.entry_day_for),
     held to the close of the h-th trading day (h=1: the entry day's close). abn = return minus the
     benchmark over the same days, minus the round-trip `cost`; all in percent. Horizons not yet
@@ -331,7 +334,9 @@ def _long_short(ev_: pd.DataFrame, col: str) -> float | None:
     return float(up.mean() - down.mean())
 
 
-def event_study(events: pd.DataFrame | None, horizons=(1, 5, 20), min_events: int = 300, focus: int = 5) -> dict:
+def event_study(
+    events: pd.DataFrame | None, horizons: Iterable[int] = (1, 5, 20), min_events: int = 300, focus: int = 5
+) -> dict:
     """Abnormal returns grouped by direction / surprise / event_type at each horizon, plus the checks:
     returns rise with direction (monotonic), the up-minus-down spread is positive, holds in both
     halves of the sample and without the best event. NOT YET below `min_events` events with a
@@ -608,7 +613,7 @@ def format_markdown(res: dict) -> str:
     return "\n".join(out) + "\n"
 
 
-def _p(x, digits=1) -> str:
+def _p(x: float | None, digits: int = 1) -> str:
     return "–" if x is None else f"{x:+.{digits}f}%"
 
 
@@ -697,12 +702,15 @@ def format_report(res: dict, source: str = "data/paper_trades.csv", label: str =
     return "\n".join(lines) + "\n"
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None = None) -> int:
     d = defaults_from_config()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--file", default=str(PAPER_LOG))
     ap.add_argument(
-        "--cost", type=float, default=d["cost_pct"], help=f"round-trip cost in percent (default {d['cost_pct']})"
+        "--cost",
+        type=float,
+        default=None,
+        help=f"one round-trip cost in percent for every trade (default: costs.* per trade, about {d['cost_pct']})",
     )
     ap.add_argument(
         "--stake",
@@ -730,7 +738,8 @@ def main(argv=None) -> int:
     )
     ap.add_argument("--events", default=str(EVENTS_LOG))
     args = ap.parse_args(argv)
-    costs = None if "--cost" in (argv if argv is not None else sys.argv) else d["costs"]
+    costs = None if args.cost is not None else d["costs"]  # --cost: one flat cost instead of per-trade costs
+    cost = args.cost if args.cost is not None else d["cost_pct"]
 
     if args.compare:
         paper = pd.read_csv(args.file, dtype=str).fillna("") if Path(args.file).exists() else None
@@ -752,7 +761,7 @@ def main(argv=None) -> int:
     trades = load_trades(Path(args.file), args.variant, args.strategy, costs)
     if trades is not None and args.direction:
         trades = trades[trades["move"].map(lambda m: direction(m, d["move_threshold"])) == args.direction]
-    res = evaluate(trades, args.cost, args.stake, args.min_trades, move_threshold=d["move_threshold"])
+    res = evaluate(trades, cost, args.stake, args.min_trades, move_threshold=d["move_threshold"])
     label = (
         ("partial-exit variant" if args.variant else "main rules")
         + (f", strategy {args.strategy}" if args.strategy != "v0" else "")
