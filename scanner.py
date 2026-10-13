@@ -758,7 +758,8 @@ def add_paper_signals(
     paper: pd.DataFrame, rows: list[dict], cfg: dict, universe: str = DEFAULT_UNIVERSE, strategy: str = st.V0
 ) -> pd.DataFrame:
     """New pending trades for one strategy's book. v0 uses r["score"]; v0b and v1 use
-    r["score_v0b"] / r["score_v1"], and v1 skips rows with block_buy."""
+    r["score_v0b"] / r["score_v1"], and v1 skips rows with block_buy. v0b also applies
+    paper_trading.v0b_entry_filters (strategies.entry_allowed)."""
     pc = cfg["paper_trading"]
     mine = book(paper, strategy)
     active = set(mine.loc[mine["status"].isin(["pending", "open"]), "ticker"])
@@ -766,6 +767,8 @@ def add_paper_signals(
     new = []
     for r in rows:
         if key not in r or (strategy not in (st.V0, st.V0B) and r.get("block_buy")):
+            continue
+        if strategy == st.V0B and not st.entry_allowed(r, pc.get("v0b_entry_filters") or {}, mine):
             continue
         if r[key] >= pc["min_score"] and r["ticker"] not in active:
             rec = {c: "" for c in PAPER_COLUMNS}

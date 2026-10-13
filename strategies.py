@@ -41,6 +41,25 @@ def strategy_labels(cfg: dict) -> list[str]:
     return [V0, V0B, v1_label(cfg)] if llm_enabled(cfg) else [V0, V0B]
 
 
+def entry_allowed(row: dict, filters: dict, book: pd.DataFrame) -> bool:
+    """Entry filters for one signal (row from the scanner), given the strategy's own paper book.
+    No filters = everything allowed.
+      max_signal_move: skip when |1-day move on the signal day| is larger.
+      cooldown_days_after_stop: skip when the book was stopped out of this stock fewer than this
+        many weekdays before the signal day."""
+    limit = filters.get("max_signal_move")
+    if limit is not None and row.get("chg_1d") is not None and abs(row["chg_1d"]) > limit:
+        return False
+    days = filters.get("cooldown_days_after_stop")
+    if days and not book.empty:
+        stops = book[(book["ticker"] == row["ticker"]) & (book["exit_reason"] == "stop") & (book["exit_date"] != "")]
+        signal = pd.Timestamp(row["date"])
+        for exit_day in pd.to_datetime(stops["exit_date"]):
+            if exit_day <= signal and len(pd.bdate_range(exit_day, signal)) - 1 < days:
+                return False
+    return True
+
+
 # --------------------------------------------------------------------------- timing
 
 

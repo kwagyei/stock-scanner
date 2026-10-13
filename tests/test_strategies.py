@@ -211,3 +211,66 @@ def test_v0_scoring_golden(cfg, inputs, expected):
     nm = scanner.news_metrics(items, NOW, cfg)
     pts, _, hype = scanner.score_breakdown(pm, nm, mcap, cfg)
     assert (pts, hype) == expected
+
+
+# --------------------------------------------------------------------------- v0b entry filters
+
+
+def _book(*trades):
+    cols = ["ticker", "exit_reason", "exit_date"]
+    return pd.DataFrame([dict(zip(cols, t)) for t in trades], columns=cols)
+
+
+def test_move_filter_skips_extreme_signal_days():
+    f = {"max_signal_move": 0.30}
+    assert not st.entry_allowed({"ticker": "A", "date": "2026-10-12", "chg_1d": 0.45}, f, _book())
+    assert not st.entry_allowed({"ticker": "A", "date": "2026-10-12", "chg_1d": -0.31}, f, _book())
+    assert st.entry_allowed({"ticker": "A", "date": "2026-10-12", "chg_1d": 0.30}, f, _book())  # at the limit
+    assert st.entry_allowed({"ticker": "A", "date": "2026-10-12", "chg_1d": None}, f, _book())  # unknown move
+
+
+def test_cooldown_after_a_stop_counts_weekdays():
+    f = {"cooldown_days_after_stop": 10}
+    stopped = _book(("FASTAT", "stop", "2026-10-08"))
+
+    def row(d, t="FASTAT"):
+        return {"ticker": t, "date": d, "chg_1d": -0.05}
+
+    assert not st.entry_allowed(row("2026-10-08"), f, stopped)  # same day
+    assert not st.entry_allowed(row("2026-10-09"), f, stopped)  # the real re-entry from week one
+    assert not st.entry_allowed(row("2026-10-21"), f, stopped)  # 9 weekdays later
+    assert st.entry_allowed(row("2026-10-22"), f, stopped)  # 10 weekdays later
+    assert st.entry_allowed(row("2026-10-09", "OTHER"), f, stopped)  # another stock
+    other_exits = _book(("FASTAT", "target", "2026-10-08"), ("FASTAT", "time", "2026-10-08"))
+    assert st.entry_allowed(row("2026-10-09"), f, other_exits)  # only stop-losses count
+    assert st.entry_allowed(row("2026-10-09"), {}, stopped)  # no filters configured
+
+
+def test_v0b_applies_the_filters_and_v0_does_not(cfg):
+    import scanner
+
+    paper = scanner.load_paper().iloc[0:0]
+    stops = []
+    for s in ("v0", "v0b"):  # both books were stopped out of FASTAT yesterday
+        rec = {c: "" for c in scanner.PAPER_COLUMNS}
+        rec.update(
+            id=f"{s}:FASTAT.ST-2026-10-07",
+            ticker="FASTAT.ST",
+            strategy=s,
+            status="closed",
+            exit_reason="stop",
+            exit_date="2026-10-08",
+            signal_date="2026-10-07",
+        )
+        stops.append(rec)
+    paper = pd.concat([paper, pd.DataFrame(stops)], ignore_index=True)
+    rows = [
+        {"ticker": "FASTAT.ST", "name": "Fastator", "date": "2026-10-08", "score": 5, "score_v0b": 5, "chg_1d": 0.02},
+        {"ticker": "ONCO.ST", "name": "Oncopeptides", "date": "2026-10-08", "score": 4, "score_v0b": 4, "chg_1d": 0.45},
+        {"ticker": "CHEF.ST", "name": "Cheffelo", "date": "2026-10-08", "score": 7, "score_v0b": 5, "chg_1d": -0.12},
+    ]
+    for s in ("v0", "v0b"):
+        paper = scanner.add_paper_signals(paper, rows, cfg, "v2", strategy=s)
+    pending = paper[paper["status"] == "pending"]
+    got = {s: sorted(pending.loc[pending["strategy"] == s, "ticker"]) for s in ("v0", "v0b")}
+    assert got == {"v0": ["CHEF.ST", "FASTAT.ST", "ONCO.ST"], "v0b": ["CHEF.ST"]}

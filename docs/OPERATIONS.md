@@ -234,8 +234,14 @@ is billed per use (roughly $3–10 a month here), separately from any Claude sub
 | Strategy | Score |
 |---|---|
 | `v0` | The rules above, unchanged. "Company release" = MFN feed or a wire source in Google News. |
-| `v0b` | v0, but only primary releases (MFN feed, which carries Cision too) count, timed to the signal bar (below). |
+| `v0b` | v0, but only primary releases (MFN feed, which carries Cision too) count, timed to the signal bar (below). Since 13 Oct 2026 it also skips two kinds of entry (`paper_trading.v0b_entry_filters`): a stock it was stopped out of within the last 10 weekdays, and a signal day that moved more than ±30%. |
 | `v1_<prompt>` | v0b with the flat +2 replaced by LLM points: material and direction +2 → +3; direction +1 → +2; anything else → 0. No buy when a material release scores direction ≤ −2 (`block_buy`). |
+
+**Why v0b has entry filters.** The first week's three closed trades were all −15% stop-losses,
+each right after an extreme move in a tiny, volatile stock (Oncopeptides after a +45% day) or a
+re-buy the day after a stop (Fastator, twice). From 13 Oct 2026 v0b skips both. v0 keeps no
+filters, so it stays the control. v0b's trades signalled before 13 Oct used no filters: read its
+results from that date on when judging the filters.
 
 With several releases on one signal bar, the most positive decides the points and the most
 negative decides blocking. Routine titles (`release_ignore_titles`) count for nothing and are
