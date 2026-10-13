@@ -189,18 +189,28 @@ def _near_duplicate(row: dict, others: list[dict], hours: float = 24, ratio: flo
 
 def merge_releases(existing: pd.DataFrame, new_rows: list[dict]) -> tuple[pd.DataFrame, list[dict]]:
     """Add new rows, skipping known release_ids and near-identical titles for the same ticker
-    within 24h (a primary row wins over an aggregator one, so primary rows are added first).
-    Returns (all rows, rows actually added)."""
+    within 24h. A primary row always wins over an aggregator copy of the same release: primary
+    rows are only compared with other primary rows, and an aggregator copy stored earlier (say,
+    when the MFN fetch failed) is removed when its primary arrives. Returns (all rows, rows
+    actually added)."""
     known_ids = set(existing["release_id"])
     pool = existing.to_dict("records")
     added = []
     for r in sorted(new_rows, key=lambda r: (r["source_type"] != "primary", r["published_at"])):
-        if r["release_id"] in known_ids or _near_duplicate(r, pool):
+        if r["release_id"] in known_ids:
             continue
+        primary = r["source_type"] == "primary"
+        same_ticker = [o for o in pool if o["ticker"] == r["ticker"]]
+        rivals = [o for o in same_ticker if o["source_type"] == "primary"] if primary else same_ticker
+        if _near_duplicate(r, rivals):
+            continue
+        if primary:  # an aggregator copy stored earlier gives way to the primary release
+            twins = {id(o) for o in same_ticker if o["source_type"] != "primary" and _near_duplicate(o, [r])}
+            pool = [o for o in pool if id(o) not in twins]
         known_ids.add(r["release_id"])
         pool.append(r)
         added.append(r)
-    out = pd.concat([existing, pd.DataFrame(added, columns=RELEASE_COLUMNS)], ignore_index=True)
+    out = pd.DataFrame(pool, columns=RELEASE_COLUMNS)
     return out.sort_values(["published_at", "ticker"], kind="stable").reset_index(drop=True), added
 
 

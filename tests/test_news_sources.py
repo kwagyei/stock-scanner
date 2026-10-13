@@ -150,3 +150,66 @@ def test_v0_releases_identical_from_shared_bytes(monkeypatch):
         scanner.feedparser, "parse", lambda src, agent=None: real_parse(XML if isinstance(src, str) else src)
     )
     assert scanner.fetch_releases("eltel", cfg, XML) == scanner.fetch_releases("eltel", cfg)
+
+
+def test_primary_release_replaces_an_aggregator_twin_stored_earlier():
+    """If MFN failed in one run, so only the Google News copy was stored; the
+    MFN original in the next run was rejected as a near-duplicate and the release vanished from
+    v0b and the LLM scoring, which read primary rows only."""
+    agg = row(title="Eltel vinner ramavtal - Cision News", url="https://news.google/x", source_type="aggregator")
+    run1, added = ns.merge_releases(ns.load_releases(ns.Path("/nope")), [agg])
+    assert [r["source_type"] for r in added] == ["aggregator"]
+    run2, added = ns.merge_releases(run1, [row()])
+    assert [r["source_type"] for r in added] == ["primary"]
+    assert list(run2["source_type"]) == ["primary"]  # the aggregator copy gives way
+    # an aggregator copy arriving after the primary is still dropped
+    run3, added = ns.merge_releases(run2, [{**agg, "release_id": "other-id"}])
+    assert added == [] and list(run3["source_type"]) == ["primary"]
+
+
+def test_a_primary_release_removes_only_its_own_aggregator_copy(tmp_path):
+    other_ticker = row(
+        ticker="NCAB.ST", title="Eltel vinner ramavtal", url="https://news.google/n", source_type="aggregator"
+    )
+    other_story = row(title="Eltel byter vd", url="https://news.google/v", source_type="aggregator")
+    twin = row(title="Eltel vinner ramavtal - Cision News", url="https://news.google/x", source_type="aggregator")
+    stored, _ = ns.merge_releases(ns.load_releases(tmp_path / "none.csv"), [other_ticker, other_story, twin])
+    path = tmp_path / "releases.csv"
+    ns.save_releases(stored, path)
+    merged, added = ns.merge_releases(ns.load_releases(path), [row()])  # the MFN original arrives
+    ns.save_releases(merged, path)
+    back = ns.load_releases(path)
+    assert sorted(back["url"]) == sorted(
+        ["https://mfn.se/a/Eltel vinner ramavtal", "https://news.google/n", "https://news.google/v"]
+    )
+    assert [r["source_type"] for r in added] == ["primary"]
+
+
+def test_merging_a_large_batch_stays_fast():
+    """A backfill or a larger mfn_limit adds hundreds of primaries at once."""
+    import hashlib
+    import time
+
+    def title(i):  # distinct titles: similar ones on the same day would rightly be merged
+        return " ".join(hashlib.sha1(f"{i}-{k}".encode()).hexdigest()[:8] for k in range(3))
+
+    stored = [
+        row(
+            ticker=f"T{i % 100}.ST",
+            title=title(-i - 1),
+            url=f"https://news.google/{i}",
+            source_type="aggregator",
+            ts=f"2026-09-{1 + i % 28:02d}T06:00:00Z",
+        )
+        for i in range(650)
+    ]
+    base, _ = ns.merge_releases(ns.load_releases(ns.Path("/nope")), stored)
+    batch = [
+        row(ticker=f"T{i % 100}.ST", title=title(i), url=f"https://mfn.se/{i}", ts=f"2026-10-{1 + i % 9:02d}T06:00:00Z")
+        for i in range(800)
+    ]
+    t0 = time.perf_counter()
+    out, added = ns.merge_releases(base, batch)
+    elapsed = time.perf_counter() - t0
+    assert len(added) == 800 and len(out) == 650 + 800
+    assert elapsed < 3.0
