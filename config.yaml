@@ -69,6 +69,12 @@ paper_trading:
     enabled: true
     fraction: 0.5
     remainder_stop: 0.0     # 0 = breakeven
+  # Entry filters for the v0b book only (v0 stays the unfiltered control). Added 2026-10-13,
+  # after the first week's three stop-losses all followed an extreme move in a tiny, volatile
+  # stock, two of them a re-buy right after a stop; v0b trades signalled before then used none.
+  v0b_entry_filters:
+    cooldown_days_after_stop: 10  # no buy within this many weekdays after a stop-out in the stock
+    max_signal_move: 0.30         # no buy when |1-day move on the signal day| is larger
 
 # Watchlist builder (python build_watchlist.py): Nasdaq Stockholm Small Cap + First North
 # Stockholm, filtered on liquidity. Rows marked source=manual in watchlist.csv are always kept.

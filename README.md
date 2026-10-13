@@ -64,7 +64,9 @@ same days, after costs.
   and `v0b` (only primary releases count, timed to when a trade was actually possible) are
   separate paper books with the same exits and costs. An LLM-scored `v1` book is built and
   tested (Claude with a JSON schema, a fingerprint that refuses edited prompts, a cost cap)
-  but **off by default** so the project runs at zero cost.
+  but **off by default** so the project runs at zero cost. v0 stays the unfiltered control;
+  lessons from the live results go into v0b (since 13 Oct: no re-entry within 10 weekdays of a
+  stop-loss, no buying right after a ±30% day), with the change date recorded.
 - **Free and unattended.** GitHub Actions runs the jobs; an external timer (cron-job.org)
   triggers them because GitHub's own schedule proved unreliable. Each run carries a "slot",
   so a backup or a late duplicate trigger skips itself instead of scanning twice.
