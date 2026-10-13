@@ -39,9 +39,9 @@ the news for risks to two funds and labels each story with a likely direction.
 | News spike: ≥ 3 items in 24h and ≥ 3× the week's daily average | +1 |
 | Market cap < 5 bn SEK (only amplifies another signal) | +1 |
 
-Score ≥ 4 opens a paper trade at the **next** day's open; it exits at +30%, −15% or after
-20 trading days. Every trade is compared with the Stockholm small-cap index over exactly the
-same days, after costs.
+Score ≥ 4 opens a paper trade at the **next** usable open (a bar without a real opening price
+is skipped); it exits at +30%, −15% or after 20 trading days. Every trade is compared with the
+Stockholm small-cap index over exactly the same days, after costs.
 
 ## Design decisions
 
@@ -136,6 +136,9 @@ CI runs lint and tests on every push and pull request.
   prices anywhere counts as a holiday. If Yahoo ever drops a trading day for every stock and
   the index at once (a day with blank closes still counts as traded), the bar before it would
   be scored with that day's news. The scan warns whenever it infers a holiday.
+- **Trades without index data are left out.** If the index has no price for a trade's entry
+  or exit day, the trade isn't scored against a pretend flat index: it's left out of the
+  verdict (the report says how many) until the price appears.
 - **Keyword matching.** News signals and the fund watch's risk and direction labels read
   words, not meaning: commentary ("Forget the selloff: …") and op-eds get mislabelled.
 - **One large module.** `scanner.py` (~2,800 lines) mixes fetching, scoring and report

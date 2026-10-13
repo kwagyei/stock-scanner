@@ -202,6 +202,17 @@ instead. Trades are judged against the small-cap index where the trade has it, e
 OMXS30. 10% of the account per trade (`evaluation.stake`), 30 closed trades before a
 verdict (`eval.min_trades`).
 
+**Index returns use exactly the trade's days**: the index's open on the entry day and its
+close on the exit day (for an open trade, the stock's latest bar). They're recomputed on
+every run, for closed trades too. If the index has no price for one of those days (a gap,
+or today's close not published yet), the value is left empty rather than taken from
+another day, the evaluation leaves the trade out and says how many it left out, and a later
+run fills it in once the price is there. Days older than the index history fetched keep
+their values. The partial-exit variant's index figure is set once when its trade closes, so
+a later change to `partial_exit.fraction` doesn't re-weight it. A trade only scored against a 0% index
+would quietly look better or worse than it was. Entries skip a bar whose opening price is
+0 or missing (Yahoo sometimes gives thin stocks one) and buy at the next usable open.
+
 **The verdict**
 
 - **NOT YET**: fewer than 30 closed trades. Keep the rules fixed and wait.
@@ -321,7 +332,8 @@ v0b vs v0 shows what timing and primary-only releases do on their own.
   `https://api.nasdaq.com/api/nordic/instruments/IX3364/chart?assetClass=INDEXES&fromDate=…&toDate=…`
   (`benchmark.primary: "nasdaq:IX3364"`). Yahoo has no usable history for this index. Like the
   share screener it is undocumented; if it fails, the report warns and the trade's primary
-  benchmark stays blank (the evaluation then uses OMXS30 for it).
+  benchmark stays blank (the evaluation then uses OMXS30 for it, or leaves the trade out if
+  OMXS30 is missing for those days too).
 - Spreads: bid and ask from the Nasdaq share screener at scan time.
 
 ## Rebuilding the watchlist

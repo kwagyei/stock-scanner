@@ -34,13 +34,13 @@ def dates(n):
     return [(dt.date(2026, 1, 1) + dt.timedelta(days=i)).isoformat() for i in range(n)]
 
 
-# Four trades, hand-computed. cost 1 -> net 10, 5, -5, 0; bench 1, 0 (missing), 0, 1
+# Four trades, hand-computed. cost 1 -> net 10, 5, -5, 0; bench 1, 0, 0, 1
 # -> excess 9, 5, -5, -1 (exit-date order; the file is deliberately shuffled).
 HAND = [
     (-4, "0", "stop", "2026-01-03"),
     (11, "1", "target", "2026-01-01"),
     (1, "1", "time", "2026-01-04"),
-    (6, "", "time", "2026-01-02"),
+    (6, "0", "time", "2026-01-02"),
 ]
 
 
@@ -114,18 +114,35 @@ def test_zero_closed(tmp_path):
 
 
 def test_one_closed_trade(tmp_path):
-    r = ev.evaluate(ev.load_trades(log(tmp_path, [(20, "", "target", "2026-01-01")])), min_trades=1, cost=1.0)
+    r = ev.evaluate(ev.load_trades(log(tmp_path, [(20, "0", "target", "2026-01-01")])), min_trades=1, cost=1.0)
     assert r["t_stat"] is None and r["p_positive"] is None and r["excess_wo_best"] is None
     assert r["verdict"] == "FAIL"  # can't show it isn't luck with one trade
     report = ev.format_report(r)
     assert "t-statistic of the excess          –" in report and "+19.0%" in report
 
 
-def test_missing_bench_column_counts_as_zero(tmp_path):
+def test_trades_without_any_benchmark_are_left_out_and_counted(tmp_path):
+    """No index return over a trade's days -> it can't be judged against the index. Counting it
+    as 0% would quietly favour or penalise it, so it's left out and reported."""
     path = tmp_path / "p.csv"
-    path.write_text("ticker,status,return_pct,exit_reason,exit_date\nA,closed,5,time,2026-01-01\n")
+    path.write_text(
+        "ticker,status,return_pct,bench_return_pct,bench_primary_return_pct,exit_reason,exit_date\n"
+        "A,closed,5,,,time,2026-01-01\n"  # neither benchmark
+        "B,closed,8,2,,time,2026-01-02\n"  # secondary only
+        "C,closed,3,1,-1,time,2026-01-03\n"  # both: primary is used
+    )
     r = ev.evaluate(ev.load_trades(path), min_trades=1, cost=1.0)
-    assert r["avg_bench"] == 0 and r["avg_excess"] == pytest.approx(4.0)
+    assert r["n"] == 2 and r["n_no_bench"] == 1
+    assert r["avg_excess"] == pytest.approx(((8 - 1 - 2) + (3 - 1 + 1)) / 2)
+    assert r["avg_excess_secondary"] == pytest.approx(((8 - 1 - 2) + (3 - 1 - 1)) / 2)
+    assert "1 closed trade(s) left out" in ev.format_markdown(r)
+    nothing = tmp_path / "q.csv"
+    nothing.write_text("ticker,status,return_pct,exit_reason,exit_date\nA,closed,5,time,2026-01-01\n")
+    r = ev.evaluate(ev.load_trades(nothing), min_trades=1, cost=1.0)
+    assert r["n"] == 0 and r["n_no_bench"] == 1 and r["verdict"] == "NOT YET"
+    # the reports say why, instead of "no closed trades yet"
+    assert "1 closed trade(s), all left out" in ev.format_markdown(r)
+    assert "1 closed trade(s), all left out" in ev.format_report(r)
 
 
 def test_bootstrap_is_reproducible(tmp_path):

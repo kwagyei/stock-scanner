@@ -305,8 +305,9 @@ def test_paper_csv_round_trip(cfg, tmp_paths):
     pd.testing.assert_frame_equal(back, df.astype(str).assign(strategy="v0"), check_dtype=False)
     assert list(back["status"]) == ["open", "closed", "pending"]
 
-    # Re-running the update on loaded string data is idempotent for closed trades.
-    again = scanner.update_paper(back.copy(), {"X.ST": flat(3)}, flat(3), cfg)
+    # Re-running the update on loaded string data with the same prices changes nothing
+    # (benchmarks are recomputed on every run, from the same index data).
+    again = scanner.update_paper(back.copy(), {"X.ST": flat(3)}, flat(3, px=1000), cfg)
     pd.testing.assert_series_equal(again.iloc[1], back.iloc[1])
 
 
@@ -1996,3 +1997,270 @@ def test_scores_log_records_the_as_of_time(cfg, tmp_paths, monkeypatch):
     scanner.main(["--no-email", "--watchlist", str(wl)])
     row = pd.read_csv(scanner.SCORES_LOG, dtype=str).fillna("").iloc[-1]
     assert row["as_of"] == "2026-10-09T09:00+02:00"
+
+
+# --------------------------------------------------------------------------- benchmarks by exact date
+
+
+def _bars_on(dates, px):
+    """OHLCV on the given dates; px = one price per date (open = close = px)."""
+    return pd.DataFrame(
+        [(p, p, p, p, 1000) for p in px],
+        index=pd.DatetimeIndex(dates),
+        columns=["Open", "High", "Low", "Close", "Volume"],
+    )
+
+
+STOCK = _bars_on(["2026-10-07", "2026-10-08", "2026-10-09"], [100, 100, 104])
+
+
+def _entered(bench, bench_primary=None, cfg=None):
+    p = pending_trade("X.ST", "2026-10-07")
+    return scanner.update_paper(p, {"X.ST": STOCK}, bench, cfg or CFG_FOR_SCENARIOS, bench_primary).iloc[0]
+
+
+def test_benchmark_uses_exactly_the_trades_days(cfg):
+    bench = _bars_on(["2026-10-07", "2026-10-08", "2026-10-09"], [1000, 1010, 1030])
+    r = _entered(bench, bench, cfg)
+    assert (r["entry_date"], r["bench_entry"], r["bench_exit"]) == ("2026-10-08", "1010.0000", "1030.0000")
+    assert r["bench_return_pct"] == r["bench_primary_return_pct"] == f"{(1030 / 1010 - 1) * 100:.2f}"
+
+
+def test_a_gap_in_the_index_blanks_instead_of_using_the_day_before(cfg):
+    """The reviewer's case: no index price on the entry day. The old lookup took the 7 Oct price
+    and reported 0% for a day the index moved."""
+    bench = _bars_on(["2026-10-07", "2026-10-09"], [1000, 1030])  # 8 Oct missing inside the history
+    r = _entered(bench, cfg=cfg)
+    assert r["status"] == "open" and r["bench_entry"] == "" and r["bench_return_pct"] == ""
+
+
+def test_index_not_published_yet_is_left_for_the_next_run(cfg):
+    bench = _bars_on(["2026-10-07", "2026-10-08"], [1000, 1010])  # 9 Oct not out yet
+    p = scanner.update_paper(pending_trade("X.ST", "2026-10-07"), {"X.ST": STOCK}, bench, cfg)
+    assert p.iloc[0]["bench_return_pct"] == ""  # nothing to compare yet, but not a gap
+    later = _bars_on(["2026-10-07", "2026-10-08", "2026-10-09"], [1000, 1010, 1030])
+    p = scanner.update_paper(p, {"X.ST": STOCK}, later, cfg)
+    assert p.iloc[0]["bench_return_pct"] == f"{(1030 / 1010 - 1) * 100:.2f}"
+
+
+def test_daytime_fill_without_todays_index_gets_its_entry_later(cfg):
+    """Finding #3: a trade bought at today's open before the index printed today kept no index
+    entry for good. Now the next run fills it in."""
+    forming = _bars_on(["2026-10-07", "2026-10-08"], [100, 100])
+    p = scanner.fill_entries_at_open(
+        pending_trade("X.ST", "2026-10-07"), {"X.ST": forming}, _bars_on(["2026-10-07"], [1000])
+    )
+    assert p.iloc[0]["status"] == "open" and p.iloc[0]["bench_entry"] == ""
+    bench = _bars_on(["2026-10-07", "2026-10-08", "2026-10-09"], [1000, 1010, 1030])
+    r = scanner.update_paper(p, {"X.ST": STOCK}, bench, cfg).iloc[0]
+    assert r["bench_entry"] == "1010.0000" and r["bench_return_pct"] != ""
+
+
+def test_closed_trades_are_repaired_on_later_runs(cfg):
+    """A closed trade with a benchmark from the wrong day (the old lookup) is recomputed."""
+    bench = _bars_on(["2026-10-07", "2026-10-08", "2026-10-09"], [1000, 1010, 1030])
+    rec = {c: "" for c in scanner.PAPER_COLUMNS}
+    rec.update(
+        id="Y",
+        ticker="X.ST",
+        name="X",
+        signal_date="2026-10-07",
+        score="4",
+        status="closed",
+        entry_date="2026-10-08",
+        entry_price="100.0000",
+        exit_date="2026-10-09",
+        exit_price="104.0000",
+        exit_reason="time",
+        return_pct="4.00",
+        bench_entry="1000.0000",
+        bench_exit="1030.0000",
+        bench_return_pct="3.00",
+        universe="v1",
+    )
+    p = scanner.update_paper(pd.DataFrame([rec], columns=scanner.PAPER_COLUMNS), {"X.ST": STOCK}, bench, cfg)
+    assert (p.iloc[0]["bench_entry"], p.iloc[0]["bench_return_pct"]) == ("1010.0000", f"{(1030 / 1010 - 1) * 100:.2f}")
+
+
+def test_history_older_than_the_index_data_is_kept(cfg):
+    """Days before the index history fetched aren't gaps: keep what was computed back then."""
+    bench = _bars_on(["2026-10-09"], [1030])
+    rec = {c: "" for c in scanner.PAPER_COLUMNS}
+    rec.update(
+        id="Y",
+        ticker="X.ST",
+        status="closed",
+        entry_date="2026-10-08",
+        exit_date="2026-10-08",
+        bench_entry="1010.0000",
+        bench_exit="1012.0000",
+        bench_return_pct="0.20",
+        universe="v1",
+    )
+    p = scanner.refresh_benchmarks(pd.DataFrame([rec], columns=scanner.PAPER_COLUMNS), {"X.ST": STOCK}, bench)
+    assert p.iloc[0]["bench_return_pct"] == "0.20"
+
+
+def test_partial_exit_index_return_is_weighted_by_exact_dates():
+    bench = _bars_on(["2026-10-07", "2026-10-08", "2026-10-09"], [1000, 1010, 1030])
+    rec = {c: "" for c in scanner.PAPER_COLUMNS}
+    rec.update(
+        id="Y",
+        ticker="X.ST",
+        status="closed",
+        entry_date="2026-10-08",
+        exit_date="2026-10-09",
+        pe_status="closed",
+        pe_partial_date="2026-10-08",
+        pe_exit_date="2026-10-09",
+        universe="v1",
+    )
+    p = scanner.refresh_benchmarks(
+        pd.DataFrame([rec], columns=scanner.PAPER_COLUMNS), {"X.ST": STOCK}, bench, None, 0.5
+    )
+    expected = 0.5 * (1010 / 1010 - 1) + 0.5 * (1030 / 1010 - 1)
+    assert p.iloc[0]["pe_bench_return_pct"] == f"{expected * 100:.2f}"
+
+
+# --------------------------------------------------------------------------- bad opening prices
+
+
+@pytest.mark.parametrize("bad_open", [0.0, float("nan")])
+def test_entry_skips_an_unusable_open(cfg, bad_open):
+    """Finding #6: an Open of 0 crashed the run (division by zero); NaN left the trade stuck."""
+    h = STOCK.copy()
+    h.loc["2026-10-08", "Open"] = bad_open
+    p = scanner.update_paper(pending_trade("X.ST", "2026-10-07"), {"X.ST": h}, _bars_on(["2026-10-09"], [1]), cfg)
+    r = p.iloc[0]
+    assert (r["status"], r["entry_date"], r["entry_price"]) == ("open", "2026-10-09", "104.0000")
+
+
+def test_entry_waits_when_no_usable_open_yet(cfg):
+    h = _bars_on(["2026-10-07", "2026-10-08"], [100, 0])
+    p = scanner.update_paper(pending_trade("X.ST", "2026-10-07"), {"X.ST": h}, h, cfg)
+    assert p.iloc[0]["status"] == "pending"
+
+
+def test_weekly_outcomes_need_the_index_on_both_days():
+    sig = pd.DataFrame(
+        [{"ticker": "X.ST", "name": "X", "bar_date": "2026-10-07", "score": 4, "reasons": "", "chg_1d": ""}]
+    )
+    bench = _bars_on(["2026-10-07", "2026-10-09"], [1000, 1030])  # 8 Oct missing
+    out = scanner.signal_outcomes(sig, {"X.ST": STOCK}, bench, [1, 2])
+    assert pd.isna(out.iloc[0]["excess_1d"]) and out.iloc[0]["excess_2d"] == pytest.approx(0.04 - 0.03)
+
+
+def test_a_stale_value_over_an_index_gap_is_cleared():
+    """A closed trade benchmarked by the old nearest-earlier lookup across a real index gap must
+    not keep that number: it's blanked, and the evaluation leaves the trade out."""
+    bench = _bars_on(["2026-10-07", "2026-10-09"], [1000, 1030])  # 8 Oct missing inside the history
+    rec = {c: "" for c in scanner.PAPER_COLUMNS}
+    rec.update(
+        id="Y",
+        ticker="X.ST",
+        status="closed",
+        entry_date="2026-10-08",
+        exit_date="2026-10-09",
+        bench_entry="1000.0000",
+        bench_exit="1030.0000",
+        bench_return_pct="3.00",
+        universe="v1",
+    )
+    p = scanner.refresh_benchmarks(pd.DataFrame([rec], columns=scanner.PAPER_COLUMNS), {"X.ST": STOCK}, bench)
+    assert (p.iloc[0]["bench_entry"], p.iloc[0]["bench_exit"], p.iloc[0]["bench_return_pct"]) == ("", "", "")
+
+
+def test_trade_closed_today_before_the_index_prints_today_is_not_compared_with_yesterday(cfg):
+    """Review of the fix: on the evening run Yahoo may not have today's index close yet. A trade
+    stopped out today must not keep yesterday's index figures; it waits for the index."""
+    h = _bars_on(["2026-10-07", "2026-10-08", "2026-10-09", "2026-10-12"], [100, 100, 100, 100])
+    h.loc["2026-10-12", ["Open", "Low", "Close"]] = (90, 40, 50)  # stopped out on 12 Oct
+    bench_to_9th = _bars_on(["2026-10-07", "2026-10-08", "2026-10-09"], [1000, 1010, 1030])
+    p = scanner.update_paper(pending_trade("X.ST", "2026-10-07"), {"X.ST": h.iloc[:3]}, bench_to_9th, cfg)
+    assert p.iloc[0]["bench_return_pct"] != ""  # open, figures up to the 9th
+    p = scanner.update_paper(p, {"X.ST": h}, bench_to_9th, cfg)  # evening of the 12th, index not out yet
+    r = p.iloc[0]
+    assert (r["status"], r["exit_date"]) == ("closed", "2026-10-12")
+    assert r["bench_entry"] == "1010.0000" and r["bench_exit"] == "" and r["bench_return_pct"] == ""
+    later = _bars_on(["2026-10-07", "2026-10-08", "2026-10-09", "2026-10-12"], [1000, 1010, 1030, 1100])
+    r = scanner.update_paper(p, {"X.ST": h}, later, cfg).iloc[0]
+    assert r["bench_return_pct"] == f"{(1100 / 1010 - 1) * 100:.2f}"
+
+
+@pytest.mark.parametrize("bad_open", [0.0, float("nan")])
+def test_a_bad_open_on_a_stop_day_fills_at_the_stop(cfg, bad_open):
+    """Review of the fix: an Open of 0 gave a -100% exit, NaN a 'nan' return. A bad open isn't
+    a price: the stop fills at the stop level."""
+    h = _bars_on(["2026-10-07", "2026-10-08", "2026-10-09", "2026-10-12"], [100, 100, 100, 100])
+    h.loc["2026-10-12", ["Open", "Low"]] = (bad_open, 40)
+    r = scanner.update_paper(pending_trade("X.ST", "2026-10-07"), {"X.ST": h}, h, cfg).iloc[0]
+    stop = 100 * (1 + cfg["paper_trading"]["stop_loss"])
+    assert (r["exit_reason"], r["exit_price"]) == ("stop", f"{stop:.4f}")
+    assert r["pe_return_pct"] == f"{(stop / 100 - 1) * 100:.2f}"
+
+
+def test_bad_open_on_a_target_day_fills_at_the_target(cfg):
+    h = _bars_on(["2026-10-07", "2026-10-08", "2026-10-09"], [100, 100, 100])
+    h.loc["2026-10-09", ["Open", "High"]] = (0.0, 200)
+    r = scanner.update_paper(pending_trade("X.ST", "2026-10-07"), {"X.ST": h}, h, cfg).iloc[0]
+    target = 100 * (1 + cfg["paper_trading"]["take_profit"])
+    assert (r["exit_reason"], r["exit_price"]) == ("target", f"{target:.4f}")
+
+
+def test_a_missing_index_open_on_the_entry_day_is_a_gap():
+    """Review of the fix: the gap check looked at the close only, so a stale value survived an
+    index row with a close but no open on the entry day."""
+    bench = _bars_on(["2026-10-07", "2026-10-08", "2026-10-09"], [1000, 1010, 1030])
+    bench.loc["2026-10-08", "Open"] = float("nan")
+    rec = {c: "" for c in scanner.PAPER_COLUMNS}
+    rec.update(
+        id="Y",
+        ticker="X.ST",
+        status="closed",
+        entry_date="2026-10-08",
+        exit_date="2026-10-09",
+        bench_entry="1000.0000",
+        bench_exit="1030.0000",
+        bench_return_pct="3.00",
+        universe="v1",
+    )
+    p = scanner.refresh_benchmarks(pd.DataFrame([rec], columns=scanner.PAPER_COLUMNS), {"X.ST": STOCK}, bench)
+    assert p.iloc[0]["bench_return_pct"] == ""
+
+
+def test_partial_exit_index_figures_stay_with_their_trade():
+    """Review of the fix: a closed variant row keeps its index figure (made with the fraction its
+    return used); with the variant off, nothing is touched."""
+    bench = _bars_on(["2026-10-07", "2026-10-08", "2026-10-09"], [1000, 1010, 1030])
+    rec = {c: "" for c in scanner.PAPER_COLUMNS}
+    rec.update(
+        id="Y",
+        ticker="X.ST",
+        status="closed",
+        entry_date="2026-10-08",
+        exit_date="2026-10-09",
+        pe_status="closed",
+        pe_partial_date="2026-10-08",
+        pe_exit_date="2026-10-09",
+        pe_bench_return_pct="1.23",
+        universe="v1",
+    )
+    df = pd.DataFrame([rec], columns=scanner.PAPER_COLUMNS)
+    assert (
+        scanner.refresh_benchmarks(df.copy(), {"X.ST": STOCK}, bench, None, 0.9).iloc[0]["pe_bench_return_pct"]
+        == "1.23"
+    )
+    df.loc[0, "pe_status"], df.loc[0, "pe_bench_return_pct"] = "open", "1.23"
+    assert (
+        scanner.refresh_benchmarks(df.copy(), {"X.ST": STOCK}, bench, None, None).iloc[0]["pe_bench_return_pct"]
+        == "1.23"
+    )
+
+
+def test_duplicate_index_dates_use_the_last_usable_value():
+    b = pd.DataFrame(
+        {"Open": [1000.0, float("nan")], "Close": [1001.0, 1002.0]},
+        index=pd.DatetimeIndex(["2026-10-08", "2026-10-08"]),
+    )
+    assert scanner._price_exact(b, "2026-10-08", "Open") == 1000.0
+    assert scanner._price_exact(b, "2026-10-08", "Close") == 1002.0

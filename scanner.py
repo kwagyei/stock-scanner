@@ -555,13 +555,35 @@ def load_paper() -> pd.DataFrame:
     return pd.DataFrame(columns=PAPER_COLUMNS, dtype=str)
 
 
-def _price_on(hist: pd.DataFrame, date: pd.Timestamp, field: str) -> float | None:
-    if hist is None or hist.empty:
+def _price_exact(hist: pd.DataFrame | None, date, field: str) -> float | None:
+    """The price on exactly `date`, or None. Benchmarks must cover the same days as the trade:
+    the nearest earlier day would silently compare different periods."""
+    if hist is None or hist.empty or date is None:
         return None
-    sub = hist[hist.index <= date]
-    if sub.empty:
+    date = pd.Timestamp(date).normalize()
+    if date not in hist.index:
         return None
-    return float(sub.iloc[-1][field])
+    v = hist.loc[[date], field].dropna()  # duplicates: the last usable value
+    v = float(v.iloc[-1]) if len(v) else 0.0
+    return v if v else None
+
+
+def _gap_fill(open_, level: float, worse) -> float:
+    """Exit price when a stop or target is hit after the entry day: the open if it already
+    jumped past the level (worse = min for stops, max for targets), else the level. An open of
+    0 or NaN (Yahoo sometimes gives thin names one) isn't a price: fill at the level."""
+    return worse(float(open_), level) if open_ > 0 else level
+
+
+def _bench_gap(hist: pd.DataFrame | None, date, field: str = "Close") -> bool:
+    """True if the benchmark can't give `field` for `date` now but should have: the date is
+    inside its history with no usable price (a real gap), or after its latest row (not
+    published yet, e.g. Yahoo blanked today's close). Dates before its history (older than the
+    data fetched) aren't gaps: those values are kept."""
+    if hist is None or hist.empty or date is None:
+        return False
+    date = pd.Timestamp(date).normalize()
+    return date >= hist.index.min() and _price_exact(hist, date, field) is None
 
 
 def book(paper: pd.DataFrame, strategy: str = st.V0) -> pd.DataFrame:
@@ -584,24 +606,23 @@ def update_paper(
             continue
         if main_todo:
             _update_main(paper, idx, row, h, bench, pc)
-            _update_primary_bench(paper, idx, h, bench_primary)
         row = paper.loc[idx]
         if pe_enabled and row["entry_date"] and row["pe_status"] != "closed":
             _update_partial(paper, idx, row, h, bench, pc)
-    return paper
+    fraction = pc["partial_exit"].get("fraction", 0.5) if pe_enabled else None
+    return refresh_benchmarks(paper, histories, bench, bench_primary, fraction)
 
 
 def _update_main(paper, idx, row, h, bench, pc) -> None:
     """The fixed paper-trade rules: one exit at target, stop or time."""
     if row["status"] == "pending":
         after = h[h.index > pd.Timestamp(row["signal_date"])]
+        after = after[after["Open"] > 0]  # Yahoo sometimes gives thin names an Open of 0 or NaN
         if after.empty:
             return
         entry_day = after.index[0]
         paper.at[idx, "entry_date"] = entry_day.date().isoformat()
         paper.at[idx, "entry_price"] = f"{float(after.iloc[0]['Open']):.4f}"
-        be = _price_on(bench, entry_day, "Open")
-        paper.at[idx, "bench_entry"] = f"{be:.4f}" if be else ""
         paper.at[idx, "status"] = "open"
         row = paper.loc[idx]
 
@@ -615,15 +636,14 @@ def _update_main(paper, idx, row, h, bench, pc) -> None:
     for n, (day, b) in enumerate(bars.iterrows(), start=1):
         gap_ok = n > 1  # on entry day we bought at the open, so no gap fill
         if b["Low"] <= stop:  # check stop first (conservative)
-            exit_info = (day, min(b["Open"], stop) if gap_ok else stop, "stop")
+            exit_info = (day, _gap_fill(b["Open"], stop, min) if gap_ok else stop, "stop")
         elif b["High"] >= target:
-            exit_info = (day, max(b["Open"], target) if gap_ok else target, "target")
+            exit_info = (day, _gap_fill(b["Open"], target, max) if gap_ok else target, "target")
         elif n >= pc["max_hold_days"]:
             exit_info = (day, b["Close"], "time")
         if exit_info:
             break
 
-    bench_entry = float(row["bench_entry"]) if row["bench_entry"] else None
     if exit_info:
         day, price, reason = exit_info
         paper.at[idx, "status"] = "closed"
@@ -632,36 +652,72 @@ def _update_main(paper, idx, row, h, bench, pc) -> None:
         paper.at[idx, "exit_reason"] = reason
         paper.at[idx, "last_price"] = f"{float(price):.4f}"
         paper.at[idx, "return_pct"] = f"{(float(price) / entry - 1) * 100:.2f}"
-        bx = _price_on(bench, day, "Close")
     else:
         last = float(bars.iloc[-1]["Close"]) if not bars.empty else entry
         paper.at[idx, "last_price"] = f"{last:.4f}"
         paper.at[idx, "return_pct"] = f"{(last / entry - 1) * 100:.2f}"
-        bx = _price_on(bench, bars.index[-1], "Close") if not bars.empty else None
-    if bx and bench_entry:
-        paper.at[idx, "bench_exit"] = f"{bx:.4f}"
-        paper.at[idx, "bench_return_pct"] = f"{(bx / bench_entry - 1) * 100:.2f}"
 
 
-def _update_primary_bench(paper, idx, h, bench_primary) -> None:
-    """Primary-benchmark return over the same days as the main trade (entry open to exit close)."""
-    row = paper.loc[idx]
-    if bench_primary is None or bench_primary.empty or not row["entry_date"]:
-        return
-    entry_day = pd.Timestamp(row["entry_date"])
-    if not row["bench_primary_entry"]:
-        b0 = _price_on(bench_primary, entry_day, "Open") if entry_day in bench_primary.index else None
-        if not b0:
-            return
-        paper.at[idx, "bench_primary_entry"] = f"{b0:.4f}"
-    b0 = float(paper.at[idx, "bench_primary_entry"])
-    end = pd.Timestamp(row["exit_date"]) if row["exit_date"] else h.index[-1]
-    if end < entry_day:  # bought at today's open; no complete bar since the entry yet
-        return
-    bx = _price_on(bench_primary, end, "Close")
-    if bx:
-        paper.at[idx, "bench_primary_exit"] = f"{bx:.4f}"
-        paper.at[idx, "bench_primary_return_pct"] = f"{(bx / b0 - 1) * 100:.2f}"
+def _set_bench(paper, idx, cols: tuple[str, str, str], bench, start, end) -> None:
+    """Entry open, end close and return of one benchmark over [start, end], by exact dates.
+    Both known: set. Either missing but expected (a gap, or not published yet): blank, so no
+    figure ever covers other days than the trade's; the next run fills it in once the index
+    has it, and until then the evaluation leaves the trade out. Days older than the history
+    fetched, or no benchmark data at all this run: leave as is."""
+    c_entry, c_exit, c_ret = cols
+    b0, b1 = _price_exact(bench, start, "Open"), _price_exact(bench, end, "Close")
+    if b0 and b1:
+        paper.at[idx, c_entry], paper.at[idx, c_exit] = f"{b0:.4f}", f"{b1:.4f}"
+        paper.at[idx, c_ret] = f"{(b1 / b0 - 1) * 100:.2f}"
+    elif _bench_gap(bench, start, "Open") or _bench_gap(bench, end, "Close"):
+        paper.at[idx, c_entry] = f"{b0:.4f}" if b0 else ""
+        paper.at[idx, c_exit] = paper.at[idx, c_ret] = ""
+
+
+def refresh_benchmarks(
+    paper: pd.DataFrame,
+    histories: dict,
+    bench: pd.DataFrame | None,
+    bench_primary: pd.DataFrame | None = None,
+    fraction: float | None = 0.5,
+) -> pd.DataFrame:
+    """Index returns over exactly the trade's days, recomputed on every run for open and closed
+    trades: from the entry day's open to the exit day's close (open trades: the stock's latest
+    bar). Re-running repairs values an index gap or a late index print left empty.
+
+    The partial-exit variant weights the index like the position: `fraction` to the day of the
+    partial sale, the rest to its end. fraction=None (variant off) leaves it alone. A closed
+    variant row is only filled in when it is empty, so a later change to the fraction can't
+    re-weight trades whose returns were made with the old one."""
+    for idx, row in paper[paper["entry_date"] != ""].iterrows():
+        start = pd.Timestamp(row["entry_date"])
+        h = histories.get(row["ticker"])
+        latest = h.index[-1] if h is not None and not h.empty else None
+        end = pd.Timestamp(row["exit_date"]) if row["exit_date"] else latest
+        if end is None or end < start:  # bought at today's open; no complete bar since
+            continue
+        _set_bench(paper, idx, ("bench_entry", "bench_exit", "bench_return_pct"), bench, start, end)
+        _set_bench(
+            paper,
+            idx,
+            ("bench_primary_entry", "bench_primary_exit", "bench_primary_return_pct"),
+            bench_primary,
+            start,
+            end,
+        )
+        pe_done = row["pe_status"] == "closed" and row["pe_bench_return_pct"] != ""
+        if fraction is not None and row["pe_status"] in ("open", "closed") and not pe_done:
+            pe_end = pd.Timestamp(row["pe_exit_date"]) if row["pe_exit_date"] else latest
+            part = pd.Timestamp(row["pe_partial_date"]) if row["pe_partial_date"] else None
+            b0, b_end = _price_exact(bench, start, "Open"), _price_exact(bench, pe_end, "Close")
+            b_part = _price_exact(bench, part, "Close") if part is not None else None
+            if b0 and b_end and (b_part or part is None):
+                f = fraction if part is not None else 0.0
+                bret = f * ((b_part / b0 - 1) if part is not None else 0) + (1 - f) * (b_end / b0 - 1)
+                paper.at[idx, "pe_bench_return_pct"] = f"{bret * 100:.2f}"
+            elif _bench_gap(bench, start, "Open") or any(_bench_gap(bench, d) for d in (pe_end, part) if d is not None):
+                paper.at[idx, "pe_bench_return_pct"] = ""
+    return paper
 
 
 def fill_entries_at_open(
@@ -676,20 +732,17 @@ def fill_entries_at_open(
         if h is None or h.empty:
             continue
         after = h[h.index > pd.Timestamp(row["signal_date"])]
-        if after.empty or pd.isna(after.iloc[0]["Open"]) or not float(after.iloc[0]["Open"]):
+        after = after[after["Open"] > 0]  # the next usable open, as in _update_main
+        if after.empty:
             continue
         day, px = after.index[0], float(after.iloc[0]["Open"])
         paper.at[idx, "status"] = "open"
         paper.at[idx, "entry_date"] = day.date().isoformat()
         paper.at[idx, "entry_price"] = f"{px:.4f}"
         paper.at[idx, "last_price"] = f"{px:.4f}"
-        be = _price_on(bench, day, "Open") if bench is not None and day in bench.index else None
+        be = _price_exact(bench, day, "Open")
         paper.at[idx, "bench_entry"] = f"{be:.4f}" if be else ""
-        bp = (
-            _price_on(bench_primary, day, "Open")
-            if bench_primary is not None and not bench_primary.empty and day in bench_primary.index
-            else None
-        )
+        bp = _price_exact(bench_primary, day, "Open")
         paper.at[idx, "bench_primary_entry"] = f"{bp:.4f}" if bp else ""
     return paper
 
@@ -711,15 +764,15 @@ def simulate_partial(bars: pd.DataFrame, entry: float, pc: dict) -> dict:
         gap_ok = n > 1
         if partial is None:
             if b["Low"] <= stop:
-                exit_ = (day, min(b["Open"], stop) if gap_ok else stop, "stop")
+                exit_ = (day, _gap_fill(b["Open"], stop, min) if gap_ok else stop, "stop")
             elif b["High"] >= target:
-                partial = (day, max(b["Open"], target) if gap_ok else target)
+                partial = (day, _gap_fill(b["Open"], target, max) if gap_ok else target)
                 if n >= pc["max_hold_days"]:
                     exit_ = (day, b["Close"], "time")
             elif n >= pc["max_hold_days"]:
                 exit_ = (day, b["Close"], "time")
         elif b["Low"] <= rem_stop:
-            exit_ = (day, min(b["Open"], rem_stop), "remainder stop")
+            exit_ = (day, _gap_fill(b["Open"], rem_stop, min), "remainder stop")
         elif n >= pc["max_hold_days"]:
             exit_ = (day, b["Close"], "time")
         if exit_:
@@ -752,14 +805,6 @@ def _update_partial(paper, idx, row, h, bench, pc) -> None:
         paper.at[idx, "pe_exit_price"] = f"{float(r['exit'][1]):.4f}"
         paper.at[idx, "pe_exit_reason"] = r["exit"][2]
     paper.at[idx, "pe_return_pct"] = f"{r['ret'] * 100:.2f}"
-    # Index return weighted the same way as the position: part to the partial sale, rest to the end.
-    b0 = float(row["bench_entry"]) if row["bench_entry"] else None
-    b_end = _price_on(bench, r["end_day"], "Close")
-    b_part = _price_on(bench, r["partial"][0], "Close") if r["partial"] else None
-    if b0 and b_end and (b_part or not r["partial"]):
-        f = r["fraction"]
-        bret = f * ((b_part / b0 - 1) if r["partial"] else 0) + (1 - f) * (b_end / b0 - 1)
-        paper.at[idx, "pe_bench_return_pct"] = f"{bret * 100:.2f}"
 
 
 def add_paper_signals(
@@ -1246,12 +1291,12 @@ def signal_outcomes(signals: pd.DataFrame, histories: dict, bench: pd.DataFrame,
         h, day = histories.get(s["ticker"]), pd.Timestamp(s["bar_date"])
         if h is not None and not h.empty and day in h.index:
             pos = h.index.get_loc(day)
-            c0, b0 = float(h["Close"].iloc[pos]), _price_on(bench, day, "Close")
+            c0, b0 = float(h["Close"].iloc[pos]), _price_exact(bench, day, "Close")
             for n in horizons:
                 if pos + n >= len(h):
                     continue
                 r = float(h["Close"].iloc[pos + n]) / c0 - 1
-                b1 = _price_on(bench, h.index[pos + n], "Close")
+                b1 = _price_exact(bench, h.index[pos + n], "Close")
                 rec[f"ret_{n}d"] = r
                 rec[f"excess_{n}d"] = r - (b1 / b0 - 1) if b0 and b1 else float("nan")
         out.append(rec)
