@@ -14,7 +14,9 @@ Usage:
 
 Costs: costs.commission_pct per side plus half the bid-ask spread per side (the spread logged
 at signal time, else costs.half_spread_pct). --cost replaces this with one round-trip figure.
-Benchmark: the primary benchmark (small caps) where a trade has it, else the secondary (OMXS30).
+Benchmark: the primary benchmark (small caps) where a trade has it, else the secondary (OMXS30),
+always over exactly the trade's days. A trade with neither is left out and counted, not scored
+against a 0% index.
 
 Verdict:
   NOT YET  fewer closed trades than --min-trades
@@ -103,7 +105,7 @@ def closed_trades(
     paper: pd.DataFrame, variant: bool = False, strategy: str | None = None, costs: dict | None = None
 ) -> pd.DataFrame:
     """Closed trades as numbers, oldest first: ret, bench (primary benchmark where known, else the
-    secondary; missing -> 0), bench_secondary, reason, exit_date, move and cost (per-trade round
+    secondary; NaN if neither is known), bench_secondary, reason, exit_date, move and cost (per-trade round
     trip from `costs`, or NaN = use evaluate's flat cost). `strategy` picks one paper book
     (rows without a strategy are v0). The partial-exit variant has only the secondary benchmark."""
     p = "pe_" if variant else ""
@@ -123,8 +125,8 @@ def closed_trades(
         {
             "ticker": col("ticker"),
             "ret": pd.to_numeric(col(f"{p}return_pct"), errors="coerce"),
-            "bench": primary.fillna(secondary).fillna(0.0),
-            "bench_secondary": secondary.fillna(0.0),
+            "bench": primary.fillna(secondary),
+            "bench_secondary": secondary,
             "reason": col(f"{p}exit_reason").replace("", "unknown"),
             "exit_date": col(f"{p}exit_date"),
             "move": pd.to_numeric(col("signal_move"), errors="coerce"),  # same signal for both rule sets
@@ -169,7 +171,20 @@ def evaluate(
     move_threshold: float = 0.10,
 ) -> dict:
     """All statistics plus the verdict. Percent values are in percent (2.5 = 2.5%)."""
-    res = {"n": 0, "cost": cost, "stake": stake, "min_trades": min_trades, "file_missing": trades is None}
+    res = {
+        "n": 0,
+        "cost": cost,
+        "stake": stake,
+        "min_trades": min_trades,
+        "file_missing": trades is None,
+        "n_no_bench": 0,
+    }
+    if trades is not None and not trades.empty and "bench" in trades:
+        # A trade without any index return over its days can't be judged against the index;
+        # counting it as an index return of 0% would quietly favour or penalise it. Leave it out.
+        missing = trades["bench"].isna()
+        res["n_no_bench"] = int(missing.sum())
+        trades = trades[~missing]
     if trades is None or trades.empty:
         res.update(verdict="NOT YET", checks={})
         return res
@@ -215,8 +230,8 @@ def evaluate(
             "avg_bench": float(trades["bench"].mean()),
             "avg_excess": float(excess.mean()),
             "median_excess": float(excess.median()),
-            "avg_excess_secondary": float((net - trades["bench_secondary"]).mean())
-            if "bench_secondary" in trades
+            "avg_excess_secondary": float((net - trades["bench_secondary"]).dropna().mean())
+            if "bench_secondary" in trades and trades["bench_secondary"].notna().any()
             else None,
             "excess_wo_best": without(1),
             "excess_wo_best2": without(2),
@@ -516,6 +531,8 @@ def format_markdown(res: dict) -> str:
     out += [f"| {icon(ok)} | {name[0].upper() + name[1:]} | {detail[name]} |" for name, ok in res["checks"].items()]
     if res["verdict"] == "NOT YET":
         out += ["", "<sub>⏳ = not decided until there are enough trades. Early numbers can change a lot.</sub>"]
+    if res.get("n_no_bench"):
+        out += ["", f"<sub>{res['n_no_bench']} closed trade(s) left out: no index price for their days yet.</sub>"]
     out += [
         "",
         f"### Per trade, after {res['cost']:.1f}% cost",
@@ -631,6 +648,8 @@ def format_report(res: dict, source: str = "data/paper_trades.csv", label: str =
         lines.append(f"  {mark(ok)} {name}: {detail[name]}")
     if res["verdict"] == "NOT YET":
         lines.append("  (Too few trades to judge. The numbers below are early and can change a lot.)")
+    if res.get("n_no_bench"):
+        lines.append(f"  ({res['n_no_bench']} closed trade(s) left out: no index price for their days yet.)")
     t = "–" if res["t_stat"] is None else f"{res['t_stat']:.2f}"
     pp = "–" if res["p_positive"] is None else f"{res['p_positive']:.0%}"
     loss = "–" if res["avg_loss"] is None else f"{res['avg_loss']:+.1f}%"
