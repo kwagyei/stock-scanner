@@ -2017,7 +2017,7 @@ def test_benchmark_uses_exactly_the_trades_days(cfg):
 
 
 def test_a_gap_in_the_index_blanks_instead_of_using_the_day_before(cfg):
-    """The reviewer's case: no index price on the entry day. The old lookup took the 7 Oct price
+    """No index price on the entry day. The old lookup took the 7 Oct price
     and reported 0% for a day the index moved."""
     bench = _bars_on(["2026-10-07", "2026-10-09"], [1000, 1030])  # 8 Oct missing inside the history
     r = _entered(bench, cfg=cfg)
@@ -2034,7 +2034,7 @@ def test_index_not_published_yet_is_left_for_the_next_run(cfg):
 
 
 def test_daytime_fill_without_todays_index_gets_its_entry_later(cfg):
-    """Finding #3: a trade bought at today's open before the index printed today kept no index
+    """A trade bought at today's open before the index printed today used to keep no index
     entry for good. Now the next run fills it in."""
     forming = _bars_on(["2026-10-07", "2026-10-08"], [100, 100])
     p = scanner.fill_entries_at_open(
@@ -2117,7 +2117,7 @@ def test_partial_exit_index_return_is_weighted_by_exact_dates():
 
 @pytest.mark.parametrize("bad_open", [0.0, float("nan")])
 def test_entry_skips_an_unusable_open(cfg, bad_open):
-    """Finding #6: an Open of 0 crashed the run (division by zero); NaN left the trade stuck."""
+    """An Open of 0 used to crash the run (division by zero) and a NaN Open left the trade stuck."""
     h = STOCK.copy()
     h.loc["2026-10-08", "Open"] = bad_open
     p = scanner.update_paper(pending_trade("X.ST", "2026-10-07"), {"X.ST": h}, _bars_on(["2026-10-09"], [1]), cfg)
@@ -2161,7 +2161,7 @@ def test_a_stale_value_over_an_index_gap_is_cleared():
 
 
 def test_trade_closed_today_before_the_index_prints_today_is_not_compared_with_yesterday(cfg):
-    """Review of the fix: on the evening run Yahoo may not have today's index close yet. A trade
+    """On the evening run Yahoo may not have today's index close yet. A trade
     stopped out today must not keep yesterday's index figures; it waits for the index."""
     h = _bars_on(["2026-10-07", "2026-10-08", "2026-10-09", "2026-10-12"], [100, 100, 100, 100])
     h.loc["2026-10-12", ["Open", "Low", "Close"]] = (90, 40, 50)  # stopped out on 12 Oct
@@ -2179,7 +2179,7 @@ def test_trade_closed_today_before_the_index_prints_today_is_not_compared_with_y
 
 @pytest.mark.parametrize("bad_open", [0.0, float("nan")])
 def test_a_bad_open_on_a_stop_day_fills_at_the_stop(cfg, bad_open):
-    """Review of the fix: an Open of 0 gave a -100% exit, NaN a 'nan' return. A bad open isn't
+    """An Open of 0 used to give a -100% exit and NaN a 'nan' return. A bad open isn't
     a price: the stop fills at the stop level."""
     h = _bars_on(["2026-10-07", "2026-10-08", "2026-10-09", "2026-10-12"], [100, 100, 100, 100])
     h.loc["2026-10-12", ["Open", "Low"]] = (bad_open, 40)
@@ -2198,7 +2198,7 @@ def test_bad_open_on_a_target_day_fills_at_the_target(cfg):
 
 
 def test_a_missing_index_open_on_the_entry_day_is_a_gap():
-    """Review of the fix: the gap check looked at the close only, so a stale value survived an
+    """A gap check on the close alone let a stale value survive an
     index row with a close but no open on the entry day."""
     bench = _bars_on(["2026-10-07", "2026-10-08", "2026-10-09"], [1000, 1010, 1030])
     bench.loc["2026-10-08", "Open"] = float("nan")
@@ -2219,7 +2219,7 @@ def test_a_missing_index_open_on_the_entry_day_is_a_gap():
 
 
 def test_partial_exit_index_figures_stay_with_their_trade():
-    """Review of the fix: a closed variant row keeps its index figure (made with the fraction its
+    """A closed variant row keeps its index figure (made with the fraction its
     return used); with the variant off, nothing is touched."""
     bench = _bars_on(["2026-10-07", "2026-10-08", "2026-10-09"], [1000, 1010, 1030])
     rec = {c: "" for c in scanner.PAPER_COLUMNS}
