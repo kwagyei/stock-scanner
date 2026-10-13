@@ -563,18 +563,27 @@ def _price_exact(hist: pd.DataFrame | None, date, field: str) -> float | None:
     date = pd.Timestamp(date).normalize()
     if date not in hist.index:
         return None
-    v = hist.at[date, field]
-    v = float(v.iloc[-1]) if isinstance(v, pd.Series) else float(v)
-    return v if v and not math.isnan(v) else None
+    v = hist.loc[[date], field].dropna()  # duplicates: the last usable value
+    v = float(v.iloc[-1]) if len(v) else 0.0
+    return v if v else None
 
 
-def _bench_gap(hist: pd.DataFrame | None, date) -> bool:
-    """True if `date` lies inside the benchmark's history but has no usable price there (a real
-    gap), as opposed to lying beyond it (not published yet, or older than the history fetched)."""
+def _gap_fill(open_, level: float, worse) -> float:
+    """Exit price when a stop or target is hit after the entry day: the open if it already
+    jumped past the level (worse = min for stops, max for targets), else the level. An open of
+    0 or NaN (Yahoo sometimes gives thin names one) isn't a price: fill at the level."""
+    return worse(float(open_), level) if open_ > 0 else level
+
+
+def _bench_gap(hist: pd.DataFrame | None, date, field: str = "Close") -> bool:
+    """True if the benchmark can't give `field` for `date` now but should have: the date is
+    inside its history with no usable price (a real gap), or after its latest row (not
+    published yet, e.g. Yahoo blanked today's close). Dates before its history (older than the
+    data fetched) aren't gaps: those values are kept."""
     if hist is None or hist.empty or date is None:
         return False
     date = pd.Timestamp(date).normalize()
-    return hist.index.min() <= date <= hist.index.max() and _price_exact(hist, date, "Close") is None
+    return date >= hist.index.min() and _price_exact(hist, date, field) is None
 
 
 def book(paper: pd.DataFrame, strategy: str = st.V0) -> pd.DataFrame:
@@ -600,7 +609,7 @@ def update_paper(
         row = paper.loc[idx]
         if pe_enabled and row["entry_date"] and row["pe_status"] != "closed":
             _update_partial(paper, idx, row, h, bench, pc)
-    fraction = (pc.get("partial_exit") or {}).get("fraction", 0.5)
+    fraction = pc["partial_exit"].get("fraction", 0.5) if pe_enabled else None
     return refresh_benchmarks(paper, histories, bench, bench_primary, fraction)
 
 
@@ -627,9 +636,9 @@ def _update_main(paper, idx, row, h, bench, pc) -> None:
     for n, (day, b) in enumerate(bars.iterrows(), start=1):
         gap_ok = n > 1  # on entry day we bought at the open, so no gap fill
         if b["Low"] <= stop:  # check stop first (conservative)
-            exit_info = (day, min(b["Open"], stop) if gap_ok else stop, "stop")
+            exit_info = (day, _gap_fill(b["Open"], stop, min) if gap_ok else stop, "stop")
         elif b["High"] >= target:
-            exit_info = (day, max(b["Open"], target) if gap_ok else target, "target")
+            exit_info = (day, _gap_fill(b["Open"], target, max) if gap_ok else target, "target")
         elif n >= pc["max_hold_days"]:
             exit_info = (day, b["Close"], "time")
         if exit_info:
@@ -651,14 +660,16 @@ def _update_main(paper, idx, row, h, bench, pc) -> None:
 
 def _set_bench(paper, idx, cols: tuple[str, str, str], bench, start, end) -> None:
     """Entry open, end close and return of one benchmark over [start, end], by exact dates.
-    Both known: set. Either a real gap in the benchmark: blank (the evaluation leaves the trade
-    out). Otherwise (not published yet, or older than the history fetched): leave as is."""
+    Both known: set. Either missing but expected (a gap, or not published yet): blank, so no
+    figure ever covers other days than the trade's; the next run fills it in once the index
+    has it, and until then the evaluation leaves the trade out. Days older than the history
+    fetched, or no benchmark data at all this run: leave as is."""
     c_entry, c_exit, c_ret = cols
     b0, b1 = _price_exact(bench, start, "Open"), _price_exact(bench, end, "Close")
     if b0 and b1:
         paper.at[idx, c_entry], paper.at[idx, c_exit] = f"{b0:.4f}", f"{b1:.4f}"
         paper.at[idx, c_ret] = f"{(b1 / b0 - 1) * 100:.2f}"
-    elif _bench_gap(bench, start) or _bench_gap(bench, end):
+    elif _bench_gap(bench, start, "Open") or _bench_gap(bench, end, "Close"):
         paper.at[idx, c_entry] = f"{b0:.4f}" if b0 else ""
         paper.at[idx, c_exit] = paper.at[idx, c_ret] = ""
 
@@ -668,13 +679,16 @@ def refresh_benchmarks(
     histories: dict,
     bench: pd.DataFrame | None,
     bench_primary: pd.DataFrame | None = None,
-    fraction: float = 0.5,
+    fraction: float | None = 0.5,
 ) -> pd.DataFrame:
     """Index returns over exactly the trade's days, recomputed on every run for open and closed
     trades: from the entry day's open to the exit day's close (open trades: the stock's latest
-    bar). The partial-exit variant weights the index like the position: `fraction` to the day
-    of the partial sale, the rest to its end. Re-running repairs values an index gap or a late
-    index print left empty or stale."""
+    bar). Re-running repairs values an index gap or a late index print left empty.
+
+    The partial-exit variant weights the index like the position: `fraction` to the day of the
+    partial sale, the rest to its end. fraction=None (variant off) leaves it alone. A closed
+    variant row is only filled in when it is empty, so a later change to the fraction can't
+    re-weight trades whose returns were made with the old one."""
     for idx, row in paper[paper["entry_date"] != ""].iterrows():
         start = pd.Timestamp(row["entry_date"])
         h = histories.get(row["ticker"])
@@ -691,7 +705,8 @@ def refresh_benchmarks(
             start,
             end,
         )
-        if row["pe_status"] in ("open", "closed"):
+        pe_done = row["pe_status"] == "closed" and row["pe_bench_return_pct"] != ""
+        if fraction is not None and row["pe_status"] in ("open", "closed") and not pe_done:
             pe_end = pd.Timestamp(row["pe_exit_date"]) if row["pe_exit_date"] else latest
             part = pd.Timestamp(row["pe_partial_date"]) if row["pe_partial_date"] else None
             b0, b_end = _price_exact(bench, start, "Open"), _price_exact(bench, pe_end, "Close")
@@ -700,7 +715,7 @@ def refresh_benchmarks(
                 f = fraction if part is not None else 0.0
                 bret = f * ((b_part / b0 - 1) if part is not None else 0) + (1 - f) * (b_end / b0 - 1)
                 paper.at[idx, "pe_bench_return_pct"] = f"{bret * 100:.2f}"
-            elif any(_bench_gap(bench, d) for d in (start, pe_end, part) if d is not None):
+            elif _bench_gap(bench, start, "Open") or any(_bench_gap(bench, d) for d in (pe_end, part) if d is not None):
                 paper.at[idx, "pe_bench_return_pct"] = ""
     return paper
 
@@ -717,7 +732,8 @@ def fill_entries_at_open(
         if h is None or h.empty:
             continue
         after = h[h.index > pd.Timestamp(row["signal_date"])]
-        if after.empty or pd.isna(after.iloc[0]["Open"]) or not float(after.iloc[0]["Open"]):
+        after = after[after["Open"] > 0]  # the next usable open, as in _update_main
+        if after.empty:
             continue
         day, px = after.index[0], float(after.iloc[0]["Open"])
         paper.at[idx, "status"] = "open"
@@ -748,15 +764,15 @@ def simulate_partial(bars: pd.DataFrame, entry: float, pc: dict) -> dict:
         gap_ok = n > 1
         if partial is None:
             if b["Low"] <= stop:
-                exit_ = (day, min(b["Open"], stop) if gap_ok else stop, "stop")
+                exit_ = (day, _gap_fill(b["Open"], stop, min) if gap_ok else stop, "stop")
             elif b["High"] >= target:
-                partial = (day, max(b["Open"], target) if gap_ok else target)
+                partial = (day, _gap_fill(b["Open"], target, max) if gap_ok else target)
                 if n >= pc["max_hold_days"]:
                     exit_ = (day, b["Close"], "time")
             elif n >= pc["max_hold_days"]:
                 exit_ = (day, b["Close"], "time")
         elif b["Low"] <= rem_stop:
-            exit_ = (day, min(b["Open"], rem_stop), "remainder stop")
+            exit_ = (day, _gap_fill(b["Open"], rem_stop, min), "remainder stop")
         elif n >= pc["max_hold_days"]:
             exit_ = (day, b["Close"], "time")
         if exit_:

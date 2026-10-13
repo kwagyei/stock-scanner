@@ -140,6 +140,9 @@ def test_trades_without_any_benchmark_are_left_out_and_counted(tmp_path):
     nothing.write_text("ticker,status,return_pct,exit_reason,exit_date\nA,closed,5,time,2026-01-01\n")
     r = ev.evaluate(ev.load_trades(nothing), min_trades=1, cost=1.0)
     assert r["n"] == 0 and r["n_no_bench"] == 1 and r["verdict"] == "NOT YET"
+    # the reports say why, instead of "no closed trades yet"
+    assert "1 closed trade(s), all left out" in ev.format_markdown(r)
+    assert "1 closed trade(s), all left out" in ev.format_report(r)
 
 
 def test_bootstrap_is_reproducible(tmp_path):

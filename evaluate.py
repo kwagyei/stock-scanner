@@ -511,6 +511,11 @@ def callout(res: dict) -> tuple[str, str]:
 def format_markdown(res: dict) -> str:
     """The full report as Markdown tables (GitHub pages). Same numbers as format_report."""
     if res["n"] == 0:
+        if res.get("n_no_bench"):
+            return (
+                f"_{res['n_no_bench']} closed trade(s), all left out: no index price for their days yet. "
+                "They count once the index has those days._\n"
+            )
         return (
             "_No closed paper trades yet. The numbers appear here once the first trade closes._\n"
             if not res["file_missing"]
@@ -626,12 +631,12 @@ def format_report(res: dict, source: str = "data/paper_trades.csv", label: str =
             + "\n"
         )
     if res["n"] == 0:
-        return (
-            "\n".join(
-                lines + ["No closed paper trades yet.", "", f"VERDICT: NOT YET – 0 of {res['min_trades']} trades"]
-            )
-            + "\n"
+        what = (
+            f"{res['n_no_bench']} closed trade(s), all left out: no index price for their days yet."
+            if res.get("n_no_bench")
+            else "No closed paper trades yet."
         )
+        return "\n".join(lines + [what, "", f"VERDICT: NOT YET – 0 of {res['min_trades']} trades"]) + "\n"
 
     mark = lambda ok: "✓" if ok else "✗"
     lines.append(

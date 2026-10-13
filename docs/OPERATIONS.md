@@ -204,10 +204,12 @@ verdict (`eval.min_trades`).
 
 **Index returns use exactly the trade's days**: the index's open on the entry day and its
 close on the exit day (for an open trade, the stock's latest bar). They're recomputed on
-every run, for closed trades too, so a value an index gap or a late index print left empty
-or wrong is repaired once the price is there. If the index has a real gap on one of those
-days, the value is left empty rather than taken from the day before, and the evaluation
-leaves the trade out and says how many it left out. A trade only scored against a 0% index
+every run, for closed trades too. If the index has no price for one of those days (a gap,
+or today's close not published yet), the value is left empty rather than taken from
+another day, the evaluation leaves the trade out and says how many it left out, and a later
+run fills it in once the price is there. Days older than the index history fetched keep
+their values. The partial-exit variant's index figure is set once when its trade closes, so
+a later change to `partial_exit.fraction` doesn't re-weight it. A trade only scored against a 0% index
 would quietly look better or worse than it was. Entries skip a bar whose opening price is
 0 or missing (Yahoo sometimes gives thin stocks one) and buy at the next usable open.
 
