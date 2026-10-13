@@ -667,7 +667,8 @@ def test_main_applies_title_match(cfg, tmp_paths, monkeypatch):
     feed = [
         news("di.se", h, t) for h, t in ((1, "Stille rusar"), (2, "Rockbjörnens röda matta"), (3, "Seger för RIG Haga"))
     ]
-    monkeypatch.setattr(scanner, "fetch_history", lambda t, p: flat(70))
+    start = pd.bdate_range(end=NOW.date(), periods=70)[0]  # latest bar = NOW's day, as in a real run
+    monkeypatch.setattr(scanner, "fetch_history", lambda t, p: flat(70, start=start))
     monkeypatch.setattr(scanner, "fetch_news", lambda q, c: feed)
     monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: None)
     monkeypatch.setattr(scanner.time, "sleep", lambda s: None)
@@ -1892,3 +1893,48 @@ def test_parse_share_ids():
         }
     }
     assert scanner.parse_share_ids(payload) == {"SAAB-B.ST": "SSE1"}
+
+
+# --------------------------------------------------------------------------- no look-ahead in daytime runs
+
+
+def _mfn_xml(*items):
+    body = "".join(
+        f"<item><title>{t}</title><link>https://mfn.se/a/x/{i}</link><pubDate>{d}</pubDate>"
+        f'<x:language>sv</x:language><x:content type="text">{t}.</x:content></item>'
+        for i, (t, d) in enumerate(items)
+    )
+    return (
+        f'<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" '
+        f'xmlns:x="https://mfn.se/schemas/rss-ns-x/"><channel>{body}</channel></rss>'
+    ).encode()
+
+
+@pytest.mark.parametrize(
+    "release_utc, counts",
+    [
+        ("Thu, 08 Oct 2026 18:00:00 +0000", True),  # Thu 20:00 Stockholm: before Fri's open
+        ("Fri, 09 Oct 2026 08:00:00 +0000", False),  # Fri 10:00: after the open the trade buys at
+    ],
+)
+def test_daytime_run_does_not_credit_yesterdays_bar_with_todays_release(
+    cfg, tmp_paths, monkeypatch, release_utc, counts
+):
+    wl = tmp_paths / "watchlist.csv"
+    wl.write_text("ticker,name,query,mfn_slug\nX.ST,X,X,x\n")
+    start = pd.bdate_range(end="2026-10-08", periods=70)[0]  # last complete bar: Thu 8 Oct
+    h = flat(70, start=start)
+    h.iloc[-1] = (100, 101, 99, 100, 4000)  # 4x volume: +1, small cap +1; a release would add +2
+    data = {"X.ST": h, "^OMX": flat(70, px=1000, start=start), "nasdaq:IX3364": flat(70, px=500, start=start)}
+    monkeypatch.setattr(scanner, "fetch_history", lambda t, p: data[t])
+    monkeypatch.setattr(scanner, "fetch_news", lambda q, c: [])
+    monkeypatch.setattr(scanner, "fetch_market_cap", lambda t: 1e9)
+    monkeypatch.setattr(scanner.time, "sleep", lambda s: None)
+    monkeypatch.setattr(scanner.ns, "fetch_mfn_xml", lambda s, n: _mfn_xml(("X AB tecknar avtal", release_utc)))
+    monkeypatch.setattr(scanner, "_now", lambda: dt.datetime(2026, 10, 9, 9, 0, tzinfo=UTC))  # Fri 11:00
+    scanner.main(["--no-email", "--watchlist", str(wl)])
+    row = pd.read_csv(scanner.SCORES_LOG, dtype=str).fillna("").iloc[-1]
+    assert row["bar_date"] == "2026-10-08"
+    assert (row["pts_release"] == "2") is counts  # v0
+    assert (row["score"] == "4") is counts  # v0: 2 without the release, 4 with it
+    assert (row["score_v0b"] == "4") is counts  # v0b: the same release window

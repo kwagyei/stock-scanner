@@ -46,8 +46,13 @@ same days, after costs.
 ## Design decisions
 
 - **Forward paper trading, not a backtest.** Results build up slowly, but there is no
-  look-ahead and no survivorship bias, and the rules can't be quietly fitted to history.
-  The rules are fixed; changing them would reset the experiment.
+  survivorship bias and the rules can't be quietly fitted to history. The rules are fixed;
+  changing them would reset the experiment.
+- **No look-ahead, enforced by time.** A signal on day D buys at the next trading day's 09:00
+  open, so news and releases count for D only if they were published before that open (or
+  before the run, if it's earlier). A scan run during the next session can't credit D with
+  news it couldn't have traded on. A code review found that daytime runs used to; the fix
+  came with tests for runs before, during and after the session, weekends and holidays.
 - **A verdict that is allowed to say "not yet".** PASS needs ≥ 30 closed trades, a positive
   average excess return after costs, still positive with the single best trade removed, and
   t > 2. Anything less is FAIL or NOT YET. Costs are 0.1% commission plus half the bid-ask

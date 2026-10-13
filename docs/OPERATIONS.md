@@ -258,6 +258,18 @@ data, so weekends and holidays need no calendar. The signal bar is the trading d
 entry day: v0b and v1 count releases from 09:00 on the signal bar up to the next open, and the
 paper trade buys at the next open as usual. The event study uses the same entry day.
 
+**As-of time (all strategies, since 13 Oct 2026).** Every bar is scored "as of" the next
+trading day's 09:00 open, or the time of the run if that's earlier
+(`strategies.as_of_for_bar`). Releases and news published at or after it don't count for
+that bar, in v0 as well: v0's 24-hour release and news windows end at the as-of time. Evening
+runs (after 18:00) and morning runs (before 09:00) are unaffected; a run during the session,
+or one still on an older bar because Yahoo hadn't delivered the latest day, no longer sees
+news from after the open its trade would buy at. The next trading day is the first weekday
+after the bar that has data or hasn't finished yet, so a holiday's releases still count for
+the bar before it. Before the fix, the two daytime runs on 8 Oct credited three score-3
+alerts (Freja, Acconeer, AlzeCure) with releases published after the open; they're in the
+signals log and weekly hit rates, but no paper trade came from them.
+
 **Files**
 
 | File | What's in it |

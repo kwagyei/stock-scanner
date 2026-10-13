@@ -458,13 +458,17 @@ def price_metrics(hist: pd.DataFrame, cfg: dict) -> dict | None:
 def news_metrics(items: list[dict], now: dt.datetime, cfg: dict, releases=()) -> dict:
     """items: Google News results. releases: direct company releases (MFN).
 
+    `now` is the as-of time (strategies.as_of_for_bar): the windows end there, and anything
+    published at or after it is ignored, so a run during the next session can't credit the
+    previous bar with news that came out after the open its trade buys at.
     Releases only feed the release signal and hype check; the news-spike count
     stays based on Google News alone.
     """
     lookback = cfg["news"]["lookback_days"]
     t = cfg["thresholds"]
     day = dt.timedelta(hours=24)
-    dated = [i for i in items if i["ts"] is not None]
+    dated = [i for i in items if i["ts"] is not None and i["ts"] < now]
+    releases = [r for r in releases if r["ts"] < now]
     recent = sorted([i for i in dated if now - i["ts"] <= day], key=lambda i: i["ts"], reverse=True)
     older = [i for i in dated if day < now - i["ts"] <= dt.timedelta(days=lookback)]
     baseline = len(older) / max(lookback - 1, 1)
@@ -2665,6 +2669,9 @@ def main(argv=None) -> int:
 
     rows, missing, stale = [], [], []
     release_rows = []
+    # Trading days seen in the price data, for each bar's as-of time (strategies.as_of_for_bar)
+    market_days = set(bench.index).union(*(h.index for h in histories.values() if h is not None and not h.empty))
+    cutoff = dt.time(*(int(x) for x in str(cfg.get("complete_bar_after", "18:00")).split(":")))
     stored_releases = ns.load_releases(RELEASES_LOG)
     seen = last_logged_bars()
     for _, w in wl.iterrows():
@@ -2700,7 +2707,10 @@ def main(argv=None) -> int:
                         run_warnings.append(gap)
                     release_rows += primary
                 time.sleep(pause)
-        nm = news_metrics(items, now, cfg, releases)
+        as_of = st.as_of_for_bar(pm["date"], now, market_days, cutoff)
+        if as_of < now:
+            print(f"[info] {w['ticker']}: bar {pm['date']} scored with news up to {as_of:%a %d %b %H:%M}")
+        nm = news_metrics(items, as_of.to_pydatetime(), cfg, releases)
         mcap = fetch_market_cap(w["ticker"])
         pts, reasons, hype = score_breakdown(pm, nm, mcap, cfg)
         score = sum(pts.values())
@@ -2717,6 +2727,7 @@ def main(argv=None) -> int:
                 "hype": hype,
                 "points": pts,
                 "n_releases": len(nm["releases_24h"]),
+                "as_of": as_of,
             }
         )
     rows.sort(key=lambda r: (r["score"], r["vol_ratio"] if not math.isnan(r["vol_ratio"]) else 0), reverse=True)
@@ -2726,17 +2737,16 @@ def main(argv=None) -> int:
         print(f"[info] releases.csv: {len(added)} new release(s)")
     llm_scores, llm_new = score_releases(stored_releases, wl, cfg, run_warnings)
     usable = ls.usable_scores(llm_scores, cfg["llm"]["prompt_version"]) if cfg.get("llm") else llm_scores.iloc[0:0]
-    complete_today = today_bar_complete(now_local, cfg)
     spreads = share_spreads
     for r in rows:
-        r.update(st.strategy_scores(r, stored_releases, usable, cfg, now, complete_today))
+        r.update(st.strategy_scores(r, stored_releases, usable, cfg, r["as_of"]))
         r["spread_pct"] = spreads.get(r["ticker"])
 
     if cfg["paper_trading"]["enabled"]:
         paper = backfill_signal_moves(paper, histories)
         paper = update_paper(paper, histories, bench, cfg, bench_primary)
-        if not today_bar_complete(now_local, cfg):
-            paper = fill_entries_at_open(paper, *live)
+        if not today_bar_complete(now_local, cfg) and now_local.time() >= st.OPEN:
+            paper = fill_entries_at_open(paper, *live)  # today's open exists from 09:00
         for strategy in st.strategy_labels(cfg) if cfg.get("llm") else [st.V0]:
             paper = add_paper_signals(paper, rows, cfg, watchlist_version(Path(args.watchlist)), strategy)
         paper.to_csv(PAPER_LOG, index=False)

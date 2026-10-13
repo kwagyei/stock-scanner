@@ -77,28 +77,60 @@ def frame(*rows):
     return pd.DataFrame(list(rows), columns=ns.RELEASE_COLUMNS)
 
 
+# Trading days in the price data for the as-of tests: Mon 5 – Fri 9 Oct, then Tue 13 (Mon 12 holiday)
+MARKET = DAYS
+
+
+def at(text):  # a Stockholm wall-clock time (CEST in October) as UTC
+    return pd.Timestamp(text, tz="Europe/Stockholm").tz_convert("UTC").to_pydatetime()
+
+
+@pytest.mark.parametrize(
+    "bar, now, expected",
+    [
+        ("2026-10-08", "2026-10-08 18:52", "2026-10-08 18:52"),  # evening run: now
+        ("2026-10-08", "2026-10-09 08:07", "2026-10-09 08:07"),  # next morning, before the open: now
+        ("2026-10-08", "2026-10-09 11:00", "2026-10-09 09:00"),  # during the next session: its open
+        ("2026-10-08", "2026-10-09 23:30", "2026-10-09 09:00"),  # late run, bar still Thu (Yahoo gap)
+        ("2026-10-09", "2026-10-10 12:00", "2026-10-10 12:00"),  # Saturday: Monday's open is later
+        ("2026-10-09", "2026-10-12 18:52", "2026-10-12 18:52"),  # holiday Monday evening: Tue's open later
+        ("2026-10-09", "2026-10-13 08:07", "2026-10-13 08:07"),  # Tuesday morning after the holiday
+        ("2026-10-09", "2026-10-13 11:00", "2026-10-13 09:00"),  # Tuesday session: Tue's open
+        ("2026-10-09", "2026-10-12 11:00", "2026-10-12 09:00"),  # holiday not known yet: assume trading
+    ],
+)
+def test_as_of_for_bar(bar, now, expected):
+    got = st.as_of_for_bar(bar, at(now), MARKET, dt.time(18, 0))
+    assert got == pd.Timestamp(expected, tz="Europe/Stockholm")
+
+
+def test_as_of_without_market_data_treats_weekdays_as_trading_days():
+    got = st.as_of_for_bar("2026-10-09", at("2026-10-13 11:00"), [], dt.time(18, 0))
+    assert got == pd.Timestamp("2026-10-12 09:00", tz="Europe/Stockholm")
+
+
 def test_releases_for_bar_window():
     r = frame(
         rel("before", "A", "2026-10-08T06:30:00Z"),  # 08:30 Thu -> Thu's open, bar Wed
         rel("in", "A", "2026-10-08T07:30:00Z"),  # 09:30 Thu -> bar Thu
         rel("night", "A", "2026-10-08T20:00:00Z"),  # 22:00 Thu -> bar Thu
+        rel("fri", "A", "2026-10-09T08:00:00Z"),  # 10:00 Fri -> bar Fri, never Thu
         rel("other", "B", "2026-10-08T07:30:00Z"),
         rel("agg", "A", "2026-10-08T07:30:00Z", source_type="aggregator"),
     )
-    evening = dt.datetime(2026, 10, 8, 16, 52, tzinfo=UTC)
+    evening = at("2026-10-08 18:52")
     assert list(st.releases_for_bar(r, "A", "2026-10-08", evening)["release_id"]) == ["in"]
-    morning = dt.datetime(2026, 10, 9, 6, 7, tzinfo=UTC)  # Fri 08:07, bar still Thu
-    assert list(st.releases_for_bar(r, "A", "2026-10-08", morning, False)["release_id"]) == ["in", "night"]
+    morning = at("2026-10-09 08:07")
+    assert list(st.releases_for_bar(r, "A", "2026-10-08", morning)["release_id"]) == ["in", "night"]
+    # a run during Friday's session still scoring Thursday's bar must not see Friday's release
+    as_of = st.as_of_for_bar("2026-10-08", at("2026-10-09 11:00"), MARKET, dt.time(18, 0))
+    assert list(st.releases_for_bar(r, "A", "2026-10-08", as_of)["release_id"]) == ["in", "night"]
 
 
-def test_releases_during_a_running_session_wait_for_that_days_bar():
-    r = frame(rel("fri", "A", "2026-10-09T08:00:00Z"))  # Fri 10:00
-    midday = dt.datetime(2026, 10, 9, 9, 0, tzinfo=UTC)  # Fri 11:00, bar = Thu
-    assert st.releases_for_bar(r, "A", "2026-10-08", midday, bar_complete_today=False).empty
-    # Holiday Monday evening: no Monday bar, so a Monday release belongs to Friday's bar
-    r = frame(rel("mon", "A", "2026-10-12T08:00:00Z"))
-    mon_evening = dt.datetime(2026, 10, 12, 16, 52, tzinfo=UTC)
-    assert list(st.releases_for_bar(r, "A", "2026-10-09", mon_evening, True)["release_id"]) == ["mon"]
+def test_holiday_release_belongs_to_the_bar_before():
+    r = frame(rel("mon", "A", "2026-10-12T08:00:00Z"))  # holiday Monday 10:00
+    as_of = st.as_of_for_bar("2026-10-09", at("2026-10-12 18:52"), MARKET, dt.time(18, 0))
+    assert list(st.releases_for_bar(r, "A", "2026-10-09", as_of)["release_id"]) == ["mon"]
 
 
 # --------------------------------------------------------------------------- points and blocking
