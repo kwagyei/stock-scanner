@@ -25,6 +25,10 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # the SDK is imported lazily at run time, so a run with LLM scoring off never loads it
+    import anthropic
 
 import pandas as pd
 
@@ -127,7 +131,7 @@ def check_prompt_unchanged(version: str, prompt: str, effort: str, register: boo
 # --------------------------------------------------------------------------- validation
 
 
-def validate(obj) -> str | None:
+def validate(obj: object) -> str | None:
     """None if obj matches SCHEMA (plus the ranges the API schema can't express), else the reason."""
     if not isinstance(obj, dict):
         return "not an object"
@@ -153,7 +157,7 @@ def validate(obj) -> str | None:
 # --------------------------------------------------------------------------- API call
 
 
-def make_client():
+def make_client() -> anthropic.Anthropic | None:
     """Anthropic client; the SDK reads ANTHROPIC_API_KEY itself. None if the key is not set."""
     if not os.environ.get("ANTHROPIC_API_KEY"):
         return None
@@ -162,7 +166,7 @@ def make_client():
     return anthropic.Anthropic()
 
 
-def _ask(client, cfg: dict, prompt: str, release: dict, name: str):
+def _ask(client: anthropic.Anthropic, cfg: dict, prompt: str, release: dict, name: str) -> anthropic.types.Message:
     llm = cfg["llm"]
     return client.messages.create(
         model=llm["model"],
@@ -184,7 +188,7 @@ def _ask(client, cfg: dict, prompt: str, release: dict, name: str):
     )
 
 
-def score_release(client, cfg: dict, prompt: str, release: dict, name: str = "") -> dict:
+def score_release(client: anthropic.Anthropic, cfg: dict, prompt: str, release: dict, name: str = "") -> dict:
     """Score one release: up to two attempts on invalid output. Never raises for API errors."""
     import anthropic
 
@@ -285,7 +289,7 @@ def run(
     releases: pd.DataFrame,
     scores: pd.DataFrame,
     backfill: bool = False,
-    client=None,
+    client: anthropic.Anthropic | None = None,
     names: dict | None = None,
     now: dt.datetime | None = None,
 ) -> tuple[pd.DataFrame, list[dict], list[str]]:
@@ -338,7 +342,7 @@ def run(
     return scores, new, warnings
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None = None) -> int:
     import yaml
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

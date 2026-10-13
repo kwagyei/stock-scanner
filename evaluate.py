@@ -30,6 +30,7 @@ import argparse
 import math
 import os
 import sys
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 import numpy as np
@@ -46,7 +47,7 @@ EVENT_DEFAULTS = {"min_events": 300, "horizons": [1, 5, 20]}
 DIRECTIONS = {"drop": "▼ Drop", "jump": "▲ Jump", "flat": "– No big move", "unknown": "? Unknown"}
 
 
-def direction(move, threshold: float = 0.10) -> str:
+def direction(move: object, threshold: float = 0.10) -> str:
     """Signal-day price move (a fraction: -0.112 = -11.2%) -> drop / jump / flat / unknown.
 
     Uses the same threshold as the score's price component (thresholds.price_move_1d).
@@ -275,11 +276,13 @@ EVENT_KEYS = [
 GROUPS = ["direction", "surprise", "event_type"]
 
 
-def event_columns(horizons) -> list[str]:
+def event_columns(horizons: Iterable[int]) -> list[str]:
     return EVENT_KEYS + [f"{k}_{h}d" for h in horizons for k in ("ret", "bench", "abn")]
 
 
-def event_outcomes(scored: pd.DataFrame, histories: dict, bench: pd.DataFrame, horizons, cost: float) -> pd.DataFrame:
+def event_outcomes(
+    scored: pd.DataFrame, histories: dict, bench: pd.DataFrame, horizons: Sequence[int], cost: float
+) -> pd.DataFrame:
     """Returns after each scored release: bought at the open of its entry day (strategies.entry_day_for),
     held to the close of the h-th trading day (h=1: the entry day's close). abn = return minus the
     benchmark over the same days, minus the round-trip `cost`; all in percent. Horizons not yet
@@ -331,7 +334,9 @@ def _long_short(ev_: pd.DataFrame, col: str) -> float | None:
     return float(up.mean() - down.mean())
 
 
-def event_study(events: pd.DataFrame | None, horizons=(1, 5, 20), min_events: int = 300, focus: int = 5) -> dict:
+def event_study(
+    events: pd.DataFrame | None, horizons: Iterable[int] = (1, 5, 20), min_events: int = 300, focus: int = 5
+) -> dict:
     """Abnormal returns grouped by direction / surprise / event_type at each horizon, plus the checks:
     returns rise with direction (monotonic), the up-minus-down spread is positive, holds in both
     halves of the sample and without the best event. NOT YET below `min_events` events with a
@@ -608,7 +613,7 @@ def format_markdown(res: dict) -> str:
     return "\n".join(out) + "\n"
 
 
-def _p(x, digits=1) -> str:
+def _p(x: float | None, digits: int = 1) -> str:
     return "–" if x is None else f"{x:+.{digits}f}%"
 
 
@@ -697,7 +702,7 @@ def format_report(res: dict, source: str = "data/paper_trades.csv", label: str =
     return "\n".join(lines) + "\n"
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None = None) -> int:
     d = defaults_from_config()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--file", default=str(PAPER_LOG))
