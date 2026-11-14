@@ -10,8 +10,10 @@ costs, whether acting on them would have made money.
 This project does both. Twice a day it scans ~100 Stockholm small caps, scores each one on a
 fixed set of rules, opens **paper trades** (it never places real orders) and keeps score
 against the small-cap index. A pre-registered evaluation decides **PASS / FAIL / NOT YET**,
-and it stays *NOT YET* until there is enough data to mean something. A second tool watches
-the news for risks to two funds and labels each story with a likely direction.
+and it stays *NOT YET* until there is enough data to mean something.
+
+**Also here: fund watch.** A smaller second tool reads the news for risks to two funds and
+labels each story with a likely direction.
 
 | Daily digest | Fund risk watch |
 |---|---|
@@ -68,12 +70,15 @@ Stockholm small-cap index over exactly the same days, after costs.
 - **Primary sources over aggregators.** Company releases come from MFN's per-company feed
   (which also carries Cision), because Google News indexes almost none of them.
 - **Experiments run side by side, never on top of each other.** `v0` (the original rules)
-  and `v0b` (only primary releases count, timed to when a trade was actually possible) are
-  separate paper books with the same exits and costs. An LLM-scored `v1` book is built and
-  tested (Claude with a JSON schema, a fingerprint that refuses edited prompts, a cost cap)
-  but **off by default** so the project runs at zero cost. v0 stays the unfiltered control;
-  lessons from the live results go into v0b (since 13 Oct: no re-entry within 10 weekdays of a
-  stop-loss, no buying right after a ±30% day), with the change date recorded.
+  and `v0b` are separate paper books with the same exits and costs. v0 stays the unfiltered
+  control. v0b counts only a company's own releases and enters only when a trade was
+  actually possible at that time. Lessons from the live results go into v0b alone, each with
+  the date it changed: since 13 Oct it does not buy again within 10 weekdays of a stop-loss,
+  or right after a ±30% day.
+- **An LLM-scored book is built but off by default**, so the project runs at zero cost.
+  `v1` asks Claude to score each release against a fixed JSON schema. A prompt's hash is
+  recorded on its first live use, so editing a prompt that has already scored trades is
+  refused (a change needs a new prompt version), and each run makes at most 50 calls.
 - **Free and unattended.** GitHub Actions runs the jobs; an external timer (cron-job.org)
   triggers them because GitHub's own schedule proved unreliable. Each run carries a "slot",
   so a backup or a late duplicate trigger skips itself instead of scanning twice.
@@ -100,7 +105,7 @@ Stockholm small-cap index over exactly the same days, after costs.
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt
-python scanner.py --no-email          # one scan; writes data/, reports/ and DASHBOARD.md here
+python scanner.py --no-email          # one scan; writes data/, reports/, DASHBOARD.md (gitignored)
 python evaluate.py --compare          # the verdict per strategy
 python fund-watch/fund_watch.py --no-email
 ```
@@ -114,7 +119,7 @@ external timer, e-mail, and how to read every page are in [docs/OPERATIONS.md](d
 ruff check . && ruff format --check . && python -m pytest -q
 ```
 
-~400 tests, all offline: price, news, MFN, Nasdaq and Anthropic calls are mocked, and a
+460+ tests, all offline: price, news, MFN, Nasdaq and Anthropic calls are mocked, and a
 socket guard fails any test that touches the network. They focus on the parts that are easy
 to get subtly wrong: trade entry and exit on gap days, timezone and holiday handling for
 release timing, data-gap repair, cost and benchmark arithmetic, the statistics behind the
@@ -141,7 +146,7 @@ CI runs lint and tests on every push and pull request.
   verdict (the report says how many) until the price appears.
 - **Keyword matching.** News signals and the fund watch's risk and direction labels read
   words, not meaning: commentary ("Forget the selloff: …") and op-eds get mislabelled.
-- **One large module.** `scanner.py` (~2,800 lines) mixes fetching, scoring and report
+- **One large module.** `scanner.py` (~3,000 lines) mixes fetching, scoring and report
   rendering; splitting the report builders out is the next refactor.
 - **The LLM experiment is untested in production.** It is fully built and unit-tested, but
   has never scored live releases, so its value is unknown.
