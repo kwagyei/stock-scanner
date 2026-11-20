@@ -61,28 +61,34 @@ The work is split over two repositories:
 
 | Repository | Holds | Runs |
 |---|---|---|
-| `stock-scanner` (public) | Code, tests, docs | CI only (lint + tests on every push) |
-| `stock-scanner-data` (private) | Everything the runs write: `data/`, `reports/`, `DASHBOARD.md`, `fund-watch/data/`, `fund-watch/reports/` | The scheduled scan and fund watch |
+| `stock-scanner` (public) | Code, tests, docs | CI, and the scheduled scan and fund watch |
+| `stock-scanner-data` (private) | Everything the runs write: `data/`, `reports/`, `DASHBOARD.md`, `fund-watch/data/`, `fund-watch/reports/` | Nothing |
 
-The data repository's workflows check out the latest code into `code/`, run it with
-`SCANNER_STATE_DIR` set to the data repository, and commit the output there. Because the code
-repository is public, no token is needed to read it. The deployed workflow files are kept,
-versioned with the code, in [`deploy/data-repo/`](../deploy/data-repo/).
+The scheduled workflows ([`scan.yml`](../.github/workflows/scan.yml),
+[`fund_watch.yml`](../.github/workflows/fund_watch.yml)) run in this public repository, where
+Actions minutes are free (scheduled runs in the private repository used up the monthly
+allowance; moved 2026-11-20). They check out the data repository with a `DATA_REPO_TOKEN`
+secret, run the code with `SCANNER_STATE_DIR` set to it, and commit the output there.
+
+Because this repository's run logs and artifacts are public:
+- `SCANNER_PUBLIC_RUN=1` keeps the report out of the log and the job summary;
+- nothing is uploaded as an artifact; the reports are in the data repository only.
 
 **Setting it up from scratch**
 
-1. Create a **private** repository, e.g. `stock-scanner-data`.
-2. Copy everything in `deploy/data-repo/` into it (keep the `.github/workflows/` paths).
-   If your code repository isn't `kwagyei/stock-scanner`, change `repository:` in both workflows.
-3. Go to its *Actions* tab and enable workflows if prompted.
-4. Open *attention-scan → Run workflow* to do a first run manually. The first run creates the
-   folders and the dashboard.
-5. Read the result in one of these places:
-   - **Dashboard:** `DASHBOARD.md` in the data repository.
-   - **Job summary:** *Actions → latest run → Summary*. Shows the alerts table.
-   - **Full digest:** `reports/latest.html`, or the *digest* artifact on the run page.
-6. Optional e-mail: set `email.enabled: true` in `config.yaml` and add these secrets under
-   *Settings → Secrets and variables → Actions* of the **data** repository:
+1. Create a **private** repository, e.g. `stock-scanner-data`, and copy
+   [`deploy/data-repo/README.md`](../deploy/data-repo/README.md) into it.
+2. Create a fine-grained token: repository access *Only select repositories →
+   stock-scanner-data*, permission *Contents: Read and write*. Save it in **this** repository
+   as the Actions secret `DATA_REPO_TOKEN`. If your repositories have other names, change
+   `repository:`, `DATA_REPO` and the `github.repository` check in both workflows.
+3. Open *attention-scan → Run workflow* here to do a first run manually. The first run
+   creates the folders and the dashboard in the data repository.
+4. Read the result in the data repository:
+   - **Dashboard:** `DASHBOARD.md`.
+   - **Full digest:** `reports/latest.html`.
+5. Optional e-mail: set `email.enabled: true` in `config.yaml` and add these secrets under
+   *Settings → Secrets and variables → Actions* of **this** repository:
    `SMTP_HOST`, `SMTP_PORT` (587), `SMTP_USER`, `SMTP_PASS`, `EMAIL_TO`.
    - For Outlook/Microsoft 365, use host `smtp.office365.com`. SMTP auth must be allowed
      on the account.
@@ -103,7 +109,7 @@ The `schedule:` lines stay in the workflows as a fallback; their late runs skip 
 **Setup** (done 8 Oct 2026; repeat if you ever move the repo)
 
 1. **GitHub token.** <https://github.com/settings/personal-access-tokens/new> (fine-grained):
-   repository access *Only select repositories → stock-scanner-data*, permission
+   repository access *Only select repositories → stock-scanner*, permission
    *Actions: Read and write*, nothing else. Copy it; GitHub shows it once. It lives only in
    cron-job.org. Never commit it or paste it anywhere else. It can start this repo's
    workflows but not read or change the code.
@@ -118,7 +124,8 @@ The `schedule:` lines stay in the workflows as a fallback; their late runs skip 
    | `X-GitHub-Api-Version` | `2022-11-28` |
    | `Content-Type` | `application/json` |
 
-   URL: `https://api.github.com/repos/kwagyei/stock-scanner-data/actions/workflows/<file>/dispatches`
+   URL: `https://api.github.com/repos/kwagyei/stock-scanner/actions/workflows/<file>/dispatches`
+   (until 2026-11-20 the workflows lived in `stock-scanner-data`; that URL no longer works).
 
    | Job | `<file>` | Request body | Schedule (Europe/Stockholm) |
    |---|---|---|---|

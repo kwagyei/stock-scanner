@@ -5,9 +5,8 @@ scan logs, paper trades, reports and the fund risk watch.
 
 **📊 [Open the dashboard](DASHBOARD.md)**
 
-The workflows in `.github/workflows/` check out the latest code from the public repository,
-run it with `SCANNER_STATE_DIR` pointing here, and commit the results. They are started by an
-external timer (cron-job.org); see the code repository's
+The scheduled workflows run in the public code repository (free Actions minutes; moved there
+on 2026-11-20) and commit their results here with a token that can write only to this
+repository. They are started by an external timer (cron-job.org); see the code repository's
 [docs/OPERATIONS.md](https://github.com/kwagyei/stock-scanner/blob/main/docs/OPERATIONS.md).
-Don't edit the workflows here directly: change them in `deploy/data-repo/` in the code
-repository and copy them over.
+This repository has no workflows of its own.

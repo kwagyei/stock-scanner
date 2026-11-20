@@ -109,10 +109,10 @@ false positives, and read the source.
 - Locally, from the `fund-watch/` folder: `python fund_watch.py` (requires
   `pip install feedparser PyYAML`). Report: `reports/fund_watch_latest.html`.
   `--all` shows everything in the news window without touching the seen-store or the log.
-- GitHub: the **fund-risk-watch** workflow in the private data repository (deployed copy in
-  `deploy/data-repo/.github/workflows/fund_watch.yml`) runs every day at 07:13 Stockholm,
-  started by the external timer, after the tests in `fund-watch/tests`. Its *Run workflow*
-  button triggers a manual run.
+- GitHub: the **fund-risk-watch** workflow (`.github/workflows/fund_watch.yml`, in this public
+  repository) runs every day at 07:13 Stockholm, started by the external timer, after the tests
+  in `fund-watch/tests`, and commits its output to the private data repository. Its *Run
+  workflow* button triggers a manual run.
 - E-mail: on (`email.enabled: true`), and it sends only when something is flagged. It needs
   five repository secrets (see below). The stock scanner uses the same secrets, but its own
   e-mail stays off (`email.enabled: false` in the root `config.yaml`).

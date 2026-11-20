@@ -82,8 +82,10 @@ Stockholm small-cap index over exactly the same days, after costs.
 - **Free and unattended.** GitHub Actions runs the jobs; an external timer (cron-job.org)
   triggers them because GitHub's own schedule proved unreliable. Each run carries a "slot",
   so a backup or a late duplicate trigger skips itself instead of scanning twice.
-- **Code and generated data live apart.** Runs write to a separate private data repository
-  (`SCANNER_STATE_DIR`), so this repository's history is code only.
+- **Code and generated data live apart.** The scheduled runs happen here (free Actions minutes
+  on a public repository) but write to a separate private data repository
+  (`SCANNER_STATE_DIR`), so this repository's history is code only. Their public logs carry
+  no reports (`SCANNER_PUBLIC_RUN`) and nothing is uploaded as an artifact.
 
 ## Repository layout
 
@@ -97,7 +99,8 @@ Stockholm small-cap index over exactly the same days, after costs.
 | `fund-watch/` | Fund news risk watch (see [`fund-watch/FUND_WATCH.md`](fund-watch/FUND_WATCH.md)) |
 | `config.yaml`, `watchlist.csv` | All thresholds and the universe |
 | `tests/`, `fund-watch/tests/` | Offline test suite: every network call is mocked |
-| `deploy/data-repo/` | The scheduled workflows, as deployed in the private data repository |
+| `.github/workflows/` | CI, and the scheduled scan and fund watch (writing to the data repository) |
+| `deploy/data-repo/` | The README for the private data repository |
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | Setup, scheduling, reading the results, maintenance |
 
 ## Running it

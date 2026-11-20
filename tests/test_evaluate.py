@@ -460,3 +460,27 @@ def test_cli_cost_override_in_every_spelling(tmp_path, capsys, args):
     path = log(tmp_path, HAND)
     ev.main(["--file", str(path), "--min-trades", "4", *args])
     assert "cost 0.50% per round trip" in capsys.readouterr().out
+
+
+def test_a_public_run_keeps_the_report_out_of_the_log_and_job_summary(scan_env, monkeypatch, capsys):
+    """Scheduled runs live in the public repository (2026-11-20), whose logs anyone can read:
+    with SCANNER_PUBLIC_RUN the report is written to the data folder only."""
+    tmp, wl, summary = scan_env
+    monkeypatch.setenv("SCANNER_PUBLIC_RUN", "1")
+    monkeypatch.setattr(scanner, "_now", lambda: dt.datetime(2026, 10, 7, 16, 45, tzinfo=dt.UTC))
+    scanner.main(["--no-email", "--watchlist", str(wl)])
+    out = capsys.readouterr().out
+    assert "Evaluation:" not in out and "not shown in public logs" in out
+    assert not summary.exists() or "Evaluation:" not in summary.read_text()
+    assert "Evaluation:" in (tmp / "reports" / "latest.html").read_text()  # still written
+
+
+def test_the_scheduled_workflows_run_here_and_upload_nothing():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+    for name in ("scan.yml", "fund_watch.yml"):
+        text = (root / name).read_text()
+        assert "upload-artifact" not in text, name  # artifacts on a public repo are public
+        assert 'SCANNER_PUBLIC_RUN: "1"' in text, name
+        assert "repository: kwagyei/stock-scanner-data" in text and "DATA_REPO_TOKEN" in text

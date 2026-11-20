@@ -1100,10 +1100,15 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     md = build_markdown(results, now_local)
-    if os.environ.get("GITHUB_STEP_SUMMARY"):
-        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
-            fh.write(md)
-    print(md)
+    # Scheduled runs live in the public repository, whose logs anyone can read: there the
+    # report goes only to the private data repository (SCANNER_PUBLIC_RUN=1).
+    if os.environ.get("SCANNER_PUBLIC_RUN", "").strip() in {"1", "true", "yes"}:
+        print("[info] report written to the data repository (not shown in public logs)")
+    else:
+        if os.environ.get("GITHUB_STEP_SUMMARY"):
+            with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
+                fh.write(md)
+        print(md)
 
     e = cfg.get("email", {})
     any_flagged = any(r["flagged"] for r in results)

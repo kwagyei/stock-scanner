@@ -123,6 +123,13 @@ DEFAULT_UNIVERSE = "v1"  # trades from before watchlist versioning (the hand-pic
 # --------------------------------------------------------------------------- config
 
 
+def public_run() -> bool:
+    """True when the run's logs are public (SCANNER_PUBLIC_RUN=1, set by the scheduled
+    workflows in the public repository): reports must then stay out of the log and the job
+    summary, because they belong in the private data repository only."""
+    return os.environ.get("SCANNER_PUBLIC_RUN", "").strip() in {"1", "true", "yes"}
+
+
 def load_config(path: Path) -> dict:
     with open(path, encoding="utf-8") as fh:
         return yaml.safe_load(fh)
@@ -2963,11 +2970,16 @@ def main(argv: list[str] | None = None) -> int:
     (REPORT_DIR / "latest.html").write_text(html, encoding="utf-8")
 
     md = build_markdown(rows, summary, cfg, now_local, digest_eval)
-    gh_summary = os.environ.get("GITHUB_STEP_SUMMARY")
-    if gh_summary:
-        with open(gh_summary, "a", encoding="utf-8") as fh:
-            fh.write(md)
-    print(md)
+    if public_run():
+        # The scheduled runs live in the public repository, whose logs and job summaries
+        # anyone can read: the report goes only to the private data repository.
+        print("[info] report written to the data repository (not shown in public logs)")
+    else:
+        gh_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+        if gh_summary:
+            with open(gh_summary, "a", encoding="utf-8") as fh:
+                fh.write(md)
+        print(md)
 
     weekly_html = None
     if refresh_weekly and not weekly:
