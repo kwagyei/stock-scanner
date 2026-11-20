@@ -1,5 +1,6 @@
-# Lives in the private data repository (kwagyei/stock-scanner-data); kept here as the deployed version.
-# Runs the public code and commits its output to the data repository.
+# Runs the code in this public repository and commits its output to the private data
+# repository (kwagyei/stock-scanner-data). Moved here from the data repository on
+# 2026-11-20, because scheduled runs in a private repository use up paid Actions minutes.
 name: attention-scan
 
 on:
@@ -23,8 +24,12 @@ on:
         type: boolean
         default: false
 
+# Runs here, in the public code repository, so it uses no paid Actions minutes; everything it
+# writes goes to the private data repository through DATA_REPO_TOKEN (a fine-grained token
+# with Contents: read and write on kwagyei/stock-scanner-data only). The logs here are public,
+# so SCANNER_PUBLIC_RUN keeps the reports out of them and nothing is uploaded as an artifact.
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: attention-scan
@@ -42,7 +47,8 @@ jobs:
     steps:
       - id: check
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+          DATA_REPO: kwagyei/stock-scanner-data
           SLOT: >-
             ${{ inputs.slot
                 || (github.event.schedule == '7 17 * * 1-5' && 'evening')
@@ -60,21 +66,24 @@ jobs:
             exit 0
           fi
           since=$(date -u -d "TZ=\"Europe/Stockholm\" $day $from" +%Y-%m-%dT%H:%M:%SZ)
-          n=$(gh api "repos/$GITHUB_REPOSITORY/commits?sha=main&since=$since&per_page=100" \
+          n=$(gh api "repos/$DATA_REPO/commits?sha=main&since=$since&per_page=100" \
                 --jq '[.[] | select(.commit.message | startswith("scan "))] | length')
           echo "$SLOT slot: scan commits since $since: $n"
           if [ "$n" -gt 0 ]; then echo "skip=true" >> "$GITHUB_OUTPUT"; echo "Already scanned in this slot; skipping."; fi
 
   scan:
     needs: slot
-    if: needs.slot.outputs.skip != 'true'
+    # Only here: a fork has no DATA_REPO_TOKEN and must not try.
+    if: needs.slot.outputs.skip != 'true' && github.repository == 'kwagyei/stock-scanner'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4            # this data repository: where the output goes
-
-      - uses: actions/checkout@v4            # the code, always the latest main
+      - uses: actions/checkout@v4            # the private data repository: where the output goes
         with:
-          repository: kwagyei/stock-scanner
+          repository: kwagyei/stock-scanner-data
+          token: ${{ secrets.DATA_REPO_TOKEN }}
+
+      - uses: actions/checkout@v4            # this repository's code, latest main
+        with:
           path: code
 
       - uses: actions/setup-python@v5
@@ -92,6 +101,7 @@ jobs:
       - name: Run scanner
         env:
           SCANNER_STATE_DIR: ${{ github.workspace }}
+          SCANNER_PUBLIC_RUN: "1"                # reports stay out of these public logs
           SCANNER_CODE_URL: https://github.com/kwagyei/stock-scanner/blob/main
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
@@ -100,13 +110,6 @@ jobs:
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}   # LLM release scoring; read by the SDK only
         run: python code/scanner.py ${{ inputs.weekly && '--weekly' || '' }}
-
-      - name: Upload digest
-        uses: actions/upload-artifact@v4
-        with:
-          name: digest
-          path: reports/latest.html
-          retention-days: 30
 
       - name: Commit output
         run: |

@@ -17,7 +17,7 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-SCAN_WORKFLOW = ROOT / "deploy" / "data-repo" / ".github" / "workflows" / "scan.yml"
+SCAN_WORKFLOW = ROOT / ".github" / "workflows" / "scan.yml"
 STOCKHOLM = ZoneInfo("Europe/Stockholm")
 SUMMER, WINTER = dt.date(2026, 7, 15), dt.date(2026, 11, 18)  # CEST (UTC+2), CET (UTC+1)
 
